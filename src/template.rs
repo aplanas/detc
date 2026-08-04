@@ -161,20 +161,31 @@ impl Templates {
         &self.templates
     }
 
-    /// Find the template that instantiates `target`.
+    /// Get the template that instantiates `target`, if there is one.
     ///
     /// The target can be addressed with the path that it has in the root file
     /// system, like `/etc/ssh/ssh.conf`, or with the path that it has in the
     /// current system, which is only different when the root is not `/`.
-    pub fn find(&self, target: impl AsRef<Path>) -> Result<&Template> {
+    ///
+    /// A caller that is looking for the object behind a name, and does not yet
+    /// know which kind of object it is, wants this rather than [`Self::find`]:
+    /// a template that is not here is then an answer, and not an error to be
+    /// reported in the place of the one that finds it.
+    pub fn get(&self, target: impl AsRef<Path>) -> Option<&Template> {
         let target = target.as_ref();
         let rooted = self.root.join(target.strip_prefix("/").unwrap_or(target));
 
-        match self
-            .templates
+        self.templates
             .iter()
             .find(|t| t.target() == target || t.target() == rooted)
-        {
+    }
+
+    /// Find the template that instantiates `target`, and report that there is
+    /// none when there is none.
+    pub fn find(&self, target: impl AsRef<Path>) -> Result<&Template> {
+        let target = target.as_ref();
+
+        match self.get(target) {
             Some(template) => Ok(template),
             None => err!("There is no template for {}", target.display()),
         }

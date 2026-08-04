@@ -107,8 +107,11 @@ method ListTypes() -> (type: ?string)
 # The objects of the system, of one type or of all of them.  Streaming.
 method List(type: ?string) -> (object: ?Object)
 
-# What a template would write in the system, or the state a resource declares.
-# With `raw`, the file as it was written, before the namespace reaches it.
+# What a template would write in the system, the state a resource declares, or
+# the program a probe or a provider is.  `name` addresses the object the way
+# `List` reports it, and `type` says which type to look in when the name alone
+# would be read as another one.  With `raw`, the file as it was written, before
+# the namespace reaches it; a program is never expanded.
 method Cat(
   name: string,
   type: ?string,

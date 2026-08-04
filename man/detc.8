@@ -167,18 +167,33 @@ List the types instead of the objects.
 .BR \-t ", " \-\-type " " \fITYPE\fR
 List only that type.
 .
-.SS detc cat FILE
-Show the content a template would write to
-.IR FILE ,
-instantiated against the namespace of this machine.
+.SS detc cat OBJECT
+Show what
+.I OBJECT
+holds: the content a template would write, instantiated against the namespace
+of this machine, the declaration of a resource expanded the same way, or the
+program that a probe or a provider is.
+.PP
+.I OBJECT
+is addressed the way
+.B detc list
+prints it, and either column of that line will do: the file a template
+instantiates, the
+.IR type / name
+of a resource, the mount point a probe feeds or its path, and the type a
+provider implements or its path.
 .TP
 .B \-\-raw
-Show the template itself instead of the instantiated content.
+Show the template or the declaration as it was written, before the variables
+reach it.  A probe and a provider are never expanded, and are always shown as
+they are.
 .TP
 .BR \-t ", " \-\-type " " \fITYPE\fR
 Which type
-.I FILE
-names.
+.I OBJECT
+names, guessed from the name when it is left out.  A type also reads a program
+that is not installed as one, which is how a probe is tried before it is
+shipped.
 .
 .SS detc check [FILE]
 Check that the objects can be instantiated: that every template renders, that

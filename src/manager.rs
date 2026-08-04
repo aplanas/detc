@@ -392,14 +392,14 @@ pub(crate) fn call(command: &Commands, dry_run: bool) -> Result<(&'static Method
         ),
 
         Commands::Cat {
-            file,
+            object,
             r#type,
             raw,
             var,
         } => (
             "Cat",
             varlink::parameters(&CatParams {
-                name: name(file),
+                name: name(object),
                 r#type: r#type.clone(),
                 raw: *raw,
                 var: Var::of(var)?,
@@ -544,7 +544,7 @@ pub(crate) fn command(method: &Method, parameters: Option<Value>) -> Result<(Com
 
             (
                 Commands::Cat {
-                    file: PathBuf::from(params.name),
+                    object: PathBuf::from(params.name),
                     r#type: params.r#type,
                     raw: params.raw,
                     var: params.var.into(),
@@ -952,7 +952,7 @@ mod tests {
             ),
             (
                 Commands::Cat {
-                    file: PathBuf::from("/etc/hosts"),
+                    object: PathBuf::from("/etc/hosts"),
                     r#type: None,
                     raw: true,
                     var: var(&[], &[], &[]),

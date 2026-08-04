@@ -678,11 +678,29 @@ provider  unit                                 /usr/libexec/detc/providers.d/uni
 `--type probe|template|resource|provider` narrows the list down, and `--types`
 prints the types themselves.
 
-### `detc cat <file>`
+### `detc cat <object>`
 
-Show the content that a template would write in the system.  `--raw` shows the
-template instead.  `--type resource <type>/<name>` shows the expanded
-declaration of a resource.
+Show what an object holds: the content that a template would write in the
+system, the declaration of a resource expanded against the namespace, or the
+program that a probe or a provider is.  `--raw` shows a template or a
+declaration as it was written, before the variables reach it; a program is
+never expanded, and is always shown as it is.
+
+An object is addressed the way [`detc list`](#detc-list) prints it — either
+column of that line will do, so a probe is named by the mount point it feeds or
+by its path, and a provider by the type it implements or by its path.  The type
+is guessed from the name, and `--type` says which one to look in when the guess
+would be wrong.
+
+```console
+$ detc cat /etc/ssh/sshd_config.d/60-detc.conf   # what would be written
+$ detc cat --raw unit/nginx                      # the declaration, unexpanded
+$ detc cat system.disk                           # the probe behind a variable
+$ detc cat --type provider unit                  # the program that applies it
+```
+
+A path of a program is enough on its own with `--type`, which is how one is
+read before it is installed as anything.
 
 ### `detc check [file]`
 

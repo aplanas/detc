@@ -144,16 +144,18 @@ pub(crate) enum Commands {
         r#type: String,
     },
 
-    /// Show the content of a template or command
+    /// Show what a template, a resource, a probe or a provider holds
     Cat {
-        /// Configuration file instantiated by the template
-        file: PathBuf,
+        /// Object to show: the file a template instantiates, the <type>/<name>
+        /// of a resource, or the name or the path of a probe or a provider
+        object: PathBuf,
 
-        /// Type (list --types for all the possible types)
+        /// Type (list --types for all the possible types), guessed by default
         #[arg(short, long)]
         r#type: Option<String>,
 
-        /// Show the template, instead of the instantiated content
+        /// Show the template or the declaration, instead of the instantiated
+        /// content.  A probe and a provider are always shown as they are
         #[arg(long)]
         raw: bool,
 
@@ -448,8 +450,8 @@ fn fetch(url: &str) -> Result<Vec<u8>> {
     )
 }
 
-/// Validate the type of object requested in the command line.  Only the
-/// templates are implemented, so the type is optional.
+/// Validate the type of object requested in the command line.  The type is
+/// optional, as the name that addresses an object usually says which one it is.
 fn check_type(kind: Option<&str>) -> Result<()> {
     match kind {
         None => Ok(()),
@@ -458,21 +460,91 @@ fn check_type(kind: Option<&str>) -> Result<()> {
     }
 }
 
-/// Resolve a probe, that can be addressed with its own path, or with the tail
-/// of the path of one of the available probes.
+/// Get the probe that `probe` addresses among the ones that the system has
+/// installed, if there is one.
+///
+/// Either of the two names that `detc list` prints for a probe addresses it:
+/// the mount point that it feeds, or the path of the program, which can be
+/// abbreviated to a tail of itself.  A mount point is a directory and can hold
+/// several probes, so a name that matches more than one is an error, reported
+/// with what it matched instead of one of them being picked.
+///
+/// Not being here is `None` and not an error, because the two say different
+/// things to a caller that is still looking: a name that nothing has leaves
+/// the other types to try, and an ambiguous one is already answered.
+fn get_probe(probe: &Path, root: &Path) -> Result<Option<PathBuf>> {
+    let name = probe.to_string_lossy();
+    let rooted = root.join(probe.strip_prefix("/").unwrap_or(probe));
+
+    let matched: Vec<PathBuf> = var::Variables::probes(root)?
+        .into_iter()
+        .filter(|(mount, path)| *mount == name || path.ends_with(probe) || *path == rooted)
+        .map(|(_, path)| path)
+        .collect();
+
+    match matched.as_slice() {
+        [] => Ok(None),
+        [path] => Ok(Some(path.clone())),
+        paths => err!(
+            "{name} addresses {} probes, so it does not say which one: {}",
+            paths.len(),
+            paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// Resolve a probe, that can be one of the system, or a file that is not
+/// installed as one — which is how a probe is tried before it is shipped.
 fn resolve_probe(probe: &Path, root: &Path) -> Result<PathBuf> {
     if probe.is_file() {
         return Ok(probe.to_path_buf());
     }
 
-    match var::Variables::probes(root)?
-        .into_iter()
-        .map(|(_, path)| path)
-        .find(|path| path.ends_with(probe))
-    {
+    match get_probe(probe, root)? {
         Some(path) => Ok(path),
-        None => err!("Probe {} not found", probe.display()),
+        None => err!(
+            "There is no probe {}, use `detc list --type probe`",
+            probe.display()
+        ),
     }
+}
+
+/// Get the program of the provider that `provider` addresses, if the system has
+/// one.
+///
+/// As with a probe, either of the two names that `detc list` prints addresses
+/// it: the type of resource that the provider implements, or the path of the
+/// program, which can be abbreviated to a tail of itself.  A type names one
+/// provider and one only, so there is no ambiguity to report here.
+fn get_provider(provider: &Path, root: &Path) -> Result<Option<PathBuf>> {
+    let name = provider.to_string_lossy();
+    let rooted = root.join(provider.strip_prefix("/").unwrap_or(provider));
+
+    Ok(provider::Providers::from_system(root)?
+        .providers()
+        .find(|p| p.kind() == name || p.path().ends_with(provider) || p.path() == rooted)
+        .map(|found| found.path().to_path_buf()))
+}
+
+/// Resolve a provider, that can be one of the system, or a file that is not
+/// installed as one — which is how a provider is tried before it is shipped.
+fn resolve_provider(provider: &Path, root: &Path) -> Result<PathBuf> {
+    if let Some(path) = get_provider(provider, root)? {
+        return Ok(path);
+    }
+
+    if provider.is_file() {
+        return Ok(provider.to_path_buf());
+    }
+
+    err!(
+        "There is no provider {}, use `detc list --type provider`",
+        provider.display()
+    )
 }
 
 /// List the objects of the system, one per line, as the type of the object, the
@@ -561,40 +633,127 @@ fn find_provider(root: &Path, kind: &str) -> Result<provider::Provider> {
     Ok(provider::Providers::from_system(root)?.find(kind)?.clone())
 }
 
-/// Show the content that a template would write in the system, or the desired
-/// state that a resource declares.  `--raw` shows the file as it was written,
-/// before the variables of the namespace reach it.
+/// One object of the system, resolved from the name that addressed it.
+///
+/// A template and a resource are documents that the namespace expands; a probe
+/// and a provider are programs, and what there is to show of one is the program
+/// itself.
+enum Object {
+    Template(template::Template),
+    Resource(resource::Resource),
+    Probe(PathBuf),
+    Provider(PathBuf),
+}
+
+/// Resolve the object that `name` addresses, of the type that was named or of
+/// whichever type has it.
+fn resolve_object(root: &Path, name: &Path, kind: Option<&str>) -> Result<Object> {
+    match kind {
+        Some(kind) => resolve_typed_object(root, name, kind),
+        None => guess_object(root, name),
+    }
+}
+
+/// Resolve an object of the type that was named.
+///
+/// The type answers for itself, so a name that it does not have is reported by
+/// it, in its own words, and a program is read even where the system has not
+/// installed it as one: naming a type is how a probe is tried before it is
+/// shipped.
+fn resolve_typed_object(root: &Path, name: &Path, kind: &str) -> Result<Object> {
+    match kind {
+        "probe" => resolve_probe(name, root).map(Object::Probe),
+        "provider" => resolve_provider(name, root).map(Object::Provider),
+
+        "template" => template::Templates::from_system(root)?
+            .find(name)
+            .map(|template| Object::Template(template.clone())),
+
+        "resource" => resource::Resources::from_system(root)?
+            .find(&name.to_string_lossy())
+            .map(|resource| Object::Resource(resource.clone())),
+
+        kind => unreachable!("{kind} is a type that check_type does not accept"),
+    }
+}
+
+/// Resolve an object when no type was named, by looking in every type in the
+/// order that `--types` prints them, and taking the first that has the name.
+///
+/// What `detc list` shows should be enough to ask about an object, without
+/// having to introduce a probe as a probe before it can be read.  Only the
+/// programs that the system has installed are looked at, unlike when a type is
+/// named: a name that is merely a file of the machine would otherwise be read
+/// as a probe, and no other type would ever be reached.
+fn guess_object(root: &Path, name: &Path) -> Result<Object> {
+    let id = name.to_string_lossy();
+
+    if let Some(path) = get_probe(name, root)? {
+        return Ok(Object::Probe(path));
+    }
+
+    if let Some(template) = template::Templates::from_system(root)?.get(name) {
+        return Ok(Object::Template(template.clone()));
+    }
+
+    if let Some(resource) = resource::Resources::from_system(root)?.get(&id) {
+        return Ok(Object::Resource(resource.clone()));
+    }
+
+    if let Some(path) = get_provider(name, root)? {
+        return Ok(Object::Provider(path));
+    }
+
+    err!(
+        "There is no template, resource, probe or provider for {id}; `detc list` shows the objects of the system, and --type says which of them to look in"
+    )
+}
+
+/// Show what an object of the system holds: the content that a template would
+/// write, the state that a resource declares, or the program that a probe or a
+/// provider is.
+///
+/// `--raw` shows a template or a declaration as it was written, before the
+/// variables of the namespace reach it.  A program is never expanded, so it is
+/// always shown as it is.
 fn cat(
     out: &mut dyn Sink,
     root: &Path,
-    file: &Path,
+    name: &Path,
     kind: Option<&str>,
     raw: bool,
     args: &VarArgs,
 ) -> Result<()> {
     check_type(kind)?;
 
-    let text = if kind == Some("resource") {
-        let resources = resource::Resources::from_system(root)?;
-        let resource = resources.find(&file.to_string_lossy())?;
-
-        if raw {
-            resource.content()?
-        } else {
-            resource.render(args.variables(root)?.value())?
-        }
-    } else {
-        let templates = template::Templates::from_system(root)?;
-        let template = templates.find(file)?;
-
-        if raw {
-            template.content()?
-        } else {
-            template.render(args.variables(root)?.value())?
-        }
+    let text = match resolve_object(root, name, kind)? {
+        Object::Template(template) if raw => template.content()?,
+        Object::Template(template) => template.render(args.variables(root)?.value())?,
+        Object::Resource(resource) if raw => resource.content()?,
+        Object::Resource(resource) => resource.render(args.variables(root)?.value())?,
+        Object::Probe(path) => program(&path, "probe")?,
+        Object::Provider(path) => program(&path, "provider")?,
     };
 
     out.emit(Record::Text(text))
+}
+
+/// Read the program that a probe or a provider is.
+///
+/// Both are usually scripts, and reading one is the point of asking for it.  A
+/// compiled program says that it is one, instead of writing bytes that are not
+/// text to a terminal.
+fn program(path: &Path, kind: &str) -> Result<String> {
+    let bytes =
+        fs::read(path).map_err(|e| format!("Cannot read {kind} {}: {e}", path.display()))?;
+
+    match String::from_utf8(bytes) {
+        Ok(text) => Ok(text),
+        Err(_) => err!(
+            "The {kind} {} is a compiled program and not a script, so there is nothing to show",
+            path.display()
+        ),
+    }
 }
 
 /// Report the status of an object, and say whether it cannot be instantiated.
@@ -1406,11 +1565,11 @@ pub(crate) fn dispatch(
     match command {
         Commands::List { types, r#type } => list(out, root, *types, r#type.as_deref()),
         Commands::Cat {
-            file,
+            object,
             r#type,
             raw,
             var,
-        } => cat(out, root, file, r#type.as_deref(), *raw, var),
+        } => cat(out, root, object, r#type.as_deref(), *raw, var),
         Commands::Check { file, r#type, var } => {
             check(out, root, file.as_deref(), r#type.as_deref(), var)
         }

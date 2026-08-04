@@ -269,14 +269,28 @@ impl Resources {
         &self.resources
     }
 
-    /// Find a resource by the `<type>/<name>` that addresses it.  The extension
-    /// is optional, as it is not part of the name.
-    pub fn find(&self, id: &str) -> Result<&Resource> {
+    /// Get the resource that `<type>/<name>` addresses, if there is one.  The
+    /// extension is optional, as it is not part of the name.
+    ///
+    /// A caller that is looking for the object behind a name, and does not yet
+    /// know which kind of object it is, wants this rather than [`Self::find`]:
+    /// a resource that is not here is then an answer, and not an error to be
+    /// reported in the place of the one that finds it.
+    pub fn get(&self, id: &str) -> Option<&Resource> {
         let id = strip_extension(id);
 
-        match self.resources.iter().find(|r| r.id() == id) {
+        self.resources.iter().find(|r| r.id() == id)
+    }
+
+    /// Find the resource that `<type>/<name>` addresses, and report that there
+    /// is none when there is none.
+    pub fn find(&self, id: &str) -> Result<&Resource> {
+        match self.get(id) {
             Some(resource) => Ok(resource),
-            None => err!("There is no resource {id}, use `detc list --type resource`"),
+            None => err!(
+                "There is no resource {}, use `detc list --type resource`",
+                strip_extension(id)
+            ),
         }
     }
 }

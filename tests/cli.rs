@@ -111,10 +111,123 @@ fn test_cat_instantiates_a_template() -> TestResult {
         "{output:?}"
     );
 
+    // A name that no type of object has says so, and names the types that were
+    // looked in rather than the one that happens to be tried last
     let output = detc(root, &["cat", "/etc/hostname"]);
     assert!(!output.status.success());
     assert!(
+        stderr(&output).contains("There is no template, resource, probe or provider for"),
+        "{output:?}"
+    );
+
+    // A type restricts the search to it, and answers as that type
+    let output = detc(root, &["cat", "--type", "template", "/etc/hostname"]);
+    assert!(!output.status.success());
+    assert!(
         stderr(&output).contains("There is no template for"),
+        "{output:?}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_cat_shows_every_type_of_object() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    // A resource is expanded against the namespace, and `--raw` shows the
+    // declaration as it was written
+    let output = detc(root, &["cat", "--type", "resource", "unit/nginx"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("enabled: \"true\""), "{output:?}");
+
+    let output = detc(root, &["cat", "--raw", "unit/nginx"]);
+    assert!(stdout(&output).contains("{{ web.enabled }}"), "{output:?}");
+
+    // A probe and a provider are programs, and what is shown is the program.
+    // Both are addressed the way `detc list` prints them: a probe by the mount
+    // point it feeds or by its path, a provider by the type it implements
+    let probe = root.join("usr/libexec/detc/probes/system.d/10-net");
+    let expected = fs::read_to_string(&probe)?;
+
+    for name in [
+        "system",
+        "10-net",
+        "system.d/10-net",
+        &probe.display().to_string(),
+    ] {
+        let output = detc(root, &["cat", "--type", "probe", name]);
+        assert!(output.status.success(), "{name}: {}", stderr(&output));
+        assert_eq!(stdout(&output), expected, "{name}");
+    }
+
+    // And without a type, because the name is enough to find it
+    let output = detc(root, &["cat", "10-net"]);
+    assert_eq!(stdout(&output), expected, "{output:?}");
+
+    let output = detc(root, &["cat", "--type", "provider", "unit"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("Manage a unit"), "{output:?}");
+
+    let output = detc(root, &["cat", "unit"]);
+    assert!(stdout(&output).contains("Manage a unit"), "{output:?}");
+
+    // The message names the type that was asked for, and not another one
+    let output = detc(root, &["cat", "--type", "probe", "nope"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("There is no probe nope"),
+        "{output:?}"
+    );
+
+    let output = detc(root, &["cat", "--type", "provider", "nope"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("There is no provider nope"),
+        "{output:?}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_cat_says_what_it_cannot_show() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    // A mount point is a directory, so it can hold more than one probe.  A name
+    // that addresses several is answered with the ones it addresses, and not
+    // with one of them, nor as a name that nothing has
+    program(
+        &root.join("usr/libexec/detc/probes/system.d/20-more"),
+        "echo '{}'\n",
+    )?;
+
+    for arguments in [
+        vec!["cat", "system"],
+        vec!["cat", "--type", "probe", "system"],
+    ] {
+        let output = detc(root, &arguments);
+        assert!(!output.status.success(), "{arguments:?}");
+        let reported = stderr(&output);
+        assert!(reported.contains("system addresses 2 probes"), "{reported}");
+        assert!(reported.contains("10-net"), "{reported}");
+        assert!(reported.contains("20-more"), "{reported}");
+    }
+
+    // A provider that is a compiled program says so, instead of writing bytes
+    // that are not text
+    let binary = root.join("usr/libexec/detc/providers.d/binary");
+    fs::write(&binary, [0x7f, b'E', b'L', b'F', 0xff, 0xfe])?;
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755))?;
+
+    let output = detc(root, &["cat", "binary"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("is a compiled program and not a script"),
         "{output:?}"
     );
 
