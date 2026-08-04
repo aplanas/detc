@@ -1,0 +1,320 @@
+#!/bin/sh
+
+# A path of the file system: whether it is there, what kind of thing it is, and
+# who may do what with it.  Not what is in it -- that is a template.
+#
+# The name of the resource is the path itself, relative to the root and without
+# a leading slash, which is the same string that names a template and the same
+# string that `detc.files` is keyed by.  A resource declared in
+# `resources.d/path/etc/sudoers.d/60-detc` is about the file that
+# `templates.d/etc/sudoers.d/60-detc` writes.  One spelling, everywhere.
+#
+# Files and directories are one provider and not two because the half that is
+# worth declaring -- the mode, the owner, the group -- is the same for both, and
+# a fleet that had to remember which of two types a path was would get it wrong.
+# A symlink is here for the same reason, and is what makes `/etc/localtime` a
+# declaration rather than a provider of its own.
+#
+# When this runs matters, and a declaration says so with `_order`:
+#
+#   * at the default 60, after the templates.  The mode and the owner are put
+#     right once the content is there, which is what almost everything wants.
+#     A file created by this run is briefly whatever the template wrote it as.
+#
+#   * at 10, before them.  `ensure: file` makes it empty with the right mode,
+#     and detc keeps the mode of a file that already exists when it writes it,
+#     so the mode is never once wrong.  This is what `/etc/sudoers.d` needs,
+#     because `sudo` ignores a drop-in that anyone but root can write.
+#
+# Names of accounts and groups are resolved against the tree, not against the
+# machine doing the asking, and `chown` is given the numbers: uid 0 is root
+# everywhere, but uid 476 is a different service on every distribution.
+
+set -eu
+
+fail() {
+    echo "path: $*" >&2
+    exit 1
+}
+
+# The state that the declaration asks for, as `key<tab>value` lines.
+#
+# This is the same reader as in the other core providers, copied rather than
+# shared, because a provider is one executable and a fleet replaces it by
+# dropping one file of its own into a prefix.  A change to one of them is a
+# change to all of them.
+#
+# Only the object under `desired` is read, and only the shapes that a schema
+# here declares: strings, numbers, booleans, and arrays of those, which become
+# their elements joined by a comma.  The request arrives compact, the way detc
+# writes it, so there is no whitespace to step over.
+desired() {
+    awk '
+{
+  s = $0
+  n = length(s)
+  i = index(s, "\"desired\":{") + 11
+  if (i == 11 || substr(s, i, 1) == "}") exit
+  while (i <= n) {
+    k = str()
+    i++
+    print k "\t" val()
+    if (substr(s, i, 1) != ",") exit
+    i++
+  }
+}
+
+function str(   out, c) {
+  i++
+  out = ""
+  while (i <= n) {
+    c = substr(s, i, 1)
+    i++
+    if (c == "\"") return out
+    if (c == "\\") {
+      c = substr(s, i, 1)
+      i++
+      if (c == "n") c = "\n"
+      else if (c == "t") c = "\t"
+      else if (c == "u") { c = " "; i += 4 }
+    }
+    out = out c
+  }
+  return out
+}
+
+function val(   out, c) {
+  c = substr(s, i, 1)
+  if (c == "\"") return str()
+  if (c == "{") { print "an object is not a property this reads" > "/dev/stderr"; exit 1 }
+  if (c == "[") {
+    i++
+    out = ""
+    if (substr(s, i, 1) == "]") { i++; return out }
+    while (i <= n) {
+      out = out val()
+      c = substr(s, i, 1)
+      i++
+      if (c == "]") return out
+      out = out ","
+    }
+    return out
+  }
+  out = ""
+  while (i <= n && index(",}", substr(s, i, 1)) == 0) {
+    out = out substr(s, i, 1)
+    i++
+  }
+  return out
+}
+'
+}
+
+# The name of the object, out of the request.  The keys arrive in the order that
+# a JSON map sorts them, which puts `name` after `current`, `desired` and
+# `diff` -- last, in both requests -- so the one at the end of the line is the
+# top level one and a `name` inside the declaration is not mistaken for it.
+name_of() {
+    sed -n 's/.*,"name":"\([^"]*\)"}$/\1/p'
+}
+
+yaml() {
+    printf '%s: "%s"\n' "$1" "$(printf '%s' "$2" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+}
+
+root=${DETC_ROOT:-/}
+
+# The number of an account or a group, out of the tree.  A declaration that
+# wrote a number instead of a name gets it back unchanged.
+number_of() {
+    case "$2" in
+      "") return ;;
+      *[!0-9]*) ;;
+      *) printf '%s' "$2"; return ;;
+    esac
+    awk -F: -v name="$2" '$1 == name { print $3; exit }' "$root/etc/$1" 2>/dev/null || true
+}
+
+# And the other way, for reporting: the name that the number belongs to, or the
+# number when nothing in the tree claims it.
+name_from() {
+    found=$(awk -F: -v number="$2" '$3 == number { print $1; exit }' "$root/etc/$1" 2>/dev/null || true)
+    printf '%s' "${found:-$2}"
+}
+
+# The value that the declaration gave for a property, or nothing.
+declared() {
+    printf '%s' "$request" | desired | awk -F'\t' -v k="$1" '$1 == k { print $2; exit }'
+}
+
+case "${1-}" in
+  schema)
+    cat <<'EOF'
+description: A path, and who may do what with it
+order: 60
+properties:
+  ensure:
+    type: string
+    description: >-
+      What has to be at the path: `file`, `directory`, `symlink` or `absent`.
+      A path that is not there at all reports `absent`, so that `absent` is a
+      state that converges.
+    default: file
+  mode:
+    type: string
+    description: >-
+      The permissions, in octal and quoted, as `chmod` takes them.  It is
+      reported back with as many digits as it was declared with, so `"644"` and
+      `"0644"` are both the same state as the one they describe.  A symlink has
+      no mode of its own and ignores it.
+  owner:
+    type: string
+    description: The account that owns it, by name or by number
+  group:
+    type: string
+    description: The group that owns it, by name or by number
+  target:
+    type: string
+    description: What a symlink points at, which is the one thing only a symlink has
+EOF
+    ;;
+
+  inspect)
+    request=$(cat)
+    name=$(printf '%s' "$request" | name_of)
+    [ -n "$name" ] || fail "the request does not name a path"
+
+    path=$root/${name#/}
+
+    if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+        echo "ensure: absent"
+        exit 0
+    fi
+
+    if [ -L "$path" ]; then
+        echo "ensure: symlink"
+        yaml target "$(readlink "$path")"
+    elif [ -d "$path" ]; then
+        echo "ensure: directory"
+    elif [ -f "$path" ]; then
+        echo "ensure: file"
+    else
+        # A socket, a device, a fifo: something is there, and it is not one of
+        # the three things this makes.  Saying so is better than saying absent,
+        # which would have detc try to create it on top
+        yaml ensure "other"
+    fi
+
+    # As many digits as the declaration used, so that the two spellings of the
+    # same permissions are the same state
+    mode=$(stat -c '%a' "$path")
+    case "$(declared mode)" in
+      ???) yaml mode "$(printf '%03o' "0$mode")" ;;
+      *) yaml mode "$(printf '%04o' "0$mode")" ;;
+    esac
+
+    yaml owner "$(name_from passwd "$(stat -c '%u' "$path")")"
+    yaml group "$(name_from group "$(stat -c '%g' "$path")")"
+    ;;
+
+  apply)
+    request=$(cat)
+    name=$(printf '%s' "$request" | name_of)
+    [ -n "$name" ] || fail "the request does not name a path"
+
+    # Quoted, and not bare, only so that shellcheck does not read it as an
+    # unquoted call to `file`
+    ensure="file"
+    mode=
+    owner=
+    group=
+    target=
+    while IFS='	' read -r property value; do
+        case "$property" in
+          ensure) ensure=$value ;;
+          mode) mode=$value ;;
+          owner) owner=$value ;;
+          group) group=$value ;;
+          target) target=$value ;;
+        esac
+    done <<EOF
+$(printf '%s' "$request" | desired)
+EOF
+
+    path=$root/${name#/}
+
+    if [ "$ensure" = absent ]; then
+        if [ -L "$path" ] || [ -f "$path" ]; then
+            rm -f "$path"
+        elif [ -d "$path" ]; then
+            # Only an empty one.  A declaration names a directory; it does not
+            # name what somebody else put inside it, and `rm -rf` driven by a
+            # string out of a configuration file is not a thing to build in
+            rmdir "$path" || fail "$name is a directory with something in it, which this will not remove"
+        fi
+        exit 0
+    fi
+
+    # Something of the wrong kind is in the way.  A file or a symlink is
+    # replaced, because that is what a declaration asking for the other one
+    # means; a directory is not, for the same reason `absent` will not empty one
+    if [ -L "$path" ] && [ "$ensure" != symlink ]; then
+        rm -f "$path"
+    elif [ -d "$path" ] && [ "$ensure" != directory ]; then
+        fail "$name is a directory, and this was asked to make it a $ensure"
+    elif [ -f "$path" ] && [ "$ensure" != file ]; then
+        rm -f "$path"
+    fi
+
+    case "$ensure" in
+      file)
+        mkdir -p "$(dirname "$path")"
+        [ -f "$path" ] || : > "$path"
+        ;;
+      directory)
+        mkdir -p "$path"
+        ;;
+      symlink)
+        [ -n "$target" ] || fail "$name is a symlink with nothing to point at"
+        mkdir -p "$(dirname "$path")"
+        # `--no-dereference`, so that a symlink to a directory is replaced and
+        # not written inside the directory it points at
+        ln -sfn "$target" "$path"
+        ;;
+      *)
+        fail "$ensure is not something this makes: file, directory, symlink or absent"
+        ;;
+    esac
+
+    # A symlink has the permissions of what it points at, and changing them
+    # through it would be changing something the declaration did not name
+    if [ -n "$mode" ] && [ "$ensure" != symlink ]; then
+        chmod "$mode" "$path"
+    fi
+
+    uid=$(number_of passwd "$owner")
+    [ -z "$owner" ] || [ -n "$uid" ] || fail "there is no account $owner in $root"
+    gid=$(number_of group "$group")
+    [ -z "$group" ] || [ -n "$gid" ] || fail "there is no group $group in $root"
+
+    # `chown` follows a symlink unless it is told not to, and the numbers are
+    # the tree's own.  `uid:` with nothing after it is not "leave the group
+    # alone", it is "put it in the login group of that account", so the two
+    # halves are only ever given together when both were declared
+    if [ -n "$uid" ] && [ -n "$gid" ]; then
+        chown -h "$uid:$gid" "$path"
+    elif [ -n "$uid" ]; then
+        chown -h "$uid" "$path"
+    elif [ -n "$gid" ]; then
+        chown -h ":$gid" "$path"
+    fi
+    ;;
+
+  "")
+    fail "no verb, expected schema, inspect or apply"
+    ;;
+
+  *)
+    fail "unknown verb $1, expected schema, inspect or apply"
+    ;;
+esac

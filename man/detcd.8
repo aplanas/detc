@@ -1,0 +1,243 @@
+.\" Manual page for detcd.  See the comment at the top of detc.8 for why these
+.\" are roff and not markdown put through a converter.
+.TH DETCD 8 2026\-08\-04 "detc 0.1.0" "System Administration"
+.
+.SH NAME
+detcd \- answer for a detc system over varlink
+.
+.SH SYNOPSIS
+.B detcd
+.RB [ \-\-root
+.IR PATH ]
+.RB [ \-\-read\-only ]
+.RB [ \-d ]
+.
+.SH DESCRIPTION
+.B detcd
+is not a daemon.  It speaks varlink on the connection it was handed, answers
+the call, and exits.  Nothing listens between two calls, so there is nothing to
+enable, nothing resident, and nothing left behind on the machine that answered.
+.PP
+It is the same program as
+.BR detc (8),
+under a second name, and every method it answers is one of that program's
+subcommands run locally.  There is nothing it can do that
+.B detc
+cannot, and nothing
+.B detc
+can do that it will not \(em except what
+.B \-\-read\-only
+takes away.
+.PP
+Two conventions for handing it a connection are read, and neither is
+configured:
+.B $LISTEN_FDS
+in the manner of a socket activated service, which is how
+.RB \(lq "varlinkctl exec:" \(rq
+starts it, and otherwise the standard input and output, which is what a pair of
+pipes over
+.BR ssh (1)
+gives it.  The variables that announce the socket are taken out of the
+environment before anything else runs, so that a probe or a provider started by
+the call does not inherit them and mistake itself for a service.
+.PP
+The interface is
+.BR org.detc.Manager ,
+and the service answers for it by introspection, so a client needs nothing
+installed to read it:
+.PP
+.EX
+$ varlinkctl introspect exec:/usr/bin/detcd org.detc.Manager
+.EE
+.PP
+It is also a file,
+.IR /usr/share/varlink/org.detc.Manager.varlink ,
+for a code generator or a reader.  Nothing opens it at runtime \(em the binary
+carries its own copy \(em so a machine that has only the binary is missing
+nothing.
+.
+.SS Authorization
+There is none, and that is the design.
+.B detcd
+runs as whoever started it, and the filesystem stops it exactly where it stops
+.BR detc ,
+so whoever can run
+.B detcd
+on a machine can already run
+.B detc
+on it.  What encrypts the conversation, proves who is at the other end and
+keeps the keys is
+.BR ssh (1),
+which does all three better than this program could.
+.PP
+What
+.B \-\-read\-only
+adds belongs on the far side too, in the line of
+.I authorized_keys
+that admits the key, where the caller cannot talk it out of it:
+.PP
+.EX
+command="/usr/bin/detcd \-\-read\-only",no\-pty ssh\-ed25519 AAAA... monitoring
+.EE
+.PP
+Which tree is configured is decided by whoever starts the service and never by
+the caller: there is no method that asks for another root.  The one thing that
+travels is a bundle, and a bundle carries its own signature, checked against
+the
+.I allowed_signers
+of the machine that installs it.
+.
+.SH OPTIONS
+.TP
+.BR \-r ", " \-\-root " " \fIPATH\fR
+Answer for a system mounted somewhere else instead of
+.IR / .
+.TP
+.B \-\-read\-only
+Refuse every method that changes the system \(em
+.BR Apply
+without
+.IR dry_run ,
+.BR SetVariables ,
+.BR MergeDocument ,
+.B InstallBundle
+and
+.B RemoveBundle
+\(em with the
+.B ReadOnly
+error.  See
+.B Authorization
+above for where it belongs.
+.TP
+.BR \-d ", " \-\-debug
+Turn logging on, and repeat for more of it.  It goes to the standard error,
+which is not the connection.
+.TP
+.BR \-h ", " \-\-help
+Print help.
+.TP
+.BR \-V ", " \-\-version
+Print the version.
+.
+.SH METHODS
+Every method is a subcommand of
+.BR detc (8).
+.B ListTypes
+and
+.B List
+answer
+.BR "detc list" ;
+.B Cat
+answers
+.BR "detc cat" ;
+.B Check
+answers
+.BR "detc check" ;
+.B Doc
+and
+.B Schema
+answer the commands of the same name;
+.BR GetVariables ,
+.BR SetVariables ,
+.BR MergeDocument ,
+.B ListProbes
+and
+.B RunProbe
+answer
+.BR "detc var" ;
+.BR ListRuns ,
+.B GetRun
+and
+.B GetFailures
+answer
+.BR "detc report" ;
+.BR VerifyBundle ,
+.BR GetBundle ,
+.B InstallBundle
+and
+.B RemoveBundle
+answer
+.BR "detc bundle" ;
+and
+.B Apply
+answers
+.BR "detc apply" .
+.PP
+Most of them stream: they send one reply per line of what the subcommand
+prints, so they want
+.B more
+and are refused without it with the
+.B ExpectedMore
+error.  A stream ends with a reply whose field is null, so that the end needs
+no lookahead and a run with nothing to say is not a special case.
+.PP
+A call that failed comes back as the
+.B Failed
+error, carrying the message
+.B detc
+would have printed.  The full interface, with the types and every argument, is
+what
+.RB \(lq "varlinkctl introspect" \(rq
+prints, and what the
+.B .varlink
+file named above holds.
+.
+.SH EXIT STATUS
+.TP
+.B 0
+The call was answered.
+.TP
+.B 1
+The call was answered with an error reply, which is the status
+.B detc
+would have exited with, or the connection could not be spoken on.
+.
+.SH FILES
+.TP
+.I /usr/share/varlink/
+The interfaces this service speaks:
+.I org.detc.Manager.varlink
+and the standard
+.IR org.varlink.service.varlink ,
+for a client that is being written against them.  Neither is read by anything
+at runtime.
+.
+.SH ENVIRONMENT
+.TP
+.BR LISTEN_FDS ", " LISTEN_PID
+The socket to answer on, in the manner of
+.BR sd_listen_fds (3).
+Exactly one descriptor is a connection; anything else is a shape this program
+has nothing to do with, and it falls back to the standard input and output.
+Both are unset before the call runs.
+.PP
+The variables of
+.BR detc (8)
+apply as well, and are read at the same points.
+.
+.SH EXAMPLES
+Ask a host what it would change, without changing it:
+.PP
+.EX
+$ varlinkctl call \-\-more ssh\-exec:web1:/usr/bin/detcd \e
+      org.detc.Manager.Apply '{"dry_run":true}'
+.EE
+.PP
+Read a variable of a host over a connection that cannot change it:
+.PP
+.EX
+$ varlinkctl call ssh\-exec:web1:"/usr/bin/detcd \-\-read\-only" \e
+      org.detc.Manager.GetVariables '{"key":["ssh"]}'
+.EE
+.PP
+For a fleet rather than a host, see
+.BR detctl (8),
+which is a client of this and drives many at once.
+.
+.SH SEE ALSO
+.BR detc (8),
+.BR detctl (8),
+.BR varlinkctl (1),
+.BR ssh (1),
+.BR sshd (8),
+.BR sd_listen_fds (3)

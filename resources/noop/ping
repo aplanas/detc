@@ -1,0 +1,27 @@
+# Is this installation working?
+#
+# The one resource a node can apply the moment the package is installed.  It
+# reads nothing and writes nothing: the `noop` provider reports back exactly
+# the state it was asked for, so this is always in sync.
+#
+#     $ detc apply --type resource noop/ping
+#     ok      noop    ping
+#
+# What that proves is everything around the resource -- that the provider was
+# found under one of its prefixes, that its schema parsed, that the declaration
+# was expanded through the namespace, that a program was started with the right
+# working directory and DETC_ROOT, and that its answer came back and compared
+# equal.  Through `detctl`, that all of it works across the connection too.
+#
+# It says nothing about the probes, on purpose, and the two defaults below are
+# what keep it that way: a node with no `os` probe still gets its `ok`, and
+# finds out that a probe is missing from `detc check --type probe`, which is
+# the question that asks it.  Undefined is an error while a template is being
+# rendered, so `system.os.pretty_name` on a node without the probe would fail
+# here and the failure would read as though detc itself were broken.
+#
+# The defaults have to be taken one level at a time.  A default on the whole
+# chain does not rescue it: `system` being absent makes `system.os` the error,
+# before anything downstream is reached.
+{% set os = (system | default({})).os | default({}) -%}
+message: "detc answers on {{ os.pretty_name | default('an unknown system') }}"

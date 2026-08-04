@@ -1,0 +1,62 @@
+#!/bin/sh
+
+# What the tree calls itself, and what it runs on.
+#
+# This fills `system.host`.  Three of the four keys come out of files in the
+# tree, so they describe an image being built as well as a machine that is
+# running.  The fourth, the architecture, has nowhere in the tree to come from:
+# it is asked of the machine, and therefore only reported when the tree is the
+# machine.
+#
+# A key whose file is not there is left out rather than guessed.  A node that
+# has not been given a hostname has none, and a template reading one reaches for
+# its default -- which is a better answer than `localhost`.
+#
+# This probe is the one that has both kinds of key at once, so it is also the
+# clearest place to say what `DETC_LIVE=1` is.  It is a caller saying that the
+# root is not `/` but the machine looking at it is the machine that will boot
+# it, which is true of an initrd and of nothing else -- see `tools/detc-inject`.
+# It changes nothing about the three keys that come out of the tree, which are
+# the tree's whoever is asking, and it decides the two that are the machine's.
+
+set -eu
+
+root=${DETC_ROOT:-/}
+
+# Whether there is a machine to ask, and not just a tree to read
+live=false
+if [ "$root" = / ] || [ "${DETC_LIVE:-0}" = 1 ]; then
+    live=true
+fi
+
+yaml() {
+    printf '%s: "%s"\n' "$1" \
+        "$(printf '%s' "$2" | tr -d '\000-\010\013\014\016-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+}
+
+# The first line of a file of the tree, or nothing.
+line_of() {
+    [ -f "$root/$1" ] || return 0
+    head -n 1 "$root/$1" | tr -d '\r'
+}
+
+hostname=$(line_of etc/hostname)
+[ -z "$hostname" ] || yaml hostname "$hostname"
+
+# An uninitialised machine id is an empty file, and `systemd` writes
+# `uninitialized` into it during a first boot.  Neither is an identity
+machine_id=$(line_of etc/machine-id)
+case "$machine_id" in
+  ""|uninitialized) ;;
+  *) yaml machine_id "$machine_id" ;;
+esac
+
+# `/proc` belongs to the running kernel and is not part of any tree, so it is
+# read at its own path and not under the root: the tree's is an empty directory
+# waiting to be mounted, and the kernel running is the kernel this reports
+if [ "$live" = true ] && [ -f /proc/sys/kernel/osrelease ]; then
+    yaml kernel "$(head -n 1 /proc/sys/kernel/osrelease | tr -d '\r')"
+fi
+
+# And the architecture is not written down anywhere in a tree at all
+[ "$live" != true ] || yaml architecture "$(uname -m)"

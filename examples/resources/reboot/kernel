@@ -1,0 +1,64 @@
+# Reboot the machine when the kernel command line changes.
+#
+# `etc/default/grub` is read by `grub2-mkconfig` and then by the boot loader,
+# and the kernel reads its command line once, at boot.  So a change to it is a
+# change that only exists after the machine has come back up, and a node that
+# never reboots is a node running a configuration nobody can see in a file.
+#
+# Copy this next to a template of your own and point `detc.files` at whatever
+# that template writes.  Nothing in the core set needs it: everything detc
+# ships a template for is read by something that can be told to read it again,
+# which is what `resources/unit/systemd-sysctl` does instead, and restarting a
+# service is always the better answer when there is one.  This is for the files
+# where there is not.
+#
+# It is the same mechanism as that one.  `detc.files` holds the digest of what
+# the file is *about to* hold, worked out before any resource is inspected; the
+# `reboot` provider writes down the value it last rebooted for and reports it
+# back, so this is in sync for as long as the file has not moved and asks to be
+# applied on the one run that moves it.  `--dry-run` says the machine would
+# reboot, before anything is.
+#
+# The reboot happens *after* the run, and not in the middle of it.  detc holds
+# a lock for the whole of a run and the provider arranges a reboot that waits
+# for it, so the journal gets both of its commits and every object ordered
+# after this one is still applied.  Read the header of `providers/reboot` for
+# why that is not optional.
+#
+# More than one file is more than one digest -- join them, and this asks for a
+# reboot when any of them moves:
+#
+#     {% raw %}{% set digest %}
+#       {{ detc.files['etc/default/grub'] | default('') }}
+#       {{ detc.files['etc/kernel/cmdline'] | default('') }}
+#     {% endset %}{% endraw %}
+#
+# And more than one reason is more than one file in this directory.  The name
+# is a name for the reason and nothing reads it, so `reboot/kernel` and
+# `reboot/microcode` are tracked apart and a change to one does not forget what
+# the other was last rebooted for.
+#
+# The first machine to see this records the digest and does not reboot: it has
+# just booted into the state the file describes, and rebooting every node the
+# first time it is configured would be a reboot for nothing.  The same is true
+# of a root that is not `/` -- an image being built has nothing running in it
+# to reboot, and recording the value while it is built is what stops its first
+# boot from rebooting itself.
+#
+# `_order: 90` is the order the provider already declares, written out because
+# this is where the question gets asked: the template it watches is rendered at
+# 50 and every other provider the core set ships is done by 70, so this reads
+# last in `--dry-run` and arms last in a real run.
+#
+# `when` is left out entirely rather than given an empty string when the digest
+# is not there, which is the case on `detc apply --type resource`: that run
+# renders no template, so it knows nothing about the file.  A property the
+# declaration does not mention is not compared, so the resource is skipped
+# rather than recorded as having been rebooted for nothing -- and here that
+# matters twice over, because the value recorded would be the empty one, and
+# the next full run would find it different and reboot the machine for a change
+# that never happened.
+_order: 90
+{% set digest = detc.files['etc/default/grub'] | default('') -%}
+{% if digest %}when: "{{ digest }}"
+{% endif -%}

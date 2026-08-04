@@ -1,0 +1,36 @@
+#!/bin/sh
+
+# Whether the machine is a machine.
+#
+# This fills `system.virt` with two strings, `container` and `vm`, each of them
+# what `systemd-detect-virt` calls the technology or `none`.  They are separate
+# because they are not exclusive: a container inside a virtual machine is both,
+# and configuration cares about the difference -- a container has no kernel of
+# its own to give sysctls to, and a virtual machine has no firmware worth
+# talking to.
+#
+# `none` is reported rather than left out, because "this is not virtualised" is
+# something the probe learned and not something it failed to learn.
+#
+# What a tree runs on is not a property of the tree, so a root that is not `/`
+# is reported on not at all.
+#
+# `DETC_LIVE=1` is how a caller says that the root is not `/` but the machine
+# looking at it is the machine that will boot it, and then what this machine
+# runs on is what that tree will run on.  The one caller that can honestly say
+# so is the initrd, which is already running on the hypervisor in question.
+# Nothing else should set it -- see `tools/detc-inject`.
+
+set -eu
+
+root=${DETC_ROOT:-/}
+[ "$root" = / ] || [ "${DETC_LIVE:-0}" = 1 ] || exit 0
+
+command -v systemd-detect-virt > /dev/null 2>&1 || exit 0
+
+# It exits non zero when it finds nothing, which is an answer and not a failure
+container=$(systemd-detect-virt --container 2>/dev/null) || container=none
+vm=$(systemd-detect-virt --vm 2>/dev/null) || vm=none
+
+printf 'container: "%s"\n' "${container:-none}"
+printf 'vm: "%s"\n' "${vm:-none}"

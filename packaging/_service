@@ -1,0 +1,44 @@
+<!--
+  How the three sources in `detc.spec` are produced.
+
+  `cargo` fetches the dependency tree from the network, and a build in the Open
+  Build Service has no network, so the crates have to travel with the source:
+  `cargo_vendor` writes `vendor.tar.zst` and a `cargo_config` that points cargo
+  at it.  That is the whole reason this file exists.
+
+  The two manual services are run on the machine that submits, not by the build:
+
+      osc service manualrun
+
+  which checks the tree out, sets the version from the tag, and vendors.  The
+  buildtime ones run in the build root, and turn the checkout into the tarball
+  `%prep` unpacks.
+-->
+<services>
+  <service name="obs_scm" mode="manual">
+    <param name="scm">git</param>
+    <!-- FIXME: confirm, and match the URL in the spec -->
+    <param name="url">https://github.com/aplanas/detc.git</param>
+    <param name="revision">main</param>
+    <param name="filename">detc</param>
+    <param name="versionformat">@PARENT_TAG@+git%cd.%h</param>
+    <param name="changesgenerate">enable</param>
+  </service>
+
+  <service name="set_version" mode="manual"/>
+
+  <!-- `update=false` keeps the lock file upstream tested with.  A dependency
+       that has to move for a security fix is a change to Cargo.lock, made
+       upstream, and not something a vendoring run decides on its own -->
+  <service name="cargo_vendor" mode="manual">
+    <param name="srcdir">detc</param>
+    <param name="compression">zst</param>
+    <param name="update">false</param>
+  </service>
+
+  <service name="tar" mode="buildtime"/>
+  <service name="recompress" mode="buildtime">
+    <param name="file">*.tar</param>
+    <param name="compression">zst</param>
+  </service>
+</services>

@@ -1,0 +1,19 @@
+{#-
+  The name of the node, out of `net.hostname`.
+
+  This is not part of the core set and is not installed.  `/etc/hostname` has
+  no drop-in directory, so the whole file is the template, and a rendering that
+  came out empty would be written as an empty file -- which on a node where
+  nobody set `net.hostname` means taking the name away from a machine that had
+  one.  Every core template is a drop-in for that reason.
+
+  So a fleet that wants this copies it into its own `templates.d/etc/hostname`
+  and sets `net.hostname` on every node that gets it.  If it is not set, this
+  fails loudly rather than emptying the file, which is the behaviour worth
+  copying along with it.
+
+  The running name is not changed by writing this: the kernel is told at boot,
+  and `hostnamectl` is the thing that tells it now.  Out of scope for detc, and
+  a fleet that needs it declares a resource for the provider that does it.
+-#}
+{{ net.hostname }}

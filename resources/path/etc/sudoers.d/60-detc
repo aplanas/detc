@@ -1,0 +1,23 @@
+# The mode of the sudo drop-in, set before there is anything in it.
+#
+# The name of a `path` resource is the path it manages, so this file --
+# `resources.d/path/etc/sudoers.d/60-detc` -- is about `/etc/sudoers.d/60-detc`
+# and mirrors `templates.d/etc/sudoers.d/60-detc` exactly.  One spelling for
+# one file.
+#
+# `_order: 10` is the whole point of shipping this.  Templates are rendered at
+# 50, and `sudo` refuses to read a drop-in that anybody but its owner may
+# write.  At the default order of 60 this would put the file at 0440 *after*
+# the template had already created it at 0644, and the window in between is a
+# window in which any local account could have written itself a rule.  At 10
+# the file is made empty with the right mode first, and the template write
+# preserves the mode of a file that already exists, so it is never once wrong.
+#
+# That is also why `ensure: file` and not `absent`: it has to exist for the
+# mode to be on it.  An empty sudoers file grants nothing, and the template
+# fills it in the same run.
+_order: 10
+ensure: file
+mode: "0440"
+owner: root
+group: root

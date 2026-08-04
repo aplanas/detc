@@ -1,0 +1,45 @@
+#!/bin/sh
+
+# What there is to boot, as `bootctl` reports it.
+#
+# This fills `system.boot.entries` with what `bootctl list --json=short`
+# writes: one object per Boot Loader Specification entry, each with its title,
+# its version, the kernel it loads and the command line it would boot with.  It
+# is passed through unchanged, for the same reason the interfaces and the block
+# devices of the core set are -- the shape belongs to the tool, and a probe that
+# flattened it would be inventing a second one.
+#
+#     {{ system.boot.entries | selectattr('isDefault', 'eq', true)
+#        | map(attribute='version') | first }}
+#
+# The only thing added is the top: `bootctl` writes a bare list, and a list is
+# not a subtree, so without a key to mount it under `system.boot` would be the
+# list itself and nothing else could ever be put beside it.
+#
+# `system.firmware` of the core set says whether the machine booted through EFI
+# and whether Secure Boot is on.  This says what it booted, which is the other
+# half of the question and the half that changes.
+#
+# It is an example and not part of the core set because the entries are only
+# there where something writes them: a machine running GRUB the old way has
+# `bootctl` and nothing for it to list.
+
+set -eu
+
+root=${DETC_ROOT:-/}
+
+command -v bootctl > /dev/null 2>&1 || exit 0
+
+# `--root` is what lets this read an image being built rather than the machine
+# building it, and for `/` it is what the bare invocation already does
+entries=$(bootctl list --json=short --root="$root" 2>/dev/null) || exit 0
+[ -n "$entries" ] || exit 0
+
+# An empty list is not the answer "there are no entries": it is also what comes
+# back when the EFI system partition is there and could not be read, which is
+# what running as somebody who may not read it looks like.  The two cannot be
+# told apart from here, and a guess would be worse than nothing
+[ "$entries" != "[]" ] || exit 0
+
+# JSON is YAML, so what the tool wrote goes in as it stands
+printf '{"entries": %s}\n' "$entries"

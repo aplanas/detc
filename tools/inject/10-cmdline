@@ -1,0 +1,41 @@
+#!/bin/sh
+
+# What the kernel command line says to install.
+#
+#   rd.detc.bundle=<file|url>   a bundle
+#   rd.detc.vars=<file>         a variables document
+#
+# One spelling for a bundle and not two, because `detc bundle install` already
+# takes a file or a URL and deciding which is which is its job and not this
+# script's.  A URL additionally needs `rd.neednet=1`, which is the network's
+# spelling and belongs to the network.
+#
+# First of the sources, so that this wins: a command line is typed by whoever is
+# booting the machine, and an argument somebody went to the trouble of putting
+# there should not be quietly beaten by an ISO that was left in the drive.
+#
+# It carries a locator and never configuration.  `/proc/cmdline` is readable by
+# every account on the machine and stays readable for as long as it runs, so a
+# password put there is a password published; the other three sources exist
+# precisely because this one cannot keep a secret.
+#
+# A file is a file *in the initrd*, which is worth saying because it is the one
+# thing here that is not obvious: this runs before the system is switched to, so
+# `rd.detc.bundle=/boot/fleet.detc` means the initrd's `/boot` and almost
+# certainly means nothing.  Use a URL, or the volume source.
+
+set -eu
+
+[ -r /proc/cmdline ] || exit 0
+
+# `tr` and a loop, rather than `set --` on the unquoted line, so that nothing on
+# the command line is ever expanded as a glob by this shell.  Twice, and each
+# time one character for one character, because a `tr` whose second set is the
+# shorter of the two is only padded out by agreement between implementations and
+# not by the standard
+tr '\t' ' ' < /proc/cmdline | tr ' ' '\n' | while read -r argument; do
+    case "$argument" in
+      rd.detc.bundle=?*) printf 'bundle\t%s\n' "${argument#rd.detc.bundle=}" ;;
+      rd.detc.vars=?*) printf 'vars\t%s\n' "${argument#rd.detc.vars=}" ;;
+    esac
+done

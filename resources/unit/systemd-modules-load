@@ -1,0 +1,30 @@
+# Load a newly named module in the run that named it.
+#
+# The same as `unit/systemd-sysctl`, for `etc/modules-load.d/60-detc.conf`.
+# `systemd-modules-load.service` is what reads that directory at boot, and
+# restarting it loads what has been added to it since.
+#
+# Only what was added.  Taking a module out of the list takes it out of the
+# file, and the restart does not unload it: nothing in systemd removes a module
+# that is in use, and detc is not going to be the thing that tries.  It is gone
+# at the next boot, which is the honest answer, and a node that needs it gone
+# now needs somebody to look at what is holding it.
+#
+# `config` is left out when the digest is not there -- see
+# `resources.d/unit/systemd-sysctl`, which says why at length.
+#
+# `_order: 70` is the order this provider already declares, written out because
+# this is where a reader asks when the restart happens relative to the template
+# it watches, which is rendered at 50 -- see `resources.d/unit/systemd-sysctl`
+# again, which says what it is and is not there for.
+#
+# `_requires` names the same file that `config` watches, and means the other
+# half of it: the digest says restart when the file moves, and the requirement
+# says do not restart at all if the file was not written.  Again see
+# `resources.d/unit/systemd-sysctl`.
+_order: 70
+_requires:
+  - template/etc/modules-load.d/60-detc.conf
+{% set digest = detc.files['etc/modules-load.d/60-detc.conf'] | default('') -%}
+{% if digest %}config: "{{ digest }}"
+{% endif -%}

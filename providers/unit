@@ -1,0 +1,323 @@
+#!/bin/sh
+
+# A systemd unit: whether it starts at boot, whether it is running now, and
+# whether it is allowed to exist at all.
+#
+# The name of the resource is the name of the unit, the way `systemctl` takes
+# it, so `resources.d/unit/sshd` and `resources.d/unit/chronyd.service` are both
+# fine and mean the same thing.
+#
+# ## Restarting when a configuration file changes
+#
+# This is what `config` is for, and it is the pattern a fleet copies:
+#
+#     enabled: true
+#     active: true
+#     config: "{{ detc.files['etc/ssh/sshd_config.d/60-detc.conf'] | default('') }}"
+#     _order: 70
+#
+# `detc.files` holds the digest of what each managed file is *about to* hold,
+# worked out before any resource is inspected, so the declaration expands to a
+# value that moves exactly when the file moves.  This provider writes down the
+# digest it last restarted for and reports that back, so the resource is in sync
+# for as long as the file has not changed, and asks to be applied on the one run
+# that changes it.  `--dry-run` therefore names the units that would be
+# restarted, before anything is.
+#
+# A flag would not have worked.  A property meaning "restart me" is reported
+# `false` by any honest `inspect`, and detc inspects again after applying and
+# fails a resource that still differs -- so the signal has to be a value the
+# provider can record and give back, which a digest is and a flag is not.
+#
+# More than one file is more than one digest: join them, and the value moves
+# when any of them does.
+#
+#     config: >-
+#       {{ detc.files['etc/chrony.conf'] | default('') }}
+#       {{ detc.files['etc/chrony.d/60-detc.conf'] | default('') }}
+#
+# ## A root that is not the running system
+#
+# `systemctl` can enable, disable and mask inside a tree it is pointed at, and
+# that is all: nothing is running in a tree, so there is nothing to start, stop
+# or restart.  A declaration that asks about `active` in such a root is refused
+# rather than answered wrongly.  A `config` that changed is recorded all the
+# same, and nothing is restarted for it -- because `systemctl` says that nothing
+# in the tree is running, not because this decided it in advance -- and what is
+# built there boots with the new file anyway.
+#
+# `DETC_LIVE=1` is deliberately *not* honoured here, and the inconsistency with
+# the probes that do honour it is the point.  That flag says that the machine
+# looking at the tree is the machine that will boot it, which is a statement
+# about the hardware and makes an address or a disk true; it says nothing about
+# whether anything in the tree is running, and in the one place that sets it --
+# an initrd, before switch-root -- nothing in the tree is running by definition.
+# So the rule below stays its own: `/` and nothing else.
+
+set -eu
+
+fail() {
+    echo "unit: $*" >&2
+    exit 1
+}
+
+# The state that the declaration asks for, as `key<tab>value` lines.
+#
+# This is the same reader as in the other core providers, copied rather than
+# shared, because a provider is one executable and a fleet replaces it by
+# dropping one file of its own into a prefix.  A change to one of them is a
+# change to all of them.
+#
+# Only the object under `desired` is read, and only the shapes that a schema
+# here declares: strings, numbers, booleans, and arrays of those, which become
+# their elements joined by a comma.  The request arrives compact, the way detc
+# writes it, so there is no whitespace to step over.
+desired() {
+    awk '
+{
+  s = $0
+  n = length(s)
+  i = index(s, "\"desired\":{") + 11
+  if (i == 11 || substr(s, i, 1) == "}") exit
+  while (i <= n) {
+    k = str()
+    i++
+    print k "\t" val()
+    if (substr(s, i, 1) != ",") exit
+    i++
+  }
+}
+
+function str(   out, c) {
+  i++
+  out = ""
+  while (i <= n) {
+    c = substr(s, i, 1)
+    i++
+    if (c == "\"") return out
+    if (c == "\\") {
+      c = substr(s, i, 1)
+      i++
+      if (c == "n") c = "\n"
+      else if (c == "t") c = "\t"
+      else if (c == "u") { c = " "; i += 4 }
+    }
+    out = out c
+  }
+  return out
+}
+
+function val(   out, c) {
+  c = substr(s, i, 1)
+  if (c == "\"") return str()
+  if (c == "{") { print "an object is not a property this reads" > "/dev/stderr"; exit 1 }
+  if (c == "[") {
+    i++
+    out = ""
+    if (substr(s, i, 1) == "]") { i++; return out }
+    while (i <= n) {
+      out = out val()
+      c = substr(s, i, 1)
+      i++
+      if (c == "]") return out
+      out = out ","
+    }
+    return out
+  }
+  out = ""
+  while (i <= n && index(",}", substr(s, i, 1)) == 0) {
+    out = out substr(s, i, 1)
+    i++
+  }
+  return out
+}
+'
+}
+
+# The name of the object, out of the request.  The keys arrive in the order that
+# a JSON map sorts them, which puts `name` after `current`, `desired` and
+# `diff` -- last, in both requests -- so the one at the end of the line is the
+# top level one and a `name` inside the declaration is not mistaken for it.
+name_of() {
+    sed -n 's/.*,"name":"\([^"]*\)"}$/\1/p'
+}
+
+yaml() {
+    printf '%s: "%s"\n' "$1" "$(printf '%s' "$2" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+}
+
+root=${DETC_ROOT:-/}
+live=false
+[ "$root" != / ] || live=true
+
+systemctl_() {
+    if [ "$live" = true ]; then
+        systemctl "$@"
+    else
+        systemctl --root "$root" "$@"
+    fi
+}
+
+# Where the digest that was last acted on is kept.  Under the root, because it
+# describes that tree and not the one detc happens to be running from, and named
+# after the unit with the slashes taken out, because a unit of a path or a slice
+# has them in its name and they are not directories here.
+record() {
+    printf '%s/var/lib/detc/providers/unit/%s' "$root" "$(printf '%s' "$1" | tr / -)"
+}
+
+case "${1-}" in
+  schema)
+    cat <<'EOF'
+description: A systemd unit
+order: 70
+properties:
+  enabled:
+    type: boolean
+    description: >-
+      Whether it starts on its own.  A unit that is static, indirect or
+      generated cannot be enabled and is reported as enabled anyway, because it
+      already runs when whatever pulls it in runs, and a declaration asking for
+      that has got what it asked for.
+  active:
+    type: boolean
+    description: >-
+      Whether it is running now.  Only in the running system: a tree that is
+      not booted has nothing running in it, and a declaration that asks is
+      refused rather than answered wrongly.
+  masked:
+    type: boolean
+    description: Whether it is forbidden to run at all
+  config:
+    type: string
+    description: >-
+      An opaque value standing for the configuration the unit was last
+      restarted for, which is what `detc.files` holds for a managed file.  When
+      it changes, the unit is restarted and the new value written down.  It is
+      never interpreted, so anything that changes when the configuration changes
+      will do.
+EOF
+    ;;
+
+  inspect)
+    request=$(cat)
+    name=$(printf '%s' "$request" | name_of)
+    [ -n "$name" ] || fail "the request does not name a unit"
+
+    state=$(systemctl_ is-enabled "$name" 2>/dev/null) || true
+
+    case "$state" in
+      masked|masked-runtime)
+        echo "masked: true"
+        echo "enabled: false"
+        ;;
+      "")
+        # `systemctl` says nothing at all about a unit it cannot find, and a
+        # unit that is not installed yet is the ordinary case on the run that
+        # installs the package carrying it
+        echo "masked: false"
+        echo "enabled: false"
+        ;;
+      enabled|enabled-runtime|static|indirect|generated|alias)
+        echo "masked: false"
+        echo "enabled: true"
+        ;;
+      *)
+        echo "masked: false"
+        echo "enabled: false"
+        ;;
+    esac
+
+    if [ "$live" = true ]; then
+        if systemctl is-active --quiet "$name" 2>/dev/null; then
+            echo "active: true"
+        else
+            echo "active: false"
+        fi
+    fi
+
+    # Nothing recorded is not the same as an empty configuration: a unit this
+    # has never been asked about is reported with the empty value, which is what
+    # a declaration reading an unmanaged file expands to, so the two agree and
+    # nothing is restarted for a file that is not there
+    file=$(record "$name")
+    yaml config "$(cat "$file" 2>/dev/null || true)"
+    ;;
+
+  apply)
+    request=$(cat)
+    name=$(printf '%s' "$request" | name_of)
+    [ -n "$name" ] || fail "the request does not name a unit"
+
+    enabled=
+    active=
+    masked=
+    config=
+    declares_config=false
+    while IFS='	' read -r property value; do
+        case "$property" in
+          enabled) enabled=$value ;;
+          active) active=$value ;;
+          masked) masked=$value ;;
+          config) config=$value; declares_config=true ;;
+        esac
+    done <<EOF
+$(printf '%s' "$request" | desired)
+EOF
+
+    [ -z "$active" ] || [ "$live" = true ] || fail "$root is not the running system, so nothing in it is active"
+
+    # Masking first: a unit that has to be forbidden is not also enabled, and
+    # unmasking has to happen before anything else can take effect
+    case "$masked" in
+      true) systemctl_ mask "$name" ;;
+      false) systemctl_ unmask "$name" ;;
+    esac
+
+    if [ "$masked" != true ]; then
+        case "$enabled" in
+          true) systemctl_ enable "$name" ;;
+          false) systemctl_ disable "$name" ;;
+        esac
+    fi
+
+    if [ "$live" = true ]; then
+        if [ "$masked" = true ] || [ "$active" = false ]; then
+            systemctl stop "$name"
+        elif [ "$active" = true ]; then
+            # `start` on something already running does nothing, which is what
+            # is wanted when this run is only here for a changed configuration
+            systemctl start "$name"
+        fi
+    fi
+
+    if [ "$declares_config" = true ]; then
+        file=$(record "$name")
+        was=$(cat "$file" 2>/dev/null || true)
+
+        if [ "$config" != "$was" ]; then
+            # Only a unit that is meant to be running and is running: there is
+            # nothing to restart otherwise.  Whether it is running is asked of
+            # `systemctl` rather than worked out from the root, so that a tree
+            # which is not booted answers no because nothing in it is running
+            # and not because this decided so
+            if [ "$masked" != true ] && [ "$active" != false ] \
+                && systemctl_ is-active --quiet "$name" 2>/dev/null; then
+                systemctl_ try-restart "$name"
+            fi
+
+            mkdir -p "$(dirname "$file")"
+            printf '%s' "$config" > "$file"
+            chmod 0644 "$file"
+        fi
+    fi
+    ;;
+
+  "")
+    fail "no verb, expected schema, inspect or apply"
+    ;;
+
+  *)
+    fail "unknown verb $1, expected schema, inspect or apply"
+    ;;
+esac

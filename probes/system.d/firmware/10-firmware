@@ -1,0 +1,61 @@
+#!/bin/sh
+
+# How the machine boots, out of `/sys/firmware`.
+#
+# This fills `system.firmware` with two booleans: whether the machine booted
+# through EFI rather than a legacy BIOS, and whether Secure Boot is on.  Both
+# decide what a bootloader configuration may say, and the second decides whether
+# an unsigned kernel module can be loaded at all.
+#
+# Secure Boot is one EFI variable, `SecureBoot`, whose value is four bytes of
+# attributes followed by one byte that is 1 or 0.  It is read straight out of
+# `efivarfs` rather than through `mokutil`, which is not on every distribution.
+#
+# `/sys` belongs to the running kernel and is not part of any tree, so a root
+# without one is reported on not at all -- an image is not built around the
+# firmware of the machine that built it.
+#
+# `DETC_LIVE=1` is how a caller says that the root is not `/` but the machine
+# looking at it is the machine that will boot it, and then the firmware this
+# kernel booted through is the firmware that root will boot through.  So the
+# root is dropped for the reads below, all of which are the kernel's and none of
+# which are the tree's -- `/sysroot/sys` in an initrd is an empty directory
+# waiting to be mounted, and reading it would report nothing at all.  The one
+# caller that can honestly set the flag is that initrd; see `tools/detc-inject`.
+
+set -eu
+
+root=${DETC_ROOT:-/}
+[ "${DETC_LIVE:-0}" != 1 ] || root=/
+
+[ -d "$root/sys/firmware" ] || exit 0
+
+if [ -d "$root/sys/firmware/efi" ]; then
+    echo "efi: true"
+else
+    # A machine with a `/sys/firmware` and no `efi` under it booted some other
+    # way, which is a thing this knows rather than a thing it could not find out
+    echo "efi: false"
+    echo "secure_boot: false"
+    exit 0
+fi
+
+# The name of the variable carries its GUID, which is fixed but is a poor thing
+# to spell out
+for variable in "$root"/sys/firmware/efi/efivars/SecureBoot-*; do
+    [ -r "$variable" ] || continue
+
+    # The fifth byte, as a number.  `od` is in coreutils and `xxd` is not
+    state=$(od -An -tu1 -j 4 -N 1 "$variable" 2>/dev/null | tr -d ' \n') || state=
+
+    case "$state" in
+      1) echo "secure_boot: true" ;;
+      0) echo "secure_boot: false" ;;
+      *) ;;
+    esac
+
+    exit 0
+done
+
+# EFI, but the variable is not readable: on most systems that means running as
+# somebody who may not read it, and a guess would be worse than nothing

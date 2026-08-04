@@ -1,0 +1,136 @@
+# Every knob the core templates read, and nothing else.
+#
+# This is the lowest prefix there is, `usr/share`, so anything a node is given
+# later wins over it: a document in `run` from a bundle, one in `etc` written by
+# hand, or a `--set` on the command line.  It is here to be overridden.
+#
+# A null means "leave the distribution's own default alone", and the template
+# that reads it writes no line.  That is what makes both halves of this true at
+# once: it is the catalogue of everything there is to set, and setting none of
+# it changes not one byte of what the node effectively runs.
+#
+# A null is not stored as a null.  Documents are combined with RFC 7396 merge
+# patch, where a null *takes the key away*, which is how a drop-in unsets what
+# the one before it left.  So the nulls below are the documentation of what
+# there is to set and nothing else -- `detc var` on a node where nobody has set
+# anything shows `ssh: {}`.  What they do carry is the empty parent: templates
+# are rendered with undefined treated as an error, and `ssh.permit_root_login`
+# only answers "not set" rather than failing because `ssh` itself is here.
+# That is also why the templates test `is defined` and never `is not none`.
+#
+# Some of the core templates are only in `examples/` and are not installed --
+# the ones for files that have no drop-in directory, where an empty rendering
+# would be a file emptied rather than a file that says nothing.  The variables
+# they read are documented here all the same, because this is the one page that
+# says what a node can be told.  Each of them says which template it needs.
+
+# OpenSSH, through `etc/ssh/sshd_config.d/60-detc.conf`.  The values are the
+# strings sshd itself uses, so the ones that read as booleans are `yes` and `no`
+# and not true and false.
+ssh:
+  # prohibit-password, no, yes, forced-commands-only
+  permit_root_login: null
+  # yes, no
+  password_authentication: null
+  # yes, no
+  x11_forwarding: null
+  # The file holding the certificate authority that signs user keys, which is
+  # how a fleet grants access without an authorized_keys file anywhere.  detc
+  # ships no template for the key itself: it is the fleet's, and it belongs in
+  # a bundle
+  trusted_user_ca_keys: null
+  # And the certificate this host presents, signed by the host authority
+  host_certificate: null
+
+# The kernel, through `etc/sysctl.d/60-detc.conf`.  A map of the name of the
+# knob to its value, written one per line and in the order the names sort, so
+# that the file only moves when what is in it moves.
+#
+#   sysctl:
+#     net.ipv4.ip_forward: 1
+#     vm.swappiness: 10
+#
+# A sysctl written to a file takes effect at the next boot.  The resource
+# `unit/systemd-sysctl` makes it take effect in the same run.
+sysctl: {}
+
+# Modules to load at boot, through `etc/modules-load.d/60-detc.conf`, one name
+# per line.  Paired with the resource `unit/systemd-modules-load` the same way.
+modules: []
+
+# sudo, through `etc/sudoers.d/60-detc`.
+#
+# The drop-in is only read if nobody but root may write it, so the core also
+# ships the resource `path/etc/sudoers.d/60-detc`, which puts it at 0440 before
+# the template is rendered rather than after.
+sudo:
+  # Groups whose members may run anything, after typing their own password
+  groups: []
+  # And groups whose members may run anything without typing anything
+  nopasswd_groups: []
+
+# Resource limits, through `etc/security/limits.d/60-detc.conf`.  A list, each
+# entry a line of the file:
+#
+#   limits:
+#     - {domain: "@users", type: hard, item: nofile, value: 4096}
+limits: []
+
+# The journal, through `etc/systemd/journald.conf.d/60-detc.conf`.
+journald:
+  # volatile, persistent, auto, none
+  storage: null
+  # How much of the disk it may take, as systemd spells sizes: 500M, 2G
+  system_max_use: null
+
+# Logins, through `etc/systemd/logind.conf.d/60-detc.conf`.
+logind:
+  # ignore, poweroff, reboot, halt, suspend, hibernate, lock
+  handle_power_key: null
+  # ignore, lock, sleep, poweroff
+  idle_action: null
+
+# Time.
+time:
+  # The zone, as a path under /usr/share/zoneinfo, such as Europe/Madrid.  It
+  # is not a template: /etc/localtime is a symlink, so it is a resource of type
+  # path, and the fleet declares it
+  timezone: null
+  # The servers to ask, through `etc/chrony.d/60-detc.conf`
+  servers: []
+
+# The name of the node, and the names it knows.  Both need a template out of
+# `examples/`: neither /etc/hostname nor /etc/hosts has a drop-in directory, so
+# a core that shipped them would empty them on a node that has set neither.
+net:
+  hostname: null
+  # A list of {ip, names}, each written as one line of /etc/hosts:
+  #
+  #   hosts:
+  #     - {ip: 10.0.0.1, names: [gateway, gw]}
+  hosts: []
+
+# The language of the node, through the `etc/locale.conf` template in
+# `examples/`.
+locale:
+  lang: null
+  lc_time: null
+
+# And of its console, through the `etc/vconsole.conf` template in `examples/`.
+console:
+  keymap: null
+  font: null
+
+# What is printed at login, through the `etc/motd` template in `examples/`.
+motd:
+  text: null
+
+# What detc keeps about itself.  The journal is a git repository under
+# var/lib/detc/journal.git, and it is only written when a run changes
+# something.  `var/lib/detc/last.yaml` says what the last run did and is always
+# written, whether or not this is on.
+detc:
+  journal:
+    enabled: true
+    user: detc
+    email: detc@localhost

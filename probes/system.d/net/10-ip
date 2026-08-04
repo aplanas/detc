@@ -1,0 +1,36 @@
+#!/bin/sh
+
+# The addresses the machine answers on, as `ip` reports them.
+#
+# This fills `system.net.interfaces` with what `ip -j addr show` writes, which
+# is a list of one object per interface, each with its name, its flags and its
+# `addr_info`.  It is passed through unchanged: the shape is `iproute2`'s and a
+# probe that flattened it would be inventing a second one.
+#
+#     {{ system.net.interfaces
+#        | selectattr('ifname', 'eq', 'eth0') | first
+#        | attr('addr_info') | selectattr('family', 'eq', 'inet')
+#        | map(attribute='local') | first }}
+#
+# Interfaces belong to the running machine and not to any tree, so a root that
+# is not `/` is reported on not at all -- otherwise an image would be built
+# carrying the addresses of the machine that built it.
+#
+# `DETC_LIVE=1` is how a caller says that the root is not `/` but the machine
+# looking at it is the machine that will boot it, and then these addresses are
+# that machine's.  The one caller that can honestly say so is the initrd:
+# `/sysroot` there is this machine's own future `/`, on this machine's cards.
+# Nothing else should set it -- see `tools/detc-inject`.
+
+set -eu
+
+root=${DETC_ROOT:-/}
+[ "$root" = / ] || [ "${DETC_LIVE:-0}" = 1 ] || exit 0
+
+command -v ip > /dev/null 2>&1 || exit 0
+
+interfaces=$(ip -j addr show 2>/dev/null) || exit 0
+[ -n "$interfaces" ] || exit 0
+
+# JSON is YAML, so what the tool wrote goes in as it stands
+printf '{"interfaces": %s}\n' "$interfaces"

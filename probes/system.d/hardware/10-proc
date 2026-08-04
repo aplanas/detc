@@ -1,0 +1,36 @@
+#!/bin/sh
+
+# How much machine there is, out of `/proc`.
+#
+# This fills `system.hardware` with the two numbers that configuration is
+# actually written against: how many processors to size a worker pool to, and
+# how much memory to divide up.  Everything else `/proc` knows is a report and
+# not a knob.
+#
+# `/proc` belongs to the running kernel and is not part of any tree, so a root
+# that is not `/` has none and nothing is reported -- which is right: an image
+# must not be built around the size of the machine that built it.
+#
+# `DETC_LIVE=1` is how a caller says that the root is not `/` but the machine
+# looking at it is the machine that will boot it, and then the running kernel's
+# `/proc` is describing exactly the machine that root is about to be.  So the
+# root is dropped for the reads below, all of which are the kernel's and none of
+# which are the tree's -- `/sysroot/proc` in an initrd is an empty directory
+# waiting to be mounted, and reading it would report nothing at all.  The one
+# caller that can honestly set the flag is that initrd; see `tools/detc-inject`.
+
+set -eu
+
+root=${DETC_ROOT:-/}
+[ "${DETC_LIVE:-0}" != 1 ] || root=/
+
+[ -r "$root/proc/cpuinfo" ] || exit 0
+
+# One `processor:` line per logical processor, which is what a pool is sized to
+cpus=$(grep -c '^processor' "$root/proc/cpuinfo" 2>/dev/null) || cpus=
+[ -z "$cpus" ] || [ "$cpus" = 0 ] || echo "cpus: $cpus"
+
+# In kibibytes, the way `/proc/meminfo` writes it, so that nothing is rounded
+# away on the way here
+memory=$(awk '$1 == "MemTotal:" { print $2; exit }' "$root/proc/meminfo" 2>/dev/null) || memory=
+[ -z "$memory" ] || echo "memory_kb: $memory"

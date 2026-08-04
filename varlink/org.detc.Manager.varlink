@@ -1,0 +1,203 @@
+# Drive a system that `detc` converges, from somewhere else.
+#
+# Every method is a subcommand of `detc`, run on the machine that answers, and
+# every reply carries one line of what that subcommand prints.  The methods
+# marked below as streaming answer with a reply per line, so they want `more`
+# and are refused without it; they end with a reply whose field is null, so that
+# the end needs no lookahead and a run with nothing to say is not a special
+# case.
+#
+# There is no way to ask for another root: which tree is configured is decided
+# by whoever starts the service, and never by the caller.  The paths that the
+# methods take are paths on the machine that answers; the one thing that travels
+# is a bundle, which is a file that carries its own signature, and what it can
+# reach in the system is decided by the machine that installs it.
+interface org.detc.Manager
+
+# An object of the system: what it is, the name that addresses it, and the file
+# it was read from.
+type Object (
+  type: string,
+  name: string,
+  source: string
+)
+
+# Whether an object can be instantiated, and why not.
+#
+# A type, a method and an error share one namespace in an interface, so this is
+# not called `Check`: the method that answers with it is.  The name of a type
+# never travels, only its fields do, so the two are the same thing to a client.
+type Verdict (
+  name: string,
+  error: ?string
+)
+
+# Something that happens, or happened, to an object.  The action is the word
+# the line starts with; it is `error` when the change could not be made, and
+# `skipped` when the object was not tried at all because something it requires
+# was not applied -- in which case `summary` names the requirement, and the run
+# does not count it as a failure.  A client must treat the action as an open
+# set of words rather than an enumeration, which is why it is a string.
+type Change (
+  action: string,
+  object: string,
+  summary: ?string,
+  error: ?string
+)
+
+# A probe of the system, and where it is mounted in the namespace.
+type Probe (
+  mount: string,
+  path: string
+)
+
+# A run of `apply`, as the journal lists it.
+type Run (
+  id: int,
+  time: string,
+  command: string,
+  summary: string
+)
+
+# A commit that a run left in the journal.
+type Commit (
+  id: string,
+  summary: string
+)
+
+# A run of `apply`, in full.
+type RunDetail (
+  id: int,
+  time: string,
+  command: string,
+  cause: string,
+  found: ?Commit,
+  applied: ?Commit,
+  lines: []string
+)
+
+# The bundle that is installed in the system: what it calls itself, who signed
+# it, where it was taken from, and whether a copy of it was kept for the next
+# boot.  The signer is `unsigned` when the bundle carried no signature.
+type Bundle (
+  name: string,
+  version: string,
+  signer: string,
+  origin: string,
+  persist: bool
+)
+
+# A variable, and the value it takes.  The value is written in the YAML syntax,
+# so that a number is a number and a quoted one is a string.
+type Assignment (
+  key: string,
+  value: string
+)
+
+# The variables that override the namespace of one call: the assignments, and
+# the `key=value` shorthands, which are parsed on the machine that answers.
+type Var (
+  assignment: []Assignment,
+  kv: []string
+)
+
+# The types of object that the system has.  Streaming.
+method ListTypes() -> (type: ?string)
+
+# The objects of the system, of one type or of all of them.  Streaming.
+method List(type: ?string) -> (object: ?Object)
+
+# What a template would write in the system, or the state a resource declares.
+# With `raw`, the file as it was written, before the namespace reaches it.
+method Cat(
+  name: string,
+  type: ?string,
+  raw: bool,
+  var: Var
+) -> (text: string)
+
+# Whether the objects can be instantiated, one object or all of them.  Building
+# the namespace runs the probes that the system has installed.  Streaming.
+method Check(
+  name: ?string,
+  type: ?string,
+  var: Var
+) -> (check: ?Verdict)
+
+# A type of resource described for a person, from the schema of its provider.
+method Doc(type: string) -> (text: string)
+
+# The schema of a type of resource, as its provider writes it.
+method Schema(type: string) -> (text: string)
+
+# The namespace as YAML: the given keys, or all of it when there are none.
+method GetVariables(key: []string) -> (text: string)
+
+# The probes that the system has installed.  Streaming.
+method ListProbes() -> (probe: ?Probe)
+
+# What one probe reports, as YAML.  The probe is named by its path, or by the
+# tail of it.
+method RunProbe(probe: string) -> (text: string)
+
+# The runs that the journal holds, the most recent first, and only the ones
+# that failed when asked.  Streaming.
+method ListRuns(only_fails: bool) -> (run: ?Run)
+
+# One run of `apply` in full, the most recent when no id is given.
+method GetRun(id: ?int) -> (detail: RunDetail)
+
+# What went wrong in one run, as the lines the journal kept.  Streaming.
+method GetFailures(id: ?int) -> (line: ?string)
+
+# Whether a bundle can be trusted and everything it carries can be installed.
+# `bundle` is the file itself, base64 encoded, and `url` is one that the machine
+# that answers fetches itself.  Exactly one of the two.  Streaming.
+method VerifyBundle(bundle: ?string, url: ?string) -> (check: ?Verdict)
+
+# The bundle that is installed, and nothing when there is none.  Streaming.
+method GetBundle() -> (bundle: ?Bundle)
+
+# Bring the system to the state that its objects declare, one object or all of
+# them.  With `dry_run`, say what would change and write nothing.  Streaming.
+method Apply(
+  name: ?string,
+  type: ?string,
+  dry_run: bool,
+  var: Var
+) -> (change: ?Change)
+
+# Persist the variables as drop-ins of the namespace.  With `dry_run`, name the
+# drop-ins that would be written.  Streaming.
+method SetVariables(var: Var, dry_run: bool) -> (change: ?Change)
+
+# Merge a document of variables into the namespace and keep it.  The file is
+# read on the machine that answers.  Streaming.
+method MergeDocument(file: string, dry_run: bool) -> (change: ?Change)
+
+# Install a bundle, taking away the one that was installed before it.  `bundle`
+# is the file itself, base64 encoded, and `url` is one that the machine that
+# answers fetches itself; exactly one of the two, or neither to install again
+# the copy that `persist` left in the system.  With `apply`, the system is
+# brought to the state that the bundle declares once it is installed.
+# Streaming.
+method InstallBundle(
+  bundle: ?string,
+  url: ?string,
+  persist: bool,
+  apply: bool,
+  allow_unsigned: bool,
+  dry_run: bool
+) -> (change: ?Change)
+
+# Take away the installed bundle, and the copy that was kept of it.  Streaming.
+method RemoveBundle(dry_run: bool) -> (change: ?Change)
+
+# The service was started read-only, and the method changes the system.
+error ReadOnly()
+
+# The method answers with a stream, and the call did not ask for one.
+error ExpectedMore()
+
+# The call failed, with the message that `detc` reports.
+error Failed(message: string)

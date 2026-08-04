@@ -1,0 +1,122 @@
+[package]
+name = "detc"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["journal", "fetch"]
+
+# Installing a bundle from a URL, which brings in an HTTP and a TLS stack.  It
+# is what lets one bundle reach a fleet without going through the uplink of the
+# admin once per node, and it can be left out for a build that is only ever
+# handed a file.
+fetch = ["dep:ureq"]
+
+# The history of the changes of the system, in a git repository that `detc`
+# manages.  It is the one dependency that is not a small crate, so it can be
+# left out for a build that only has to converge a system and never look back.
+journal = ["dep:gix"]
+
+[dependencies]
+# The bold and the colour that `detctl` says a host with.  It is what `clap`
+# already paints its own help with, so it is here for the naming of it and not
+# for a dependency that was not there before.
+anstyle = "1.0.13"
+# Without `simd-unsafe`, which is on by default: what is decoded here is a
+# bundle that arrived from somewhere else, and is decoded once, so the safe
+# path costs nothing that can be measured and carries no `unsafe`.
+base64 = { version = "0.23.0", default-features = false, features = ["std"] }
+clap = { version = "4.6.1", features = ["derive"] }
+# Without `regex`, which is on by default and is the largest single thing the
+# binary carried: it buys the `/pattern` suffix of `DETC_LOG_LEVEL`, matching a
+# regular expression against the text of each message.  Without it that suffix
+# is a substring, which is what anybody grepping their own log lines meant
+# anyway, and choosing what to log by module is untouched.
+env_logger = { version = "0.11.10", default-features = false, features = [
+  "auto-color",
+  "humantime",
+] }
+gix = { version = "0.86.0", optional = true, default-features = false, features = [
+  "sha1",
+  "tree-editor",
+] }
+# The shell patterns that `detctl` matches host names with, which are the ones
+# `fnmatch` has always meant by them, so a fleet is addressed the way it is
+# everywhere else.  The crate has no dependencies of its own.
+glob = "0.3.4"
+# What `detctl` says about a fleet while it is reaching it: a line per host,
+# rewritten in place.  Without `rayon`, `tokio` and `futures`, which parallelise
+# and integrate with runtimes that are not here; `unicode-width` stays, as it is
+# what keeps a line the width it looks.
+indicatif = { version = "0.18.6", default-features = false, features = [
+  "unicode-width",
+] }
+# The time that `detctl --watch` heads a run with, in the zone of whoever is
+# watching.  It is already in the tree, and with the same features, as what
+# `env_logger` dates a log line with, so it is here to be depended on by name
+# rather than by luck and costs nothing that was not already paid.
+jiff = "0.2.28"
+# Only `merge`, which is RFC 7396 and is what the default merge strategy means.
+# Without `diff`, which computes an RFC 6902 patch between two documents and is
+# never asked for here.
+json-patch = { version = "4.2.0", default-features = false }
+log = "0.4.32"
+minijinja = "2.20.0"
+sd-notify = "0.5.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.150"
+serde_yaml_ng = "0.10.0"
+# What names the content of a configuration file in the namespace, so that a
+# provider can react to the file having changed.  It is already in the tree
+# under `ssh-key`, and is here to be depended on by name rather than by luck.
+sha2 = { version = "0.10.9", default-features = false, features = ["std"] }
+# SSHSIG, which is what signs a bundle.  `crypto` is every key type that
+# `ssh-keygen` generates today, so a bundle is not refused for the kind of key
+# that signed it.  Without `encryption`: a private key that needs a passphrase
+# is refused rather than read, because there is nobody here to ask for one.
+ssh-key = { version = "0.6.7", default-features = false, features = [
+  "crypto",
+  "std",
+] }
+# Without `xattr`, which is on by default: a bundle carries files, modes and
+# nothing else, and reading extended attributes out of an archive that arrived
+# from somewhere else is exactly what this side refuses to do.
+tar = { version = "0.4.46", default-features = false }
+tempfile = "3.27.0"
+toml = "1.1.2"
+# `rustls` also brings the Mozilla root store that `rustls-webpki-roots` holds,
+# compiled in, which is the point: a bundle is fetched during the first boot,
+# where there is no `ca-certificates` yet to read.  `gzip` is what `curl
+# --compressed` used to ask for.  Without `charset` and the JSON of it, which
+# are for a body that is text, and this one is an archive.
+ureq = { version = "3.3.0", optional = true, default-features = false, features = [
+  "rustls",
+  "gzip",
+] }
+walkdir = "2.5.0"
+
+[dev-dependencies]
+varlink_parser = "6.0.0"
+
+# The binary is the whole of what a node installs.  It is baked into images and
+# fetched over whatever uplink a machine has during its first boot, and nothing
+# it does is bound by throughput: a run parses a handful of documents, renders a
+# handful of templates and hashes files that are kilobytes.  So the release
+# build is tuned for size, which is the axis that costs something here.
+[profile.release]
+# Size over speed, including the loop vectorisation that `s` still leaves on.
+opt-level = "z"
+# Optimise across every crate at once, in one unit, which is what lets the
+# unused half of a dependency be dropped rather than merely never called.  It is
+# by far the slowest part of the build.
+lto = "fat"
+codegen-units = 1
+# Nothing catches a panic: a run that has lost track of what it is doing to a
+# system has to stop rather than carry on, so the unwinding tables are weight
+# with no reader.  The cost is that a panic no longer runs the drop that unlinks
+# a half written temporary file -- which is a bug path, and the name such a file
+# is left under begins with a dot and carries no extension, so neither `sshd`
+# nor `sudo` would read it.
+panic = "abort"
+# The symbols answer nothing that the error messages do not.
+strip = true

@@ -1,0 +1,68 @@
+# Run nginx, once there is an nginx to run and something for it to read.
+#
+# This is the worked example of `_requires`, and the third of three files:
+# `examples/resources/pkg/nginx` installs the package and
+# `examples/templates/etc/nginx/conf.d/60-detc.conf` writes the drop-in.  None
+# of them is part of the core set and none is installed -- copy the three into
+# a tree of your own.
+#
+# The order alone is not enough.  `pkg` runs at 10, the templates at 50 and
+# this at 70, so on a good run everything happens in the right sequence; but a
+# run continues past a failure, and that is the right thing for it to do.  So
+# without the requirements a failed `zypper install nginx` would be followed by
+# a template that cannot write into a `conf.d` the package never created, and
+# then by this resource starting a service that is not installed -- three
+# errors for one cause, and nothing in the report saying which of them to look
+# at.  With them the run says:
+#
+#     error     pkg       nginx                            zypper exited 104
+#     error     template  /etc/nginx/conf.d/60-detc.conf   No such file or directory
+#     skipped   unit      nginx                            requires pkg/nginx, which was not applied
+#     1 object(s) could not be applied
+#
+# A skip is not counted: the package is the failure, and reporting it twice
+# would only make the number of things to fix wrong.  It is also transitive --
+# whatever required this unit is skipped in turn, because a skipped object is
+# unsatisfied for anything waiting on it.
+#
+# `template/etc/nginx/conf.d/60-detc.conf` is the template, spelled as the path
+# relative to the root without a leading slash: the same string `detc.files` is
+# keyed by, and the same string a `path` resource would be named by.  One
+# spelling for a file, whether the declaration depends on its content or on its
+# success.
+#
+# Which is why `config` and `_requires` both name it.  `config` says *restart
+# me when the file moves*, and is the digest of what the file is about to hold;
+# `_requires` says *do not start me at all if it did not land*.  The digest is
+# worked out before a byte is written, so the first says nothing about whether
+# the write worked.  Neither key can be inferred from the other, and dropping
+# one because the other is there is how a fleet ends up serving a page from a
+# configuration file that was never written.
+#
+# The template does not have to declare anything for this to work.  A template
+# has no frontmatter and nothing it could declare, and it does not need it:
+# its own write fails, and this waits on the template.  The chain collapses
+# from either end.
+#
+# A requirement has to be applied *strictly* earlier, which is why `_order: 70`
+# and the 10 and 50 of the other two matter.  Two objects at the same order
+# would be sorted by name, and a requirement met by alphabetical accident is
+# one that stops being met when somebody renames a file.  It is also what makes
+# a cycle impossible.
+#
+# `apply --type resource` is unaffected.  That run renders no template, so it
+# never learns of `template/...` at all -- and a requirement naming something
+# the run was not asked to look at is left alone, the same way a digest that
+# was never published is.  What is *not* left alone is a requirement that names
+# nothing at all on a full run, or one that names something ordered later: both
+# are the declaration being wrong rather than the system being out of sync, and
+# `detc check` reports them without touching the machine.
+enabled: true
+active: true
+_order: 70
+_requires:
+  - pkg/nginx
+  - template/etc/nginx/conf.d/60-detc.conf
+{% set digest = detc.files['etc/nginx/conf.d/60-detc.conf'] | default('') -%}
+{% if digest %}config: "{{ digest }}"
+{% endif -%}

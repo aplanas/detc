@@ -1,0 +1,38 @@
+# Bring the system to what it declares, once per boot.
+#
+# This is the second half of the pair, and the only half a machine that does not
+# use the initrd module needs: `detc-inject.service` configures the files before
+# switch-root, and this converges everything that had to wait for the system to
+# be running -- the packages, the repositories, the units.
+#
+# It needs no state of its own.  A reboot takes `run` with it, and `detc apply`
+# puts back the bundle that `--persist` kept before it measures anything, so a
+# machine that was given a bundle in the initrd on Monday is still running it in
+# September without anything having been written to remember that.
+#
+# `RemainAfterExit=yes` because this is a state of the system and not a process:
+# `systemctl status detc` should say that the system has been converged, and
+# `systemctl restart detc` is how an administrator converges it again.
+#
+# Nothing else in the system is ordered against this on purpose.  A run can
+# install packages and restart services, so it takes as long as it takes, and a
+# unit that waited for it would be a unit whose start-up time is decided by
+# whatever the fleet declared this week.
+
+[Unit]
+Description=Bring the system to what it declares
+Documentation=man:detc(8)
+After=local-fs.target network-online.target
+Wants=network-online.target
+
+# A run reads the tree and writes to it, so it belongs on the running system and
+# not in the initrd; `detc-inject.service` is what runs there
+ConditionPathExists=!/etc/initrd-release
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/detc apply
+
+[Install]
+WantedBy=multi-user.target

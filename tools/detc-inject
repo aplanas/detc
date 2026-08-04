@@ -1,0 +1,268 @@
+#!/bin/sh
+
+# Configure the system that is about to be booted, from whatever the platform
+# handed this machine.
+#
+#     detc-inject [ROOT]          ROOT defaults to /sysroot
+#
+# This is the piece that makes detc a replacement for cloud-init, and it is a
+# shell script on purpose.  Everything it does, detc could already do; what was
+# missing was the thing that finds the configuration and calls detc with the
+# right arguments, and that is a different job -- one that grows a new special
+# case for every hypervisor, which is exactly what the binary must not do.
+#
+# ## The two stages
+#
+# This one runs in the initrd, before switch-root, and converges everything that
+# is a file: the templates, and the `path`, `user`, `group` and `authorized_key`
+# resources.  `sshd` is therefore configured before it has run once with the
+# distribution's defaults, which is the whole reason to be here rather than in
+# the booted system.
+#
+# What it cannot do is anything that needs the system to be running -- install a
+# package, add a repository, start a unit.  Those types are deferred, and
+# `detc.service` converges them on the first boot: `--persist` keeps the signed
+# bundle on disk, and `detc apply` restores it by itself when `run` comes back
+# empty, so the second stage needs no state of its own.
+#
+# ## The root is this machine
+#
+# `DETC_LIVE=1` is set for the run.  It says that the root is not `/` but the
+# machine looking at it is the machine that will boot it, which is what lets the
+# probes that report about hardware answer instead of standing down -- an initrd
+# is the one place where a root that is not `/` is still this machine's future
+# `/`, with its MAC addresses and its disks.  It says nothing about the runtime
+# state of that root, so `providers/unit` still refuses `active`.
+
+set -eu
+
+self=${0##*/}
+
+say() {
+    echo "$self: $*" >&2
+}
+
+fail() {
+    say "$*"
+    exit 1
+}
+
+root=${1:-/sysroot}
+[ -d "$root" ] || fail "$root is not there, so there is nothing to configure"
+
+libexec=${DETC_LIBEXECDIR:-${0%/*}}
+share=${DETC_DATADIR:-/usr/share/detc}
+detc=${DETC:-detc}
+
+command -v "$detc" > /dev/null 2>&1 || fail "detc is not in this initrd"
+
+# What the kernel command line was told, if anything.  A knob and not a
+# configuration file, because the only configuration file that could hold it
+# would be one more thing to get into the initrd
+assets=auto
+apply=yes
+unsigned=no
+if [ -r /proc/cmdline ]; then
+    while read -r argument; do
+        case "$argument" in
+          rd.detc.assets=?*) assets=${argument#rd.detc.assets=} ;;
+          rd.detc.apply=?*) apply=${argument#rd.detc.apply=} ;;
+          rd.detc.allow-unsigned) unsigned=yes ;;
+          rd.detc.allow-unsigned=?*) unsigned=${argument#rd.detc.allow-unsigned=} ;;
+        esac
+    done <<EOF
+$(tr '\t' ' ' < /proc/cmdline | tr ' ' '\n')
+EOF
+fi
+
+# Somewhere for a source to put what it found.  Handed over rather than agreed
+# on, so that the whole of this runs against a throwaway directory when it is
+# being tested and touches nothing of the machine doing the testing
+DETC_SPOOL=${DETC_SPOOL:-$(mktemp -d)}
+export DETC_SPOOL
+trap 'rm -rf "$DETC_SPOOL"' EXIT INT TERM
+
+# ---------------------------------------------------------------------------
+# The objects
+#
+# detc has one root, and it is the root of both what it reads and what it
+# writes, so for the set that came in the initrd to be the set that configures
+# `/sysroot` it has to be put where `/sysroot` looks.  `run` is that place: the
+# middle rung of the prefix ladder, above what the distribution ships and below
+# what the administrator wrote, and documented as the slot of whatever is
+# injected during the first boot.  It is also, before switch-root, the real
+# root's on disk `/run` -- which the moved tmpfs covers a moment later, so this
+# leaves nothing behind in the booted system.
+#
+# `auto` and not `always`, because `run` wins over `usr/share`: an image that
+# ships detc has its own set, quite possibly newer than the one baked into an
+# initrd that nobody has rebuilt, and silently overriding it would make the
+# initrd the thing that decides what version of a template a node runs.
+
+seed=no
+case "$assets" in
+  never) ;;
+  always) seed=yes ;;
+  auto) [ -d "$root/usr/share/detc/templates.d" ] || seed=yes ;;
+  *) fail "rd.detc.assets=$assets is not one of auto, always or never" ;;
+esac
+
+if [ "$seed" = yes ]; then
+    say "seeding the objects of this initrd into $root/run"
+
+    mkdir -p "$root/run/detc" "$root/run/lib/detc"
+    for tree in templates.d resources.d variables; do
+        [ -d "$share/$tree" ] || continue
+        rm -rf "$root/run/detc/$tree"
+        cp -a "$share/$tree" "$root/run/detc/$tree"
+    done
+    for tree in probes providers.d; do
+        [ -d "$libexec/$tree" ] || continue
+        rm -rf "$root/run/lib/detc/$tree"
+        cp -a "$libexec/$tree" "$root/run/lib/detc/$tree"
+    done
+fi
+
+# ---------------------------------------------------------------------------
+# The types that belong to the first boot
+#
+# `pkg`, `repo` and `unit` cannot converge here, and are stood in for rather
+# than masked: a resource whose type has no provider ends the run, so an empty
+# file would fail the very declarations this is here to carry through.  The
+# stand in answers `schema` out of the real provider, which has to be a real
+# provider and not this initrd's copy of one where the image has its own -- the
+# schema decides what properties a declaration may use and where the type sits
+# in the plan.  See `tools/detc-defer`.
+
+if [ -d "$root/usr/libexec/detc/providers.d" ]; then
+    DETC_DEFER_FROM=$root/usr/libexec/detc/providers.d
+else
+    DETC_DEFER_FROM=$libexec/providers.d
+fi
+export DETC_DEFER_FROM
+
+mkdir -p "$root/run/lib/detc/providers.d"
+for kind in pkg repo unit; do
+    [ -x "$DETC_DEFER_FROM/$kind" ] || continue
+    cp "$libexec/detc-defer" "$root/run/lib/detc/providers.d/$kind"
+    chmod 0755 "$root/run/lib/detc/providers.d/$kind"
+done
+
+# ---------------------------------------------------------------------------
+# Trust
+#
+# A bundle is checked against `usr/share/detc/allowed_signers` and
+# `etc/detc/allowed_signers` of the root it is installed into, and against
+# nothing else -- a bundle cannot widen the trust that admitted it, and that
+# does not stop being true because the caller is an initrd.
+#
+# An image that carries no signers file has no way to accept a signed bundle at
+# all, so the one this initrd was built with is copied in.  Only when there is
+# nothing there: this seeds trust, it never replaces it.  What makes that
+# defensible is that the initrd is part of the boot chain and is measured with
+# it, so it is no less trusted than the image is.
+
+if [ -r /etc/detc/allowed_signers ] &&
+   [ ! -e "$root/etc/detc/allowed_signers" ] &&
+   [ ! -e "$root/usr/share/detc/allowed_signers" ]; then
+    say "seeding etc/detc/allowed_signers from this initrd"
+    mkdir -p "$root/etc/detc"
+    cat /etc/detc/allowed_signers > "$root/etc/detc/allowed_signers"
+    chmod 0644 "$root/etc/detc/allowed_signers"
+fi
+
+# ---------------------------------------------------------------------------
+# The sources
+#
+# One executable per delivery mechanism, in lexicographic order, each writing
+# `kind<tab>value` lines.  This directory belongs to this program: it is the one
+# under `libexec` that detc itself never reads, which is why it is `inject/` and
+# not `inject.d/` -- a `.d` in an installed tree is a directory `src/cfs.rs`
+# resolves across the three prefixes, and there is no ladder here.  There is one
+# path, the one this was installed to, so a source is turned off by not being in
+# the image: `detc_omit_sources=` in `/etc/dracut.conf.d/detc.conf` names the
+# ones dracut leaves out, and a file truncated in the tree the image is built
+# from is skipped below for whoever cannot write that.  A ladder was considered
+# and is not shipped: the reader would be here rather than in detc, and nothing
+# has yet asked for it.
+#
+# A source that fails is reported and skipped.  Nothing here is worth failing a
+# boot over: the machine still comes up, `detc.service` still runs, and an
+# administrator can look at the journal.
+
+found=$DETC_SPOOL/found
+: > "$found"
+
+for source in "$libexec/inject/"*; do
+    [ -f "$source" ] || continue
+
+    # A truncated file is a source an image builder took out, and it is skipped
+    # rather than run as an empty program that reports nothing
+    [ -s "$source" ] || continue
+    [ -x "$source" ] || continue
+
+    if ! "$source" >> "$found"; then
+        say "source ${source##*/} failed and was skipped"
+    fi
+done
+
+# One bundle, and the first one wins.  `bundle install` takes away the one
+# installed before it, so a second would not add to the first but replace it --
+# and the order the sources run in is the order of how deliberate they are, most
+# deliberate first.  Variables documents do add up, which is what they are for.
+#
+# The file is read twice rather than the values collected into one variable,
+# because a value is a path and a path can hold a space; a list in a shell
+# variable is a list that has to be split again, and splitting it is where that
+# space would be lost
+bundle=
+while IFS='	' read -r kind value; do
+    [ "$kind" = bundle ] || continue
+    [ -n "$value" ] || continue
+    if [ -n "$bundle" ]; then
+        say "ignoring a second bundle, $value; this machine already has one"
+    else
+        bundle=$value
+    fi
+done < "$found"
+
+while IFS='	' read -r kind value; do
+    case "$kind" in
+      bundle|vars|"") ;;
+      *) say "a source asked for $kind, which is not bundle or vars" ;;
+    esac
+done < "$found"
+
+if [ -n "$bundle" ]; then
+    set -- bundle install "$bundle" --persist
+    if [ "$unsigned" = yes ]; then
+        say "installing $bundle WITHOUT checking a signature, as the command line asked"
+        set -- "$@" --allow-unsigned
+    fi
+
+    # Not fatal.  A bundle that fails to verify is a bundle that this machine
+    # was right to refuse, and refusing it is not a reason to leave the machine
+    # unconfigured as well
+    "$detc" --root "$root" "$@" || say "the bundle at $bundle was not installed"
+fi
+
+while IFS='	' read -r kind value; do
+    [ "$kind" = vars ] || continue
+    [ -n "$value" ] || continue
+    "$detc" --root "$root" var "$value" || say "$value was not merged"
+done < "$found"
+
+# ---------------------------------------------------------------------------
+
+if [ "$apply" != yes ]; then
+    say "rd.detc.apply=$apply, so nothing is applied here; the first boot will"
+    exit 0
+fi
+
+# Not `exec`, so that the trap runs and the spool goes away.  In an initrd that
+# makes no difference -- the tmpfs is about to be dropped either way -- but this
+# is also how the whole of it is tested against a directory, and a test that
+# leaves temporary files around is a test nobody runs twice
+DETC_LIVE=1
+export DETC_LIVE
+"$detc" --root "$root" apply

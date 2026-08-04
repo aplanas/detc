@@ -1,0 +1,299 @@
+#!/bin/sh
+
+# A reboot of the machine, when a configuration file that only the kernel or the
+# firmware reads has changed.
+#
+# The name of the resource is a name for the reason, and nothing else reads it:
+# `resources.d/reboot/kernel` and `resources.d/reboot/microcode` are two reasons
+# tracked apart, so a change to one does not forget what the other was last
+# rebooted for.
+#
+#     when: "{{ detc.files['etc/default/grub'] | default('') }}"
+#     _order: 90
+#
+# `detc.files` holds the digest of what each managed file is *about to* hold,
+# worked out before any resource is inspected, so the declaration expands to a
+# value that moves exactly when the file moves.  This provider writes down the
+# value it last rebooted for and reports that back, so the resource is in sync
+# for as long as the file has not changed, and asks to be applied on the one run
+# that changes it.  `--dry-run` therefore says that the machine would reboot,
+# before anything is.
+#
+# It is the same shape as `config` in `providers/unit`, and for the same reason:
+# a flag would not have worked.  A property meaning "reboot me" is reported
+# `false` by any honest `inspect`, and detc inspects again after applying and
+# fails a resource that still differs -- so the signal has to be a value the
+# provider can record and give back, which a digest is and a flag is not.
+#
+# More than one file is more than one digest: join them, and the value moves
+# when any of them does.
+#
+#     when: >-
+#       {{ detc.files['etc/default/grub'] | default('') }}
+#       {{ detc.files['etc/kernel/cmdline'] | default('') }}
+#
+# ## Nothing here reboots the machine
+#
+# A `systemctl reboot` in this file would be the whole problem rather than the
+# answer to it.  systemd would send detc `SIGTERM` in the middle of the loop
+# that applies the plan, so the `applied` commit would never be written, nor
+# would `var/lib/detc/last.yaml`, and every object ordered after this one would
+# be skipped in silence.  The next run would then read its own `found` commit as
+# a system that somebody changed behind detc's back.
+#
+# So this arranges the reboot and returns.  detc holds an exclusive lock on
+# `var/lib/detc/run.lock` for the whole of a run and names it in
+# `DETC_RUN_LOCK`, and it releases it after both journal commits and after
+# `last.yaml` -- so a process that blocks on that lock and reboots when it gets
+# it reboots after the run is over, exactly, and for every caller: a terminal,
+# `detc.service`, or `detcd` on the far side of a connection.  `flock(1)` is all
+# it takes, because the lock detc holds is `flock(2)`.
+#
+# Two other shapes were considered.  A `detc-reboot.service` ordered
+# `After=detc.service` is a harder guarantee, and only covers the runs that go
+# through the unit -- an administrator typing `detc apply` would leave a flag
+# behind and no reboot.  And a waiter polling detc's own `$PPID` needs no lock,
+# but polls, and is only as good as the assumption that a pid is not reused.
+#
+# The variable being absent is what says that no run is in progress -- a
+# `--dry-run`, a `check` or a `var` never sets it -- so a reboot asked for
+# without one is refused rather than performed now.
+#
+# ## First sight is not a change
+#
+# A machine that has never been asked about this reason records the value and
+# does not reboot.  It has just booted into the state the declaration describes,
+# and rebooting a node the first time it is configured would be a reboot for
+# nothing on every node there is.
+#
+# This is the one place that deviates from `providers/unit`, which does restart
+# on first sight, and the difference is the cost: restarting `sshd` once on the
+# run that configures it is free, and a reboot is not.  So the record being
+# absent and the record being different are two cases here, and one there.
+#
+# ## A root that is not the running system
+#
+# Nothing in a tree is running, so there is nothing to reboot, and what is built
+# there boots with the new configuration by definition.  The value is recorded
+# all the same -- which is what stops the first boot of an image from rebooting
+# itself for a file that was already correct when it was written.
+#
+# `DETC_LIVE=1` is deliberately *not* honoured, the same as in `providers/unit`.
+# That flag says the machine looking at the tree is the machine that will boot
+# it, which makes an address or a disk true and says nothing about this; and in
+# the one place that sets it -- an initrd, before switch-root -- the machine is
+# about to boot anyway, so a reboot would be absurd.  That is also why `reboot`
+# is not among the types that `tools/detc-inject` stands in for with
+# `tools/detc-defer`: this one can answer honestly for a tree, and the answer it
+# gives is the one that is wanted.
+
+set -eu
+
+fail() {
+    echo "reboot: $*" >&2
+    exit 1
+}
+
+# The state that the declaration asks for, as `key<tab>value` lines.
+#
+# This is the same reader as in the other core providers, copied rather than
+# shared, because a provider is one executable and a fleet replaces it by
+# dropping one file of its own into a prefix.  A change to one of them is a
+# change to all of them.
+#
+# Only the object under `desired` is read, and only the shapes that a schema
+# here declares: strings, numbers, booleans, and arrays of those, which become
+# their elements joined by a comma.  The request arrives compact, the way detc
+# writes it, so there is no whitespace to step over.
+desired() {
+    awk '
+{
+  s = $0
+  n = length(s)
+  i = index(s, "\"desired\":{") + 11
+  if (i == 11 || substr(s, i, 1) == "}") exit
+  while (i <= n) {
+    k = str()
+    i++
+    print k "\t" val()
+    if (substr(s, i, 1) != ",") exit
+    i++
+  }
+}
+
+function str(   out, c) {
+  i++
+  out = ""
+  while (i <= n) {
+    c = substr(s, i, 1)
+    i++
+    if (c == "\"") return out
+    if (c == "\\") {
+      c = substr(s, i, 1)
+      i++
+      if (c == "n") c = "\n"
+      else if (c == "t") c = "\t"
+      else if (c == "u") { c = " "; i += 4 }
+    }
+    out = out c
+  }
+  return out
+}
+
+function val(   out, c) {
+  c = substr(s, i, 1)
+  if (c == "\"") return str()
+  if (c == "{") { print "an object is not a property this reads" > "/dev/stderr"; exit 1 }
+  if (c == "[") {
+    i++
+    out = ""
+    if (substr(s, i, 1) == "]") { i++; return out }
+    while (i <= n) {
+      out = out val()
+      c = substr(s, i, 1)
+      i++
+      if (c == "]") return out
+      out = out ","
+    }
+    return out
+  }
+  out = ""
+  while (i <= n && index(",}", substr(s, i, 1)) == 0) {
+    out = out substr(s, i, 1)
+    i++
+  }
+  return out
+}
+'
+}
+
+# The name of the object, out of the request.  The keys arrive in the order that
+# a JSON map sorts them, which puts `name` after `current`, `desired` and
+# `diff` -- last, in both requests -- so the one at the end of the line is the
+# top level one and a `name` inside the declaration is not mistaken for it.
+name_of() {
+    sed -n 's/.*,"name":"\([^"]*\)"}$/\1/p'
+}
+
+yaml() {
+    printf '%s: "%s"\n' "$1" "$(printf '%s' "$2" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+}
+
+root=${DETC_ROOT:-/}
+live=false
+[ "$root" != / ] || live=true
+
+# Where the value that was last rebooted for is kept.  Under the root, because
+# it describes that tree and not the one detc happens to be running from, and
+# named after the reason with the slashes taken out, because a name is free
+# form and they are not directories here.
+record() {
+    printf '%s/var/lib/detc/providers/reboot/%s' "$root" "$(printf '%s' "$1" | tr / -)"
+}
+
+case "${1-}" in
+  schema)
+    cat <<'EOF'
+description: A reboot of the machine, after the run that asks for it
+order: 90
+properties:
+  when:
+    type: string
+    description: >-
+      An opaque value standing for the configuration the machine was last
+      rebooted for, which is what `detc.files` holds for a managed file.  When
+      it changes, a reboot is arranged for after this run has finished, and the
+      new value written down.  It is never interpreted, so anything that changes
+      when the configuration changes will do.  A reason seen for the first time
+      is recorded and not acted on: the machine has just booted into the state
+      it describes.
+EOF
+    ;;
+
+  inspect)
+    request=$(cat)
+    name=$(printf '%s' "$request" | name_of)
+    [ -n "$name" ] || fail "the request does not name a reason"
+
+    # Nothing recorded is reported as the empty value rather than as no value,
+    # which is what a declaration reading an unmanaged file expands to, so a
+    # reason for a file that is not there is in sync and asks for nothing
+    file=$(record "$name")
+    yaml when "$(cat "$file" 2>/dev/null || true)"
+    ;;
+
+  apply)
+    request=$(cat)
+    name=$(printf '%s' "$request" | name_of)
+    [ -n "$name" ] || fail "the request does not name a reason"
+
+    when=
+    declares_when=false
+    while IFS='	' read -r property value; do
+        case "$property" in
+          when) when=$value; declares_when=true ;;
+        esac
+    done <<EOF
+$(printf '%s' "$request" | desired)
+EOF
+
+    [ "$declares_when" = true ] || fail "$name says nothing about when to reboot"
+
+    file=$(record "$name")
+
+    # Three cases, and only the last one reboots: a reason nobody has recorded
+    # yet, a tree that is not running, and a value that moved on a machine that
+    # is.  The first two write the value down and stop, which is what makes the
+    # next run see no difference
+    if [ -e "$file" ] && [ "$live" = true ]; then
+        was=$(cat "$file")
+
+        if [ "$when" != "$was" ]; then
+            lock=${DETC_RUN_LOCK:-}
+            [ -n "$lock" ] || fail "there is no run to wait for, so $name cannot be rebooted for after one"
+            command -v flock > /dev/null 2>&1 \
+                || fail "flock is not installed, so a reboot cannot be held until this run is over"
+
+            # `flock` blocks on the lock detc is holding and reboots when it is
+            # released, which is after the last journal commit and after
+            # `last.yaml`.  Whatever runs it has to be detached from this
+            # process, and with every descriptor of its own: detc reads the
+            # standard output of a provider to end of file, so a grandchild
+            # that inherited it would hold the pipe open and hang the run that
+            # is being waited for
+            if [ -d /run/systemd/system ] && command -v systemd-run > /dev/null 2>&1; then
+                # A unit named after the reason, and not one fixed name, so
+                # that a second reason in the same run is not refused for a
+                # reboot the first one already arranged
+                unit="detc-reboot-$(printf '%s' "$name" | tr -c 'a-zA-Z0-9:_.-' -)"
+                systemd-run --collect --quiet --unit="$unit" \
+                    --description="Reboot that detc was asked for by $name" \
+                    flock "$lock" systemctl reboot > /dev/null \
+                    || fail "systemd-run could not arrange the reboot for $name"
+            elif command -v setsid > /dev/null 2>&1 && command -v reboot > /dev/null 2>&1; then
+                # `$1` is the lock, and it has to reach the shell that `setsid`
+                # starts rather than be expanded by this one, which is what the
+                # single quotes are for
+                # shellcheck disable=SC2016
+                setsid -f /bin/sh -c 'flock "$1" reboot' sh "$lock" \
+                    < /dev/null > /dev/null 2>&1 \
+                    || fail "the reboot for $name could not be detached"
+            else
+                fail "there is no systemd-run, and no setsid and reboot, so the reboot for $name cannot be detached from this run"
+            fi
+        fi
+    fi
+
+    mkdir -p "$(dirname "$file")"
+    printf '%s' "$when" > "$file"
+    chmod 0644 "$file"
+    ;;
+
+  "")
+    fail "no verb, expected schema, inspect or apply"
+    ;;
+
+  *)
+    fail "unknown verb $1, expected schema, inspect or apply"
+    ;;
+esac

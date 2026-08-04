@@ -1,0 +1,1517 @@
+//! One shot tool that instantiates the configuration files of the system.
+//!
+//! Every subcommand works on the objects that the system provides, resolved
+//! with the UAPI Configuration File Specification, and can be pointed to a root
+//! different from `/` with `--root`, so that a system can be inspected, or
+//! prepared, from outside.
+
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::fs;
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+use std::result;
+use std::str::FromStr;
+
+use clap::{Args, Parser, Subcommand};
+use env_logger::Env;
+use log::{LevelFilter, warn};
+use serde_json::Value;
+
+use detc::{Result, apply, bundle, err, journal, last, lock, provider, resource, template, var};
+
+use crate::record::{Commit, Record, Sink, TextSink};
+
+/// Types of objects that can be listed, checked and applied.
+const TYPES: &[&str] = &["probe", "template", "resource", "provider"];
+
+/// Root of the system when none is given in the command line.
+pub(crate) const DEFAULT_ROOT: &str = "/";
+
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct Cli {
+    /// Optional root path
+    #[arg(short, long)]
+    root: Option<PathBuf>,
+
+    /// Dry run
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Turn debugging information on
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    debug: u8,
+
+    #[command(subcommand)]
+    command: Commands,
+}
+
+/// Variables given in the command line, that override the ones collected from
+/// the system.
+///
+/// The same set of options is accepted by every subcommand that needs a
+/// namespace, so that the admin can see what a template would produce with a
+/// value before setting it.
+#[derive(Args, Default)]
+pub(crate) struct VarArgs {
+    /// Key component for a variable
+    #[arg(short, long)]
+    pub(crate) key: Vec<String>,
+
+    /// Value component for a variable (YAML value systax)
+    #[arg(short, long)]
+    pub(crate) value: Vec<String>,
+
+    /// Key-value combination for a variable (YAML syntax)
+    #[arg(long)]
+    pub(crate) kv: Vec<String>,
+}
+
+impl VarArgs {
+    /// Whether these arguments write to the system instead of querying it.
+    ///
+    /// Persisting a variable is the only thing besides `apply` that writes, and
+    /// the answer is needed in three places that must not disagree: the dry run
+    /// below, the drop-ins it names, and the method that `detctl` sends.
+    pub(crate) fn persists(&self, file: Option<&Path>, probes: bool, probe: Option<&Path>) -> bool {
+        !probes
+            && probe.is_none()
+            && (file.is_some()
+                || !self.kv.is_empty()
+                || (!self.key.is_empty() && !self.value.is_empty()))
+    }
+
+    /// Pair every key with its value.  Both are given as repeated options, so
+    /// they only address a variable when there are as many of one as the other.
+    pub(crate) fn pairs(&self) -> Result<impl Iterator<Item = (&String, &String)>> {
+        if self.key.len() != self.value.len() {
+            return err!(
+                "When setting variable values, make sure to provide the same ammount of key and values"
+            );
+        }
+
+        Ok(self.key.iter().zip(self.value.iter()))
+    }
+
+    /// Collect the variables of the system, updated with the ones given in the
+    /// command line.
+    fn variables(&self, root: &Path) -> Result<var::Variables> {
+        let mut var = var::Variables::from_system(root)?;
+
+        for (key, value) in self.pairs()? {
+            var.set_json(key, value)?;
+        }
+
+        for kv in &self.kv {
+            var.set_kv(kv)?;
+        }
+
+        Ok(var)
+    }
+}
+
+#[derive(Subcommand)]
+pub(crate) enum Commands {
+    /// Bring the system to the state that its objects declare
+    Apply {
+        /// Configuration file or resource to apply, all of them by default
+        file: Option<PathBuf>,
+
+        /// Type (list --types for all the possible types)
+        #[arg(short, long)]
+        r#type: Option<String>,
+
+        #[command(flatten)]
+        var: VarArgs,
+    },
+
+    /// List the available templates and commands
+    List {
+        /// List only the different types available
+        #[arg(long)]
+        types: bool,
+
+        /// Type (list --types for all the possible types)
+        #[arg(short, long)]
+        r#type: Option<String>,
+    },
+
+    /// Describe a type of resource, from the schema of its provider
+    Doc {
+        /// Type of resource (list --type provider for the ones available)
+        #[arg(short, long)]
+        r#type: String,
+    },
+
+    /// Show the content of a template or command
+    Cat {
+        /// Configuration file instantiated by the template
+        file: PathBuf,
+
+        /// Type (list --types for all the possible types)
+        #[arg(short, long)]
+        r#type: Option<String>,
+
+        /// Show the template, instead of the instantiated content
+        #[arg(long)]
+        raw: bool,
+
+        #[command(flatten)]
+        var: VarArgs,
+    },
+
+    /// Check that the objects of the system can be instantiated
+    Check {
+        /// Configuration file or probe to check, all of them by default
+        file: Option<PathBuf>,
+
+        /// Type (list --types for all the possible types)
+        #[arg(short, long)]
+        r#type: Option<String>,
+
+        #[command(flatten)]
+        var: VarArgs,
+    },
+
+    /// Show the schema of a type of resource, as its provider writes it
+    Schema {
+        /// Type of resource (list --type provider for the ones available)
+        #[arg(short, long)]
+        r#type: String,
+    },
+
+    /// Query or set global variables
+    Var {
+        /// Document with a set of variables to merge
+        file: Option<PathBuf>,
+
+        #[command(flatten)]
+        var: VarArgs,
+
+        /// List the available probes
+        #[arg(long)]
+        probes: bool,
+
+        /// Shows the output of a probe
+        #[arg(short, long)]
+        probe: Option<PathBuf>,
+    },
+
+    /// Build, check and install a tree of objects
+    Bundle {
+        #[command(subcommand)]
+        command: BundleCommands,
+    },
+
+    /// Show the report of a previous run
+    Report {
+        /// Report ID to show
+        id: Option<String>,
+
+        /// List all available reports
+        #[arg(long)]
+        list: bool,
+
+        /// Show last report
+        #[arg(short, long)]
+        last: bool,
+
+        /// Show only failed tasks
+        #[arg(short, long)]
+        only_fails: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum BundleCommands {
+    /// Build a bundle out of a source tree
+    Create {
+        /// Directory of the source tree, the current one by default
+        dir: Option<PathBuf>,
+
+        /// File to write the bundle to, or - for the standard output
+        #[arg(short, long)]
+        output: PathBuf,
+
+        /// Private key to sign the bundle with
+        #[arg(long)]
+        sign: Option<PathBuf>,
+    },
+
+    /// Check a bundle and everything it carries, without installing it
+    Verify {
+        /// File, - for the standard input, or URL of the bundle
+        bundle: Source,
+    },
+
+    /// Install a bundle, taking away the one that was installed before it
+    Install {
+        /// File, - for the standard input, or URL of the bundle
+        bundle: Source,
+
+        /// Keep the bundle, so that it is installed again after a reboot
+        #[arg(long)]
+        persist: bool,
+
+        /// Apply the system once the bundle is installed
+        #[arg(long)]
+        apply: bool,
+
+        /// Install a bundle that carries no signature
+        #[arg(long)]
+        allow_unsigned: bool,
+    },
+
+    /// Install again the bundle that was kept, as a reboot needs
+    Restore {
+        /// Apply the system once the bundle is installed
+        #[arg(long)]
+        apply: bool,
+    },
+
+    /// Show the bundle that is installed
+    Status,
+
+    /// Take away the installed bundle, and the copy that was kept of it
+    Remove,
+}
+
+/// Where the bytes of a bundle come from.
+///
+/// A path means something only on the machine where it was typed, so `detctl`
+/// reads it and sends what is in it.  A URL means the same thing everywhere, so
+/// it crosses unchanged and the machine that installs the bundle is the one
+/// that fetches it, which is how one bundle reaches a fleet without going
+/// through the uplink of the admin once per node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Source {
+    /// A file of the machine that runs the command.
+    Path(PathBuf),
+
+    /// The standard input.
+    Stdin,
+
+    /// Something to fetch over HTTP.
+    Url(String),
+
+    /// The bundle itself, which is the shape it has once it crossed a
+    /// connection.  Nothing typed in a command line is ever this.
+    Bytes(Vec<u8>),
+
+    /// The copy that `--persist` left in the system, which is the one a machine
+    /// installs again after a reboot.  Nothing typed in a command line is ever
+    /// this either.
+    Stored,
+}
+
+impl FromStr for Source {
+    type Err = String;
+
+    fn from_str(locator: &str) -> result::Result<Self, Self::Err> {
+        Ok(match locator {
+            "" => return Err("A bundle is a file, a URL, or - for the standard input".to_string()),
+            "-" => Source::Stdin,
+
+            locator if locator.starts_with("http://") || locator.starts_with("https://") => {
+                Source::Url(locator.to_string())
+            }
+
+            // A `file://` names a file of the machine that would fetch it, so
+            // it is one.  Which is worth having even though a path is shorter:
+            // over a connection there is only a URL to say it with, and this is
+            // how a node is told to install what is already on its own disk
+            locator if locator.starts_with("file://") => Source::Path(local(locator)?),
+
+            locator if locator.contains("://") => {
+                return Err(format!(
+                    "{locator} is fetched in a way that detc does not know; a bundle arrives over http, over https, or as a file"
+                ));
+            }
+
+            locator => Source::Path(PathBuf::from(locator)),
+        })
+    }
+}
+
+/// Where the bundle came from, as the installed system records it.
+impl fmt::Display for Source {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Source::Url(url) => write!(f, "{url}"),
+            _ => write!(f, "{}", bundle::LOCAL_ORIGIN),
+        }
+    }
+}
+
+impl Source {
+    /// The bundle itself, read or fetched.
+    pub(crate) fn read(&self) -> Result<Vec<u8>> {
+        match self {
+            Source::Path(path) => {
+                fs::read(path).map_err(|e| format!("Cannot read {}: {e}", path.display()).into())
+            }
+
+            Source::Stdin => {
+                let mut file = Vec::new();
+                io::stdin().lock().read_to_end(&mut file)?;
+                Ok(file)
+            }
+
+            Source::Url(url) => fetch(url),
+            Source::Bytes(file) => Ok(file.clone()),
+            Source::Stored => err!("The bundle that was kept is read from the system, not here"),
+        }
+    }
+}
+
+/// The path that a `file://` URL names, on the machine that reads it.
+///
+/// `file:///etc/bundle.detc` and the `file://localhost/etc/bundle.detc` that
+/// means the same thing.  A file of another host is not one that can be read
+/// from here, and an escape is not decoded, because the same name is accepted
+/// as a path and there it means itself.
+fn local(url: &str) -> result::Result<PathBuf, String> {
+    let rest = &url["file://".len()..];
+    let path = rest.strip_prefix("localhost").unwrap_or(rest);
+
+    if !path.starts_with('/') {
+        return Err(format!(
+            "{url} names a file of another host, which is not one that can be read from here"
+        ));
+    }
+
+    if path.contains('%') {
+        return Err(format!(
+            "{url} holds an escape, which is not decoded here; name the file by its path"
+        ));
+    }
+
+    Ok(PathBuf::from(path))
+}
+
+/// Fetch a bundle.
+///
+/// What makes a mirror safe to pull from is the signature and not the
+/// transport, so this is a fetch and nothing more: nothing is sent that says
+/// who is asking, and nothing of the answer is kept but its bytes.
+///
+/// The certificates that an `https://` mirror is checked against are the ones
+/// compiled into this binary, and are deliberately not the ones of the system.
+/// A bundle is fetched during the first boot, which is the moment before there
+/// is anything in `etc` to read them from.
+#[cfg(feature = "fetch")]
+fn fetch(url: &str) -> Result<Vec<u8>> {
+    log::debug!("Fetching {url}");
+
+    let mut answer = ureq::get(url).call().map_err(|e| explain(url, e))?;
+
+    Ok(answer
+        .body_mut()
+        .with_config()
+        .limit(bundle::MAX_SIZE as u64)
+        .read_to_vec()
+        .map_err(|e| format!("Cannot read what {url} answered: {e}"))?)
+}
+
+/// What went wrong with a fetch, said so that it can be acted on.
+///
+/// A certificate that does not check out is the one worth spelling out: it is
+/// the failure that a working `curl` on the same machine contradicts, because
+/// the two do not read the same certificate authorities, and nothing in *this
+/// mirror cannot be verified* says which of them is right.
+#[cfg(feature = "fetch")]
+fn explain(url: &str, error: ureq::Error) -> String {
+    // The last of the three is where a refused certificate actually arrives:
+    // the handshake fails inside the connection, and what comes back out is the
+    // complaint of the TLS library wrapped in an error of the socket
+    let refused = match &error {
+        ureq::Error::Tls(_) | ureq::Error::Rustls(_) => true,
+        ureq::Error::Io(e) => e.kind() == io::ErrorKind::InvalidData,
+        _ => false,
+    };
+
+    match refused {
+        true => format!(
+            "Cannot fetch {url}: {error}.  A mirror is checked against the certificate authorities that are compiled into detc, and never against the ones in etc/ssl/certs, so one that is vouched for by an authority of your own, or by whatever opens the connection on the way, cannot be fetched from here; fetch the bundle by other means and install it as a file"
+        ),
+        false => format!("Cannot fetch {url}: {error}"),
+    }
+}
+
+/// Stands in for the fetch in a build that left it out, so that a URL is
+/// refused with the reason and not with a failure that looks like the mirror.
+#[cfg(not(feature = "fetch"))]
+fn fetch(url: &str) -> Result<Vec<u8>> {
+    err!(
+        "This build of detc cannot fetch, so {url} has to be fetched elsewhere and the bundle installed as a file"
+    )
+}
+
+/// Validate the type of object requested in the command line.  Only the
+/// templates are implemented, so the type is optional.
+fn check_type(kind: Option<&str>) -> Result<()> {
+    match kind {
+        None => Ok(()),
+        Some(kind) if TYPES.contains(&kind) => Ok(()),
+        Some(kind) => err!("Unknown type {kind}, use --types to list the valid ones"),
+    }
+}
+
+/// Resolve a probe, that can be addressed with its own path, or with the tail
+/// of the path of one of the available probes.
+fn resolve_probe(probe: &Path, root: &Path) -> Result<PathBuf> {
+    if probe.is_file() {
+        return Ok(probe.to_path_buf());
+    }
+
+    match var::Variables::probes(root)?
+        .into_iter()
+        .map(|(_, path)| path)
+        .find(|path| path.ends_with(probe))
+    {
+        Some(path) => Ok(path),
+        None => err!("Probe {} not found", probe.display()),
+    }
+}
+
+/// List the objects of the system, one per line, as the type of the object, the
+/// name that addresses it, and where it comes from.
+fn list(out: &mut dyn Sink, root: &Path, types: bool, kind: Option<&str>) -> Result<()> {
+    if types {
+        for kind in TYPES {
+            out.emit(Record::Type(kind.to_string()))?;
+        }
+        return Ok(());
+    }
+
+    check_type(kind)?;
+
+    let object = |r#type: &str, name: String, source: String| Record::Object {
+        r#type: r#type.to_string(),
+        name,
+        source,
+    };
+
+    if kind.is_none() || kind == Some("probe") {
+        for (mount, path) in var::Variables::probes(root)? {
+            out.emit(object("probe", mount, path.display().to_string()))?;
+        }
+    }
+
+    if kind.is_none() || kind == Some("template") {
+        for template in template::Templates::from_system(root)?.templates() {
+            out.emit(object(
+                "template",
+                template.target().display().to_string(),
+                template.source().display().to_string(),
+            ))?;
+        }
+    }
+
+    if kind.is_none() || kind == Some("resource") {
+        for resource in resource::Resources::from_system(root)?.resources() {
+            out.emit(object(
+                "resource",
+                resource.id().to_string(),
+                resource.source().display().to_string(),
+            ))?;
+        }
+    }
+
+    if kind.is_none() || kind == Some("provider") {
+        for provider in provider::Providers::from_system(root)?.providers() {
+            out.emit(object(
+                "provider",
+                provider.kind().to_string(),
+                provider.path().display().to_string(),
+            ))?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Show the schema of a type of resource, as its provider writes it.
+///
+/// The type here is the type of a resource, and not one of [`TYPES`]: only a
+/// provider declares what it accepts, so a template or a probe has nothing to
+/// show.
+fn schema(out: &mut dyn Sink, root: &Path, kind: &str) -> Result<()> {
+    out.emit(Record::Text(find_provider(root, kind)?.raw_schema()?))
+}
+
+/// Describe a type of resource for a person, from the schema of its provider.
+fn doc(out: &mut dyn Sink, root: &Path, kind: &str) -> Result<()> {
+    out.emit(Record::Text(find_provider(root, kind)?.schema()?.to_doc()))
+}
+
+/// Resolve the provider that implements a type of resource.
+///
+/// The types of object are rejected with a message of their own, as `--type
+/// template` is an easy thing to write when `--type` means something else in
+/// every other subcommand.
+fn find_provider(root: &Path, kind: &str) -> Result<provider::Provider> {
+    if TYPES.contains(&kind) {
+        return err!(
+            "{kind} is a type of object, not a type of resource - pass the type that a provider implements, as shown by `detc list --type provider`"
+        );
+    }
+
+    Ok(provider::Providers::from_system(root)?.find(kind)?.clone())
+}
+
+/// Show the content that a template would write in the system, or the desired
+/// state that a resource declares.  `--raw` shows the file as it was written,
+/// before the variables of the namespace reach it.
+fn cat(
+    out: &mut dyn Sink,
+    root: &Path,
+    file: &Path,
+    kind: Option<&str>,
+    raw: bool,
+    args: &VarArgs,
+) -> Result<()> {
+    check_type(kind)?;
+
+    let text = if kind == Some("resource") {
+        let resources = resource::Resources::from_system(root)?;
+        let resource = resources.find(&file.to_string_lossy())?;
+
+        if raw {
+            resource.content()?
+        } else {
+            resource.render(args.variables(root)?.value())?
+        }
+    } else {
+        let templates = template::Templates::from_system(root)?;
+        let template = templates.find(file)?;
+
+        if raw {
+            template.content()?
+        } else {
+            template.render(args.variables(root)?.value())?
+        }
+    };
+
+    out.emit(Record::Text(text))
+}
+
+/// Report the status of an object, and say whether it cannot be instantiated.
+fn checked(out: &mut dyn Sink, status: Result<()>, name: impl fmt::Display) -> Result<bool> {
+    let error = status.err().map(|e| e.to_string());
+    let failed = error.is_some();
+
+    out.emit(Record::Check {
+        name: name.to_string(),
+        error,
+    })?;
+
+    Ok(failed)
+}
+
+/// Run the probes, and report the ones that fail or that return a document
+/// that cannot be deserialized.  Returns the number of broken probes.
+fn check_probes(out: &mut dyn Sink, root: &Path, probe: Option<&Path>) -> Result<usize> {
+    let probes = match probe {
+        Some(probe) => vec![(String::new(), resolve_probe(probe, root)?)],
+        None => var::Variables::probes(root)?,
+    };
+
+    let mut failed = 0;
+    for (_, path) in probes {
+        if checked(
+            out,
+            var::Variables::from_probe(&path, root).map(|_| ()),
+            path.display(),
+        )? {
+            failed += 1;
+        }
+    }
+
+    Ok(failed)
+}
+
+/// Ask every provider for its schema, and report the ones that cannot answer
+/// or that describe themselves in a way that cannot be understood.  Returns the
+/// number of broken providers.
+fn check_providers(out: &mut dyn Sink, root: &Path) -> Result<usize> {
+    let mut failed = 0;
+
+    for provider in provider::Providers::from_system(root)?.providers() {
+        if checked(out, provider.schema().map(|_| ()), provider.kind())? {
+            failed += 1;
+        }
+    }
+
+    Ok(failed)
+}
+
+/// Instantiate the templates, and report the ones that cannot be written in
+/// the system.  Returns the number of broken templates.
+fn check_templates(
+    out: &mut dyn Sink,
+    root: &Path,
+    file: Option<&Path>,
+    args: &VarArgs,
+) -> Result<usize> {
+    let var = args.variables(root)?;
+    let templates = template::Templates::from_system(root)?;
+
+    let selected = match file {
+        Some(file) => vec![templates.find(file)?],
+        None => templates.templates().iter().collect(),
+    };
+
+    let mut failed = 0;
+    for template in selected {
+        if checked(
+            out,
+            template.check(var.value()),
+            template.target().display(),
+        )? {
+            failed += 1;
+        }
+    }
+
+    Ok(failed)
+}
+
+/// What every resource of the system requires that no run could give it, as a
+/// map of the resource to the reason.
+///
+/// The whole system is looked at whatever was selected, because a requirement
+/// is a statement about two objects and the other one is usually not the object
+/// that was asked about.  It is also why the rule is applied as if the plan were
+/// complete: a check always reads everything, so a requirement that is not here
+/// is a requirement that is nowhere.
+///
+/// Nothing is inspected and no template is rendered into a file, which is what
+/// keeps a check cheaper than a dry run.  One thing follows from that: the
+/// declarations are expanded against an empty `detc.files`, so a `_requires`
+/// that a template expression *computes* could read differently here than in a
+/// run.  A literal list, which is what one should be, cannot.
+fn requirement_errors(
+    root: &Path,
+    providers: &provider::Providers,
+    resources: &resource::Resources,
+    context: &Value,
+) -> Result<HashMap<String, String>> {
+    /// A resource, with everything the rule needs already resolved.
+    struct Object {
+        id: String,
+        order: i64,
+        requires: Vec<String>,
+        broken: bool,
+    }
+
+    let mut objects: Vec<Object> = template::Templates::from_system(root)?
+        .templates()
+        .iter()
+        .map(|template| Object {
+            id: apply::template_id(root, template.target()),
+            // A template has no order of its own, and nothing it can require
+            order: provider::DEFAULT_ORDER,
+            requires: Vec::new(),
+            broken: false,
+        })
+        .collect();
+
+    // A schema costs a process, and a system usually declares several resources
+    // of the same type
+    let mut schemas = HashMap::new();
+
+    for resource in resources.resources() {
+        if !schemas.contains_key(resource.kind()) {
+            let schema = providers.find(resource.kind()).and_then(|p| p.schema());
+            schemas.insert(resource.kind().to_string(), schema.ok());
+        }
+
+        // A provider that cannot be asked, or a declaration that cannot be
+        // expanded, is already reported by the check of the resource itself.
+        // Here it is only an object with no order worth comparing
+        let object = match (&schemas[resource.kind()], resource.declaration(context)) {
+            (Some(schema), Ok(declaration)) => Object {
+                id: resource.id(),
+                order: declaration.order.unwrap_or_else(|| schema.order()),
+                requires: declaration.requires,
+                broken: false,
+            },
+            _ => Object {
+                id: resource.id(),
+                order: provider::DEFAULT_ORDER,
+                requires: Vec::new(),
+                broken: true,
+            },
+        };
+
+        objects.push(object);
+    }
+
+    let requirements: Vec<_> = objects
+        .iter()
+        .map(|object| apply::Requirement {
+            id: &object.id,
+            order: object.order,
+            requires: &object.requires,
+            broken: object.broken,
+        })
+        .collect();
+
+    Ok(apply::unmet(&requirements, true)
+        .into_iter()
+        .map(|(index, reason)| (objects[index].id.clone(), reason))
+        .collect())
+}
+
+/// Expand the resource declarations and check them against the schema of their
+/// provider, and report the ones that a provider could not be handed.  Returns
+/// the number of broken resources.
+///
+/// Nothing is asked of the provider beyond its schema: what the system looks
+/// like right now is a question for `apply --dry-run`.
+fn check_resources(
+    out: &mut dyn Sink,
+    root: &Path,
+    id: Option<&Path>,
+    args: &VarArgs,
+) -> Result<usize> {
+    // A declaration may react to a configuration file that is about to move,
+    // and reads what it will hold out of `detc.files`.  Nothing is planned
+    // here, so the map is empty -- but it has to be there, or a resource
+    // written the way the manual says would fail a check that the same resource
+    // passes in a run
+    let var = apply::unplanned(&args.variables(root)?)?;
+    let providers = provider::Providers::from_system(root)?;
+    let resources = resource::Resources::from_system(root)?;
+
+    let selected = match id {
+        Some(id) => vec![resources.find(&id.to_string_lossy())?],
+        None => resources.resources().iter().collect(),
+    };
+
+    let unmet = requirement_errors(root, &providers, &resources, var.value())?;
+
+    let mut failed = 0;
+    for resource in selected {
+        // One line per resource, whichever of the two is wrong with it: what a
+        // declaration asks for and what it waits for are both the declaration
+        let status = resource.check(&providers, var.value()).and_then(|()| {
+            match unmet.get(&resource.id()) {
+                Some(reason) => err!("{reason}"),
+                None => Ok(()),
+            }
+        });
+
+        if checked(out, status, resource.id())? {
+            failed += 1;
+        }
+    }
+
+    Ok(failed)
+}
+
+/// Report the objects of the system that cannot be instantiated, and fail if
+/// there is any of them.
+///
+/// A probe that fails is only a warning when the namespace is collected, as the
+/// rest of the data is still usable, so this is the place where the admin can
+/// see them.
+fn check(
+    out: &mut dyn Sink,
+    root: &Path,
+    file: Option<&Path>,
+    kind: Option<&str>,
+    args: &VarArgs,
+) -> Result<()> {
+    check_type(kind)?;
+
+    let kind = match (kind, file) {
+        // A single object is a template unless the type says otherwise, as the
+        // configuration file is the usual way of addressing it
+        (None, Some(_)) => Some("template"),
+        (kind, _) => kind,
+    };
+
+    let mut failed = 0;
+
+    if kind.is_none() || kind == Some("probe") {
+        failed += check_probes(out, root, file)?;
+    }
+
+    if kind.is_none() || kind == Some("template") {
+        failed += check_templates(out, root, file, args)?;
+    }
+
+    if kind.is_none() || kind == Some("resource") {
+        failed += check_resources(out, root, file, args)?;
+    }
+
+    if kind.is_none() || kind == Some("provider") {
+        failed += check_providers(out, root)?;
+    }
+
+    if failed > 0 {
+        return err!("{failed} object(s) cannot be instantiated");
+    }
+
+    Ok(())
+}
+
+/// What installing or removing a bundle did, or would do.
+fn bundle_record(action: &str, outcome: &bundle::Outcome) -> Record {
+    Record::Change {
+        action: action.to_string(),
+        object: format!("bundle {} {}", outcome.bundle.name, outcome.bundle.version),
+        summary: Some(format!(
+            "{} written, {} removed",
+            outcome.written, outcome.removed
+        )),
+        error: None,
+    }
+}
+
+/// Build, check and install the tree of objects that a bundle carries.
+fn bundle(out: &mut dyn Sink, root: &Path, command: &BundleCommands, dry_run: bool) -> Result<()> {
+    match command {
+        BundleCommands::Create { dir, output, sign } => {
+            let dir = dir.as_deref().unwrap_or(Path::new("."));
+            let (what, file) = bundle::create(dir, sign.as_deref())?;
+
+            // The archive is the output, so the record that describes it would
+            // be one more member of it
+            if output == Path::new("-") && !dry_run {
+                io::stdout().lock().write_all(&file)?;
+                return Ok(());
+            }
+
+            if !dry_run {
+                fs::write(output, &file)
+                    .map_err(|e| format!("Cannot write {}: {e}", output.display()))?;
+            }
+
+            out.emit(Record::Change {
+                action: match dry_run {
+                    true => "create".to_string(),
+                    false => "created".to_string(),
+                },
+                object: format!("bundle {} {}", what.name, what.version),
+                summary: Some(output.display().to_string()),
+                error: None,
+            })
+        }
+
+        BundleCommands::Verify { bundle: source } => {
+            match bundle::verify(root, &source.read()?, false) {
+                Ok(what) => out.emit(Record::Check {
+                    name: format!(
+                        "bundle {} {} signed by {}",
+                        what.name, what.version, what.signer
+                    ),
+                    error: None,
+                }),
+
+                // The reason is reported as the answer, the way a check of any
+                // other object is, and the run still fails
+                Err(e) => {
+                    out.emit(Record::Check {
+                        name: source.to_string(),
+                        error: Some(e.to_string()),
+                    })?;
+
+                    err!("The bundle cannot be trusted")
+                }
+            }
+        }
+
+        BundleCommands::Install {
+            bundle: source,
+            persist,
+            apply,
+            allow_unsigned,
+        } => {
+            match source {
+                Source::Stored => restore_bundle(out, root, dry_run)?,
+                source => {
+                    let outcome = bundle::install(
+                        root,
+                        &source.read()?,
+                        &source.to_string(),
+                        *persist,
+                        *allow_unsigned,
+                        dry_run,
+                    )?;
+
+                    let action = match dry_run {
+                        true => "install",
+                        false => "installed",
+                    };
+
+                    out.emit(bundle_record(action, &outcome))?;
+                }
+            }
+
+            match apply {
+                true => apply_system(out, root, None, None, dry_run, &VarArgs::default()),
+                false => Ok(()),
+            }
+        }
+
+        BundleCommands::Restore { apply } => {
+            restore_bundle(out, root, dry_run)?;
+
+            match apply {
+                true => apply_system(out, root, None, None, dry_run, &VarArgs::default()),
+                false => Ok(()),
+            }
+        }
+
+        // Nothing installed says nothing, the way listing an empty system does
+        BundleCommands::Status => match bundle::installed(root)? {
+            Some(what) => out.emit(Record::Bundle {
+                name: what.name,
+                version: what.version,
+                signer: what.signer,
+                origin: what.origin,
+                persist: what.persist,
+            }),
+            None => Ok(()),
+        },
+
+        BundleCommands::Remove => match bundle::remove(root, dry_run)? {
+            Some(outcome) => {
+                let action = match dry_run {
+                    true => "remove",
+                    false => "removed",
+                };
+
+                out.emit(bundle_record(action, &outcome))
+            }
+            None => err!("There is no bundle installed in this system"),
+        },
+    }
+}
+
+/// Install again the bundle that `--persist` kept.
+fn restore_bundle(out: &mut dyn Sink, root: &Path, dry_run: bool) -> Result<()> {
+    let outcome = bundle::restore(root, dry_run)?;
+    let action = match dry_run {
+        true => "restore",
+        false => "restored",
+    };
+
+    out.emit(bundle_record(action, &outcome))
+}
+
+/// One entry of a plan: what happens, the object it happens to, and, for a
+/// resource, the properties that are not the way they are declared.
+fn change_record(status: &str, change: &apply::Change) -> Record {
+    Record::Change {
+        action: status.to_string(),
+        object: change.to_string(),
+        summary: match change.summary() {
+            summary if summary.is_empty() => None,
+            summary => Some(summary),
+        },
+        error: None,
+    }
+}
+
+/// Bring the system to the state that its objects declare.
+///
+/// With `--dry-run` the plan is printed and nothing happens: the templates are
+/// rendered in memory and the providers are only asked what the system looks
+/// like, which is what makes the drift report safe to run at any time.
+///
+/// An object that cannot be applied is reported and the rest of the plan is
+/// still applied, because stopping at the first failure leaves the system just
+/// as half configured as continuing does, and continuing at least says what
+/// happened to everything.  The exception is an object that said what it was
+/// waiting for: it is skipped rather than applied against something that is not
+/// there, so a failure is reported once instead of once per object downstream
+/// of it.
+fn apply_system(
+    out: &mut dyn Sink,
+    root: &Path,
+    file: Option<&Path>,
+    kind: Option<&str>,
+    dry_run: bool,
+    args: &VarArgs,
+) -> Result<()> {
+    check_type(kind)?;
+
+    let kind = match (kind, file) {
+        // A single object is a template unless the type says otherwise, as the
+        // configuration file is the usual way of addressing it
+        (None, Some(_)) => Some("template"),
+        (kind, _) => kind,
+    };
+
+    if let Some(kind @ ("probe" | "provider")) = kind {
+        return err!(
+            "A {kind} is not applied, it is what the objects that are applied are made of"
+        );
+    }
+
+    // From here to the end of the function the system is this run's, and
+    // nothing else converges it in the meantime.  It is released when this
+    // returns, which is after both journal commits and after `last.yaml`, and
+    // that is exactly what a provider with something to do *after* detc waits
+    // on -- `providers/reboot` is the one that does.  `--dry-run` takes
+    // nothing: a drift report has to stay runnable at any time.
+    //
+    // The binding has to be named.  `let _ = ` would drop it here and leave
+    // nothing locked at all.
+    let _lock = (!dry_run).then(|| lock::Lock::acquire(root)).transpose()?;
+
+    // A reboot takes the tmpfs, and with it everything that a bundle installed
+    // in it, so the copy that `--persist` kept is put back before the system is
+    // measured against what it declares.  A restore that fails fails the run:
+    // the bundle is part of the declared state, and converging without it
+    // silently would be worse than not converging at all.
+    if bundle::needs_restore(root) {
+        restore_bundle(out, root, dry_run)?;
+    }
+
+    let var = args.variables(root)?;
+
+    let templates = template::Templates::from_system(root)?;
+    let selected_templates = match (kind, file) {
+        (Some("resource"), _) => None,
+        (_, Some(file)) => Some(vec![templates.find(file)?]),
+        (_, None) => Some(templates.templates().iter().collect()),
+    };
+
+    let resources = resource::Resources::from_system(root)?;
+    let selected_resources = match (kind, file) {
+        (Some("template"), _) => None,
+        (_, Some(id)) => Some(vec![resources.find(&id.to_string_lossy())?]),
+        (_, None) => Some(resources.resources().iter().collect()),
+    };
+
+    let mut plan = apply::Plan::build(
+        root,
+        &var,
+        selected_templates.as_deref(),
+        selected_resources.as_deref(),
+    )?;
+
+    if dry_run {
+        for change in plan.changes() {
+            out.emit(change_record(change.action().planned(), change))?;
+        }
+        return Ok(());
+    }
+
+    // A run that was given an object has only looked at that one, so it cannot
+    // say that the rest of the system is gone
+    let full = file.is_none() && kind.is_none();
+    let journal = journal::Journal::start(root, &var, "apply");
+    let last = last::Last::found(&plan);
+
+    record(&journal, apply::Phase::Found, &plan, full, &planned(&plan));
+
+    let mut failed = 0;
+    let mut lines = Vec::new();
+
+    // What did not work, as a declaration names it.  A skipped object goes in
+    // too, so that a chain collapses on its own: whatever waited on it waited,
+    // in the end, on the one thing that failed
+    let mut unsatisfied: HashSet<String> = HashSet::new();
+
+    for change in plan.changes_mut() {
+        // Cloned because deciding needs the change and skipping changes it
+        let blocked = change
+            .requires()
+            .iter()
+            .find(|id| unsatisfied.contains(*id))
+            .cloned();
+
+        let record = match blocked {
+            // Not counted as a failure: the object it waited on already is, and
+            // counting both would report one broken package as two broken
+            // objects.  The run still exits non-zero, for the root cause
+            Some(requirement) => {
+                change.skip(&requirement);
+                Record::Change {
+                    action: "skipped".to_string(),
+                    object: change.to_string(),
+                    summary: Some(format!("requires {requirement}, which was not applied")),
+                    error: None,
+                }
+            }
+            None => match change.apply() {
+                Ok(()) => change_record(change.action().taken(), change),
+                Err(e) => {
+                    failed += 1;
+                    Record::Change {
+                        action: "error".to_string(),
+                        object: change.to_string(),
+                        summary: None,
+                        error: Some(e.to_string()),
+                    }
+                }
+            },
+        };
+
+        // An object that was in sync returns without touching either, so what
+        // is satisfied is what the system holds and not only what this run
+        // wrote -- which is what `Change::apply` re-inspecting makes precise
+        if change.error().is_some() || change.skipped().is_some() {
+            unsatisfied.insert(change.id().to_string());
+        }
+
+        // The journal keeps the line and not the record, because what it stores
+        // is what the run reported, and reading it back must not depend on the
+        // shape that the objects have in a later version
+        let line = record.line();
+        let changes = change.action().changes();
+
+        out.emit(record)?;
+        if changes {
+            lines.push(line);
+        }
+    }
+
+    record(&journal, apply::Phase::Applied, &plan, full, &lines);
+
+    // The same, for whoever reads the machine without git.  It fails no run
+    // either: what a run says about itself is not what it did
+    if let Err(e) = last.write(root, "apply", full, &plan) {
+        warn!("Cannot write what the run did: {e}");
+    }
+
+    if failed > 0 {
+        return err!("{failed} object(s) could not be applied");
+    }
+
+    Ok(())
+}
+
+/// What the run is about to do, for the body of the message of the first of the
+/// two commits that it writes.
+fn planned(plan: &apply::Plan) -> Vec<String> {
+    plan.changes()
+        .iter()
+        .filter(|change| change.action().changes())
+        .map(|change| change_record(change.action().planned(), change).line())
+        .collect()
+}
+
+/// Add the system, as it is at this point of the run, to its history.
+///
+/// A journal that cannot be written is reported and nothing more: the exit
+/// status of a run says what happened to the system, not what happened to the
+/// bookkeeping.
+fn record(
+    journal: &Option<journal::Journal>,
+    phase: apply::Phase,
+    plan: &apply::Plan,
+    full: bool,
+    lines: &[String],
+) {
+    if let Some(journal) = journal
+        && let Err(e) = journal.record(phase, plan, full, lines)
+    {
+        warn!("Cannot record the state of the system: {e}");
+    }
+}
+
+/// Show what the runs of `detc` did to the system.
+///
+/// Only the runs that changed something are there to be shown, because the
+/// journal records the changes of a system and not the times it was asked
+/// whether it had any.  What it does not answer, `git log -p` in
+/// `/var/lib/detc/journal.git` does, which is why the commits are printed.
+fn report(
+    out: &mut dyn Sink,
+    root: &Path,
+    id: Option<&str>,
+    list: bool,
+    last: bool,
+    only_fails: bool,
+) -> Result<()> {
+    let journal = journal::Journal::open(root)?;
+
+    if list {
+        for run in journal.runs()? {
+            if only_fails && run.failures().is_empty() {
+                continue;
+            }
+            out.emit(Record::Run {
+                id: run.id,
+                time: run.time,
+                command: run.command,
+                summary: run.summary,
+            })?;
+        }
+
+        return Ok(());
+    }
+
+    let run = match id.filter(|_| !last) {
+        Some(id) => {
+            let id = id
+                .parse()
+                .map_err(|_| format!("{id} is not the number of a run"))?;
+            journal.run(id)?
+        }
+        None => match journal.runs()?.into_iter().next() {
+            Some(run) => run,
+            None => return err!("The journal has no run to report"),
+        },
+    };
+
+    // Asking for what went wrong is asking for the objects and nothing else,
+    // so that the answer can be read by something that is not a person
+    if only_fails {
+        for line in run.failures() {
+            out.emit(Record::Line(line.clone()))?;
+        }
+
+        return Ok(());
+    }
+
+    let commit =
+        |recorded: Option<(String, String)>| recorded.map(|(id, summary)| Commit { id, summary });
+
+    out.emit(Record::RunDetail {
+        id: run.id,
+        time: run.time,
+        command: run.command,
+        cause: run.cause,
+        found: commit(run.found),
+        applied: commit(run.applied),
+        lines: run.lines,
+    })
+}
+
+/// Query or set the variables of the namespace.
+///
+/// The variables that are set are persisted as user drop-ins, so that they are
+/// part of the namespace of the next run, while the ones that are queried are
+/// resolved from the system as it is now.
+fn variables(
+    out: &mut dyn Sink,
+    root: &Path,
+    file: Option<&Path>,
+    args: &VarArgs,
+    probes: bool,
+    probe: Option<&Path>,
+    dry_run: bool,
+) -> Result<()> {
+    // Persisting a variable is the only thing besides `apply` that writes to
+    // the system, so a dry run names the drop-ins instead of writing them.
+    // Querying the namespace writes nothing and is left alone.
+    if dry_run && args.persists(file, probes, probe) {
+        let mut dropins = Vec::new();
+
+        if let Some(file) = file {
+            dropins.push(var::Variables::dropin_document_path(file, root)?);
+        }
+        for (key, _) in args.pairs()? {
+            dropins.push(var::Variables::dropin_path(key, root));
+        }
+        for kv in &args.kv {
+            for key in var::Variables::kv_keys(kv)? {
+                dropins.push(var::Variables::dropin_path(&key, root));
+            }
+        }
+
+        for dropin in dropins {
+            let action = if dropin.exists() { "update" } else { "create" };
+            out.emit(Record::Change {
+                action: action.to_string(),
+                object: "variable".to_string(),
+                summary: Some(dropin.display().to_string()),
+                error: None,
+            })?;
+        }
+
+        return Ok(());
+    }
+
+    if probes {
+        for (mount, path) in var::Variables::probes(root)? {
+            out.emit(Record::Probe {
+                mount,
+                path: path.display().to_string(),
+            })?;
+        }
+    } else if let Some(probe) = probe {
+        let path = resolve_probe(probe, root)?;
+        let text = var::Variables::from_probe(path, root)?.to_yaml()?;
+        out.emit(Record::Text(text))?;
+    } else if let Some(file) = file {
+        var::Variables::from_system(root)?.merge_file_and_persist(
+            file,
+            root,
+            var::DEFAULT_MERGE,
+        )?;
+    } else if !args.key.is_empty() && args.value.is_empty() {
+        // Keys without values query the namespace
+        let var = var::Variables::from_system(root)?;
+        for key in &args.key {
+            out.emit(Record::Text(var.get_yaml(key)?))?;
+        }
+    } else if !args.key.is_empty() || !args.kv.is_empty() {
+        // The overrides are written one by one, so the namespace of the system
+        // does not need to be collected to persist them
+        let mut var = var::Variables::new();
+
+        for (key, value) in args.pairs()? {
+            var.set_json_and_persist(key, value, root)?;
+        }
+
+        for kv in &args.kv {
+            var.set_kv_and_persist(kv, root)?;
+        }
+    } else {
+        let text = var::Variables::from_system(root)?.to_yaml()?;
+        out.emit(Record::Text(text))?;
+    }
+
+    Ok(())
+}
+
+/// Set up the logger.  Nothing is reported by default, as the tool is expected
+/// to be used in a pipeline, and the messages go to the standard error.
+pub(crate) fn init_logger(debug: u8) {
+    let level = match debug {
+        0 => LevelFilter::Off,
+        1 => LevelFilter::Error,
+        2 => LevelFilter::Warn,
+        3 => LevelFilter::Info,
+        4 => LevelFilter::Debug,
+        _ => LevelFilter::Trace,
+    };
+
+    let env = Env::default()
+        .filter_or("DETC_LOG_LEVEL", level.as_str())
+        .write_style_or("DETC_LOG_STYLE", "always");
+
+    env_logger::init_from_env(env);
+}
+
+/// Run one subcommand, reporting to `out`.
+///
+/// Both entry points come through here, so that a command sent over a socket is
+/// the same command, run the same way, as the one typed on the machine.
+pub(crate) fn dispatch(
+    out: &mut dyn Sink,
+    root: &Path,
+    command: &Commands,
+    dry_run: bool,
+) -> Result<()> {
+    match command {
+        Commands::List { types, r#type } => list(out, root, *types, r#type.as_deref()),
+        Commands::Cat {
+            file,
+            r#type,
+            raw,
+            var,
+        } => cat(out, root, file, r#type.as_deref(), *raw, var),
+        Commands::Check { file, r#type, var } => {
+            check(out, root, file.as_deref(), r#type.as_deref(), var)
+        }
+        Commands::Var {
+            file,
+            var,
+            probes,
+            probe,
+        } => variables(
+            out,
+            root,
+            file.as_deref(),
+            var,
+            *probes,
+            probe.as_deref(),
+            dry_run,
+        ),
+
+        Commands::Doc { r#type } => doc(out, root, r#type),
+        Commands::Schema { r#type } => schema(out, root, r#type),
+        Commands::Apply { file, r#type, var } => {
+            apply_system(out, root, file.as_deref(), r#type.as_deref(), dry_run, var)
+        }
+
+        Commands::Bundle { command } => bundle(out, root, command, dry_run),
+
+        Commands::Report {
+            id,
+            list,
+            last,
+            only_fails,
+        } => report(out, root, id.as_deref(), *list, *last, *only_fails),
+    }
+}
+
+pub fn detc() -> Result<()> {
+    let cli = Cli::parse();
+
+    init_logger(cli.debug);
+
+    let root = cli.root.as_deref().unwrap_or(Path::new(DEFAULT_ROOT));
+
+    // A closed pipe is an error like any other, reported by `main`, and not a
+    // panic in the middle of a line
+    let mut out = TextSink::new(io::stdout().lock());
+
+    dispatch(&mut out, root, &cli.command, cli.dry_run)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source(locator: &str) -> result::Result<Source, String> {
+        locator.parse()
+    }
+
+    #[test]
+    fn a_locator_says_which_of_the_two_sides_reads_it() {
+        // A path and the standard input are read here, and a URL crosses to be
+        // read where the bundle is installed
+        assert_eq!(source("-"), Ok(Source::Stdin));
+        assert_eq!(
+            source("bundles/fleet.detc"),
+            Ok(Source::Path(PathBuf::from("bundles/fleet.detc")))
+        );
+        assert_eq!(
+            source("https://dist.example/fleet.detc"),
+            Ok(Source::Url("https://dist.example/fleet.detc".to_string()))
+        );
+        assert_eq!(
+            source("http://dist.example/fleet.detc"),
+            Ok(Source::Url("http://dist.example/fleet.detc".to_string()))
+        );
+
+        assert!(source("").is_err());
+    }
+
+    #[test]
+    fn a_file_url_names_a_file_of_whoever_reads_it() {
+        let path = Source::Path(PathBuf::from("/srv/fleet.detc"));
+
+        assert_eq!(source("file:///srv/fleet.detc"), Ok(path.clone()));
+        assert_eq!(source("file://localhost/srv/fleet.detc"), Ok(path));
+
+        // A file of somewhere else is not one that can be read, and an escape
+        // is not decoded rather than being decoded into the wrong name
+        let error = source("file://dist.example/srv/fleet.detc")
+            .expect_err("a file of another host is refused");
+        assert!(error.contains("another host"), "{error}");
+
+        let error = source("file:///srv/one%20bundle.detc").expect_err("an escape is refused");
+        assert!(error.contains("escape"), "{error}");
+    }
+
+    #[test]
+    fn a_scheme_that_is_not_fetched_is_refused_with_the_ones_that_are() {
+        let error = source("ftp://dist.example/fleet.detc").expect_err("ftp is not fetched");
+        assert!(
+            error.contains("over http, over https, or as a file"),
+            "{error}"
+        );
+    }
+}

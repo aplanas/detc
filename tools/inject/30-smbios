@@ -1,0 +1,72 @@
+#!/bin/sh
+
+# What the firmware was told to say about this machine, as SMBIOS type 11 OEM
+# strings.
+#
+#   detc.bundle=<url>       where to fetch a bundle from
+#   detc.vars=<document>    a variables document, inline
+#
+# Every hypervisor worth the name can set an OEM string, and it needs no disk,
+# no volume and no network to deliver: `qemu -smbios type=11,value=detc.url=...`,
+# `vim-cmd` on ESXi, a custom property on Proxmox.  What it cannot do is carry
+# much -- a few hundred bytes before firmwares start disagreeing -- so a bundle
+# arrives as a URL to fetch and a variables document arrives inline, in YAML's
+# flow style, and nothing arrives as base64 of an archive.
+#
+# ## Why this is not `20-credentials`
+#
+# systemd already imports an OEM string that begins `io.systemd.credential:`,
+# and for a machine whose initrd runs systemd that is the better spelling: it is
+# the same string with a prefix, and it then also works from `fw_cfg`, the ESP
+# and the TPM without the sender having to know which.  This source is for the
+# other spelling -- a bare `detc.bundle=` that somebody set before they had heard
+# of credentials, or an initrd whose unit was not given `ImportCredential=`.
+# Both are read, neither is required, and a machine that sets both gets the
+# credential, because `20-` runs first.
+#
+# ## Reading them
+#
+# `dmidecode -t 11` where it is installed, which is the documented way and the
+# only one that separates the strings correctly.  Where it is not, the same
+# table is in sysfs as the bytes the firmware wrote: the strings are NUL
+# separated and follow a five byte header with no separator of its own, so the
+# first of them can come back with a few bytes of that header glued to its
+# front.  The match is therefore not anchored -- which is right for the glued
+# case and harmless otherwise, because an OEM string that contains `detc.vars=`
+# in the middle was put there by somebody who meant it.
+
+set -eu
+
+# The document is handed on as a file, because that is what detc reads and what
+# every other source produces.  Where to put it is handed down rather than
+# agreed on, so that this can be run against a throwaway directory; the fallback
+# is `/run`, which in an initrd is a tmpfs that only this boot and only root can
+# see, so a fixed name in it is not a name another account could have got there
+# first
+spool=${DETC_SPOOL:-/run/detc/sources}
+umask 077
+
+strings() {
+    if command -v dmidecode > /dev/null 2>&1; then
+        dmidecode -t 11 2>/dev/null || true
+        return
+    fi
+
+    for raw in /sys/firmware/dmi/entries/11-*/raw; do
+        [ -r "$raw" ] || continue
+        tr '\0' '\n' < "$raw"
+    done
+}
+
+strings | while read -r line; do
+    case "$line" in
+      *detc.bundle=?*)
+          printf 'bundle\t%s\n' "${line#*detc.bundle=}"
+          ;;
+      *detc.vars=?*)
+          mkdir -p "$spool"
+          printf '%s\n' "${line#*detc.vars=}" > "$spool/smbios.yaml"
+          printf 'vars\t%s\n' "$spool/smbios.yaml"
+          ;;
+    esac
+done

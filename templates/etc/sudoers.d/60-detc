@@ -1,0 +1,19 @@
+# Written by detc.  Do not edit: it is rewritten from
+# usr/share/detc/templates.d/etc/sudoers.d/60-detc on every run.
+#
+# No extension, on purpose: sudo ignores a drop-in whose name contains a dot,
+# so a file called `60-detc.conf` here would be read by nobody and the mistake
+# would be silent.
+#
+# sudo also refuses a drop-in that anybody but its owner may write, which is
+# why the core ships the resource `path/etc/sudoers.d/60-detc` at `_order: 10`:
+# it puts the file at 0440 root:root *before* this is rendered into it, so the
+# mode is never once wrong rather than being corrected afterwards.
+#
+# One line per group, written verbatim, so a group whose name needs quoting in
+# sudoers has to be given quoted.  Both lists empty writes only this comment
+# and grants nothing.
+{% for group in sudo.groups %}%{{ group }} ALL=(ALL:ALL) ALL
+{% endfor -%}
+{% for group in sudo.nopasswd_groups %}%{{ group }} ALL=(ALL:ALL) NOPASSWD: ALL
+{% endfor -%}

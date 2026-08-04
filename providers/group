@@ -1,0 +1,214 @@
+#!/bin/sh
+
+# Groups of the system, read out of the tree and changed with `shadow-utils`.
+#
+# The name of the resource is the name of the group.  What is read is
+# `$DETC_ROOT/etc/group` and not `getent`, because `getent` answers for the
+# machine that is asking and a root that is being built is not that machine;
+# what is written is `groupadd` and its family, which take the root as an
+# argument and do the locking that writing the file by hand would not.
+#
+# A group that is not in the system is reported as `present: false` rather than
+# as nothing, so that `present: false` is a state that converges instead of a
+# resource that detc keeps trying to create.
+
+set -eu
+
+fail() {
+    echo "group: $*" >&2
+    exit 1
+}
+
+# The state that the declaration asks for, as `key<tab>value` lines.
+#
+# This is the same reader as in the other core providers, copied rather than
+# shared, because a provider is one executable and a fleet replaces it by
+# dropping one file of its own into a prefix.  A change to one of them is a
+# change to all of them.
+#
+# Only the object under `desired` is read, and only the shapes that a schema
+# here declares: strings, numbers, booleans, and arrays of those, which become
+# their elements joined by a comma.  The request arrives compact, the way detc
+# writes it, so there is no whitespace to step over.
+desired() {
+    awk '
+{
+  s = $0
+  n = length(s)
+  i = index(s, "\"desired\":{") + 11
+  if (i == 11 || substr(s, i, 1) == "}") exit
+  while (i <= n) {
+    k = str()
+    i++
+    print k "\t" val()
+    if (substr(s, i, 1) != ",") exit
+    i++
+  }
+}
+
+function str(   out, c) {
+  i++
+  out = ""
+  while (i <= n) {
+    c = substr(s, i, 1)
+    i++
+    if (c == "\"") return out
+    if (c == "\\") {
+      c = substr(s, i, 1)
+      i++
+      if (c == "n") c = "\n"
+      else if (c == "t") c = "\t"
+      else if (c == "u") { c = " "; i += 4 }
+    }
+    out = out c
+  }
+  return out
+}
+
+function val(   out, c) {
+  c = substr(s, i, 1)
+  if (c == "\"") return str()
+  if (c == "{") { print "an object is not a property this reads" > "/dev/stderr"; exit 1 }
+  if (c == "[") {
+    i++
+    out = ""
+    if (substr(s, i, 1) == "]") { i++; return out }
+    while (i <= n) {
+      out = out val()
+      c = substr(s, i, 1)
+      i++
+      if (c == "]") return out
+      out = out ","
+    }
+    return out
+  }
+  out = ""
+  while (i <= n && index(",}", substr(s, i, 1)) == 0) {
+    out = out substr(s, i, 1)
+    i++
+  }
+  return out
+}
+'
+}
+
+# The name of the object, out of the request.  The keys arrive in the order that
+# a JSON map sorts them, which puts `name` after `current`, `desired` and
+# `diff` -- last, in both requests -- so the one at the end of the line is the
+# top level one and a `name` inside the declaration is not mistaken for it.
+name_of() {
+    sed -n 's/.*,"name":"\([^"]*\)"}$/\1/p'
+}
+
+root=${DETC_ROOT:-/}
+
+# `shadow-utils` takes the tree to work on, and is told about it only when it is
+# not the running system.
+shadow() {
+    program=$1
+    shift
+    if [ "$root" = / ]; then
+        "$program" "$@"
+    else
+        "$program" --root "$root" "$@"
+    fi
+}
+
+# The line of `/etc/group` that names the group, which is the whole of what a
+# group is: the name, the password, the number and the members.
+entry() {
+    awk -F: -v name="$1" '$1 == name { print; exit }' "$root/etc/group" 2>/dev/null || true
+}
+
+# The value that the declaration gave for a property, or nothing.
+declared() {
+    printf '%s' "$request" | desired | awk -F'\t' -v k="$1" '$1 == k { print $2; exit }'
+}
+
+case "${1-}" in
+  schema)
+    cat <<'EOF'
+description: A group of the system
+order: 20
+properties:
+  gid:
+    type: integer
+    description: The number of the group, when it has to be a particular one
+  system:
+    type: boolean
+    description: >-
+      Whether the group is one of the system, which only decides the range that
+      its number is taken from and therefore only means anything at the moment
+      the group is created.  Nothing in the system records it afterwards, so it
+      is reported back as it was declared.
+    default: false
+  present:
+    type: boolean
+    description: Whether the group has to be in the system
+    default: true
+EOF
+    ;;
+
+  inspect)
+    request=$(cat)
+    name=$(printf '%s' "$request" | name_of)
+    [ -n "$name" ] || fail "the request does not name a group"
+
+    line=$(entry "$name")
+    if [ -z "$line" ]; then
+        echo "present: false"
+        exit 0
+    fi
+
+    echo "present: true"
+    echo "gid: $(printf '%s' "$line" | cut -d: -f3)"
+
+    # Whether a group was made as one of the system is not written down
+    # anywhere, so it is reported as it was asked for: a resource that reported
+    # the opposite would ask to be applied on every run and never converge
+    system=$(declared system)
+    [ -z "$system" ] || echo "system: $system"
+    ;;
+
+  apply)
+    request=$(cat)
+    name=$(printf '%s' "$request" | name_of)
+    [ -n "$name" ] || fail "the request does not name a group"
+
+    gid=
+    system=false
+    present=true
+    while IFS='	' read -r key value; do
+        case "$key" in
+          gid) gid=$value ;;
+          system) system=$value ;;
+          present) present=$value ;;
+        esac
+    done <<EOF
+$(printf '%s' "$request" | desired)
+EOF
+
+    if [ "$present" != true ]; then
+        [ -z "$(entry "$name")" ] || shadow groupdel "$name"
+        exit 0
+    fi
+
+    if [ -n "$(entry "$name")" ]; then
+        [ -z "$gid" ] || shadow groupmod --gid "$gid" "$name"
+        exit 0
+    fi
+
+    set --
+    [ "$system" != true ] || set -- "$@" --system
+    [ -z "$gid" ] || set -- "$@" --gid "$gid"
+    shadow groupadd "$@" "$name"
+    ;;
+
+  "")
+    fail "no verb, expected schema, inspect or apply"
+    ;;
+
+  *)
+    fail "unknown verb $1, expected schema, inspect or apply"
+    ;;
+esac

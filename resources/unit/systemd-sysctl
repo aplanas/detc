@@ -1,0 +1,57 @@
+# Make a changed sysctl take effect in the run that changed it.
+#
+# `etc/sysctl.d/60-detc.conf` is read at boot, so without this a value set
+# today is a value that arrives tomorrow.  `systemd-sysctl.service` is what
+# reads the directory, and restarting it re-applies everything in it.
+#
+# This is the worked example of the whole mechanism, and the one a fleet copies
+# for its own services.  `detc.files` holds the digest of what the file is
+# *about to* hold, worked out before any resource is inspected; the `unit`
+# provider writes down the digest it last restarted for and reports it back, so
+# this is in sync for as long as the file has not moved and asks to be applied
+# on the one run that moves it.  `--dry-run` says so before anything happens.
+#
+# Nothing else is declared.  Whether `systemd-sysctl.service` is enabled is not
+# detc's opinion -- it is `sysinit.target` that pulls it in, and a node where
+# somebody turned it off meant it.  Only the restart is declared, and only
+# because the file this ships is the reason there is anything to restart.
+#
+# Nothing happens on a node that set no sysctl either: the file renders to its
+# comment, that comment does not change between runs, and so neither does the
+# digest.
+#
+# `config` is left out entirely rather than given an empty string when the
+# digest is not there, which is the case on `detc apply --type resource`: that
+# run renders no template, so it knows nothing about the file.  A property the
+# declaration does not mention is not compared, so the resource is skipped
+# rather than recorded as having been restarted for nothing -- which would make
+# the next full run restart the service for a change that never happened.
+#
+# `_order: 70` is the order this provider already declares, written out because
+# this file is where the question gets asked: the template it watches is
+# rendered at 50, so the restart has to come after it, and a reader should not
+# have to go and read the provider's schema to see that this is not an accident.
+#
+# It is not there to keep the document from being empty, which would not matter
+# anyway.  `_order` is taken out before the state reaches the provider, so on a
+# run that renders no template the desired state is empty either way -- and an
+# empty declaration is an empty desired state rather than an error, which is
+# exactly what lets the conditional below turn this into a no-op.
+#
+# `_requires` names the same file as `config`, and the two say different things
+# about it.  `config` says *restart me when it moves*; `_requires` says *do not
+# restart me if it never landed*.  The digest is worked out before a byte is
+# written, so a template that renders and then fails to write still publishes
+# one -- and without this the service would be restarted for a file that is not
+# there.  It is spelled `template/` plus the path as `detc.files` keys it, which
+# is the same path a `path` resource would be named by.
+#
+# Nothing about `apply --type resource` changes: a requirement naming something
+# the run was not asked to look at is left alone, exactly as a digest that was
+# never published is.
+_order: 70
+_requires:
+  - template/etc/sysctl.d/60-detc.conf
+{% set digest = detc.files['etc/sysctl.d/60-detc.conf'] | default('') -%}
+{% if digest %}config: "{{ digest }}"
+{% endif -%}

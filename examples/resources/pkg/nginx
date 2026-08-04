@@ -1,0 +1,20 @@
+# The web server, which everything else about nginx waits on.
+#
+# One of three files -- `examples/resources/unit/nginx` and
+# `examples/templates/etc/nginx/conf.d/60-detc.conf` are the others -- that
+# together are the worked example of `_requires`.  Read the header of the unit,
+# which is where the argument is.
+#
+# Nothing is declared but the package.  `installed: true` is the default of the
+# schema and is written out because a file that only said `{}` would read like
+# a mistake.
+#
+# There is no `_order`: the `pkg` provider declares 10, which is before the
+# templates at 50 and before the unit at 70, and that is exactly the order this
+# example needs.  A declaration that repeats an order it agrees with is one more
+# thing to keep in step with the provider.
+#
+# The name is the name the distribution uses.  It is `nginx` on openSUSE,
+# Debian and Fedora alike, which is why this example uses it and not something
+# that has to be chosen by reading `system.pkg.manager`.
+installed: true

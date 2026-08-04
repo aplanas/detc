@@ -1,0 +1,337 @@
+#!/bin/sh
+
+# One public key in the `authorized_keys` file of one account.
+#
+# The name of the resource is a label, because the two things that identify the
+# key -- the account and the key itself -- are both properties, and neither of
+# them fits in a path: an account name would not tell two keys of the same
+# person apart, and a key is a line of base64.  What a fleet writes is
+# `resources.d/authorized_key/<account>/<what the key is for>`, so that the
+# names sort the way the accounts do.
+#
+# This is the one core provider that manages part of a file it does not own, and
+# it is worth knowing what that costs.  A resource is one key, and `inspect`
+# answers whether that key is in the file, so it converges; but the file as a
+# whole is a set, and nothing here says that the set is only what was declared.
+# A key that somebody added by hand stays.  Declaring `present: false` is how it
+# goes away.
+#
+# The alternative -- a template of `~/.ssh/authorized_keys` -- needs the path to
+# be known when the template is written, and a home directory is not.  A fleet
+# using the certificate story instead, with `TrustedUserCAKeys`, needs none of
+# this.
+#
+# `inspect` reports an account that is not there as a key that is not there,
+# rather than failing: every resource is inspected before any is applied, so on
+# the run that creates the account the `user` resource at order 25 has not been
+# applied yet when this is asked at order 30.
+
+set -eu
+
+fail() {
+    echo "authorized_key: $*" >&2
+    exit 1
+}
+
+# The state that the declaration asks for, as `key<tab>value` lines.
+#
+# This is the same reader as in the other core providers, copied rather than
+# shared, because a provider is one executable and a fleet replaces it by
+# dropping one file of its own into a prefix.  A change to one of them is a
+# change to all of them.
+#
+# Only the object under `desired` is read, and only the shapes that a schema
+# here declares: strings, numbers, booleans, and arrays of those, which become
+# their elements joined by a comma.  The request arrives compact, the way detc
+# writes it, so there is no whitespace to step over.
+desired() {
+    awk '
+{
+  s = $0
+  n = length(s)
+  i = index(s, "\"desired\":{") + 11
+  if (i == 11 || substr(s, i, 1) == "}") exit
+  while (i <= n) {
+    k = str()
+    i++
+    print k "\t" val()
+    if (substr(s, i, 1) != ",") exit
+    i++
+  }
+}
+
+function str(   out, c) {
+  i++
+  out = ""
+  while (i <= n) {
+    c = substr(s, i, 1)
+    i++
+    if (c == "\"") return out
+    if (c == "\\") {
+      c = substr(s, i, 1)
+      i++
+      if (c == "n") c = "\n"
+      else if (c == "t") c = "\t"
+      else if (c == "u") { c = " "; i += 4 }
+    }
+    out = out c
+  }
+  return out
+}
+
+function val(   out, c) {
+  c = substr(s, i, 1)
+  if (c == "\"") return str()
+  if (c == "{") { print "an object is not a property this reads" > "/dev/stderr"; exit 1 }
+  if (c == "[") {
+    i++
+    out = ""
+    if (substr(s, i, 1) == "]") { i++; return out }
+    while (i <= n) {
+      out = out val()
+      c = substr(s, i, 1)
+      i++
+      if (c == "]") return out
+      out = out ","
+    }
+    return out
+  }
+  out = ""
+  while (i <= n && index(",}", substr(s, i, 1)) == 0) {
+    out = out substr(s, i, 1)
+    i++
+  }
+  return out
+}
+'
+}
+
+yaml() {
+    printf '%s: "%s"\n' "$1" "$(printf '%s' "$2" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+}
+
+root=${DETC_ROOT:-/}
+
+# One field of the line of `/etc/passwd` that names the account.
+passwd_field() {
+    awk -F: -v name="$1" -v field="$2" \
+        '$1 == name { print $field; exit }' "$root/etc/passwd" 2>/dev/null || true
+}
+
+# What identifies a key is the base64 in the middle of it, and not the whole
+# line: the comment at the end is a note to a human and the options in front of
+# it are what this manages.
+blob_of() {
+    printf '%s\n' "$1" | awk '{ for (f = 1; f <= NF; f++) if ($f ~ /^AAAA/) { print $f; exit } }'
+}
+
+# The line of the file that carries the key, taken apart: `key` is the type, the
+# base64 and whatever comment follows, and each `option` is one of the options
+# in front of them, in the order they are written.
+#
+# The options are split on the commas that are not inside a quoted value, which
+# is what `command="a,b"` needs, and the key is cut out of the line by position
+# rather than rebuilt out of fields, so that the spacing inside such a value is
+# reported as it is written.
+entry() {
+    awk -v blob="$2" '
+        index($0, blob) == 0 { next }
+        /^[[:space:]]*#/ { next }
+        {
+            start = index($0, blob)
+            head = substr($0, 1, start - 1)
+            sub(/[[:space:]]+$/, "", head)
+            sub(/[^[:space:]]+$/, "", head)
+            sub(/[[:space:]]+$/, "", head)
+
+            key = substr($0, length(head) + 1)
+            sub(/^[[:space:]]+/, "", key)
+            sub(/[[:space:]]+$/, "", key)
+            print "key\t" key
+
+            count = split_options(head, options)
+            for (o = 1; o <= count; o++) print "option\t" options[o]
+            exit
+        }
+
+        function split_options(s, out,   at, c, current, quoted, count) {
+            count = 0
+            current = ""
+            quoted = 0
+            for (at = 1; at <= length(s); at++) {
+                c = substr(s, at, 1)
+                if (c == "\\" && quoted) {
+                    current = current c substr(s, at + 1, 1)
+                    at++
+                } else if (c == "\"") {
+                    quoted = !quoted
+                    current = current c
+                } else if (c == "," && !quoted) {
+                    if (current != "") out[++count] = current
+                    current = ""
+                } else {
+                    current = current c
+                }
+            }
+            if (current != "") out[++count] = current
+            return count
+        }
+    ' "$1" 2>/dev/null || true
+}
+
+case "${1-}" in
+  schema)
+    cat <<'EOF'
+description: A public key that may log into an account
+order: 30
+properties:
+  user:
+    type: string
+    description: The account whose authorized_keys file this is
+  key:
+    type: string
+    description: >-
+      The key, as `ssh-keygen` writes it: the type, the base64 and the comment.
+      Not the options, which are their own property.
+  options:
+    type: array
+    description: >-
+      What OpenSSH allows in front of a key, in the order it is written, each
+      one whole: `restrict`, `no-pty`, `from="10.0.0.0/8"`.
+  present:
+    type: boolean
+    description: Whether the key may log in
+    default: true
+EOF
+    ;;
+
+  inspect)
+    request=$(cat)
+
+    user=
+    key=
+    while IFS='	' read -r property value; do
+        case "$property" in
+          user) user=$value ;;
+          key) key=$value ;;
+        esac
+    done <<EOF
+$(printf '%s' "$request" | desired)
+EOF
+
+    [ -n "$user" ] || fail "the declaration does not say whose account this is"
+    [ -n "$key" ] || fail "the declaration does not say what the key is"
+
+    blob=$(blob_of "$key")
+    [ -n "$blob" ] || fail "$key is not a public key: there is no base64 in it"
+
+    home=$(passwd_field "$user" 6)
+    if [ -z "$home" ]; then
+        # The account is made at order 25, which on the first run has not
+        # happened yet when this is asked
+        echo "present: false"
+        exit 0
+    fi
+
+    file=$root/${home#/}/.ssh/authorized_keys
+
+    found=$(entry "$file" "$blob")
+    if [ -z "$found" ]; then
+        echo "present: false"
+        exit 0
+    fi
+
+    echo "present: true"
+    yaml user "$user"
+    printf '%s\n' "$found" | while IFS='	' read -r property value; do
+        [ "$property" = key ] || continue
+        yaml key "$value"
+    done
+
+    # A key with nothing in front of it has no options rather than an unknown
+    # number of them, so the empty list is reported and not left out.  It is
+    # written on the same line, because a mapping key with nothing under it is
+    # null and null is not a list
+    options=$(printf '%s\n' "$found" | awk -F'\t' '$1 == "option" { print $2 }')
+    if [ -z "$options" ]; then
+        echo "options: []"
+    else
+        echo "options:"
+        printf '%s\n' "$options" | while read -r option; do
+            printf -- '- "%s"\n' "$(printf '%s' "$option" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+        done
+    fi
+    ;;
+
+  apply)
+    request=$(cat)
+
+    user=
+    key=
+    options=
+    present=true
+    while IFS='	' read -r property value; do
+        case "$property" in
+          user) user=$value ;;
+          key) key=$value ;;
+          options) options=$value ;;
+          present) present=$value ;;
+        esac
+    done <<EOF
+$(printf '%s' "$request" | desired)
+EOF
+
+    [ -n "$user" ] || fail "the declaration does not say whose account this is"
+    [ -n "$key" ] || fail "the declaration does not say what the key is"
+
+    blob=$(blob_of "$key")
+    [ -n "$blob" ] || fail "$key is not a public key: there is no base64 in it"
+
+    home=$(passwd_field "$user" 6)
+    [ -n "$home" ] || fail "there is no account $user, which a resource of type user at order 25 would have made"
+
+    uid=$(passwd_field "$user" 3)
+    gid=$(passwd_field "$user" 4)
+    dir=$root/${home#/}/.ssh
+    file=$dir/authorized_keys
+
+    if [ "$present" != true ] && [ ! -f "$file" ]; then
+        exit 0
+    fi
+
+    mkdir -p "$dir"
+    chmod 0700 "$dir"
+    chown "$uid:$gid" "$dir" 2>/dev/null || true
+
+    # The file is rewritten without the key and then, when it is wanted, with
+    # the declared line in its place at the end.  Through a temporary file in
+    # the same directory, because `sshd` reads this one at every login
+    tmp=$file.detc.$$
+    trap 'rm -f "$tmp"' EXIT INT TERM
+
+    if [ -f "$file" ]; then
+        awk -v blob="$blob" 'index($0, blob) == 0' "$file" > "$tmp"
+    else
+        : > "$tmp"
+    fi
+
+    if [ "$present" = true ]; then
+        # The options go in front of the key, comma separated, in the order they
+        # were declared, which is the order they are reported back in
+        printf '%s%s\n' "${options:+$options }" "$key" >> "$tmp"
+    fi
+
+    chmod 0600 "$tmp"
+    chown "$uid:$gid" "$tmp" 2>/dev/null || true
+    mv "$tmp" "$file"
+    trap - EXIT INT TERM
+    ;;
+
+  "")
+    fail "no verb, expected schema, inspect or apply"
+    ;;
+
+  *)
+    fail "unknown verb $1, expected schema, inspect or apply"
+    ;;
+esac

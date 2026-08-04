@@ -1,0 +1,485 @@
+.\" Manual page for detc.
+.\"
+.\" roff, and not markdown put through a converter, which is the whole reason it
+.\" is checked in looking like this.  A converter is a build dependency that
+.\" every packager then has to carry for a file that changes twice a year, and
+.\" the alternative -- generating it at release time and shipping the result in
+.\" the tarball -- is a generated file in the source tree.  Neither is worth it
+.\" for three pages.  `man ./man/detc.8` renders this one from the repository.
+.\"
+.\" Two fields here go stale by hand: the date and the version in .TH.
+.TH DETC 8 2026\-08\-04 "detc 0.1.0" "System Administration"
+.
+.SH NAME
+detc \- declarative generation of configuration files in a running host
+.
+.SH SYNOPSIS
+.B detc
+.RB [ \-\-root
+.IR PATH ]
+.RB [ \-\-dry\-run ]
+.RB [ \-d ]
+.I COMMAND
+.RI [ ARGS ]
+.
+.SH DESCRIPTION
+.B detc
+builds a namespace of variables out of the documents installed in the system
+and the output of its probes, and uses that namespace to instantiate the
+.I templates
+that describe configuration files and the
+.I resources
+that describe state which is not a file.  The distribution ships the defaults,
+the administrator adjusts them, and what a machine is handed on its first boot
+contributes too.
+.PP
+A run is a plan and not a script.
+.B detc
+renders every template, asks every provider what the system currently looks
+like, compares that with what the objects declare, and changes only what
+differs.  A second run immediately after the first changes nothing.
+.PP
+Every applying run is written to a git repository under
+.IR /var/lib/detc ,
+in two commits \(em what was found, and what was applied \(em so what the
+system was yesterday is a question with an answer.  See
+.BR "detc report" .
+.
+.SS Objects
+Five kinds of thing make up a system, and all five are discovered the same way.
+.TP
+.B variable
+A JSON, YAML or TOML document merged into the namespace.
+.TP
+.B probe
+An executable that writes such a document to its standard output, so that a
+fact about the machine is a variable like any other.
+.TP
+.B template
+A MiniJinja file whose rendered content is a configuration file.
+.TP
+.B resource
+A document that declares a piece of state which is not a file \(em a package, a
+unit, a user.
+.TP
+.B provider
+An executable that implements one type of resource.
+.PP
+Discovery follows the UAPI Configuration File Specification: a
+.IR name .d
+drop\-in directory, searched in several prefixes, lowest priority first.
+.PP
+.EX
+what is read        usr/share    run       etc
+what is executed    usr/libexec  run/lib   var/lib
+.EE
+.PP
+Priority grows to the right, so what the administrator installs always wins
+over what the distribution ships and over what was injected into the machine
+from outside.  Within a prefix the drop\-ins are applied in lexicographic
+order, hence the
+.IR 10\- / 50\- / 90\-
+naming, an entry of the same name in a higher prefix overrides the one below
+it, and
+.B a zero byte file masks it entirely.
+.PP
+The middle column is where a bundle lands; see
+.BR "detc bundle" .
+.
+.SH OPTIONS
+Global, so they go before the subcommand.
+.TP
+.BR \-r ", " \-\-root " " \fIPATH\fR
+Work on a system mounted somewhere else instead of
+.IR / .
+Every path above is taken under it, and nothing outside it is read or written.
+Useful to prepare an image, and the only way to try something out without
+touching the host.
+.TP
+.B \-\-dry\-run
+Say what would happen instead of doing it.  It covers everything that writes:
+.BR apply ,
+the
+.B var
+invocations that persist a variable, and
+.BR "bundle install" ,
+.B restore
+and
+.BR remove .
+.TP
+.BR \-d ", " \-\-debug
+Turn logging on, and repeat for more of it: error, warn, info, debug, trace.
+Nothing is reported by default.
+.B DETC_LOG_LEVEL
+overrides this.
+.TP
+.BR \-h ", " \-\-help
+Print help, for the command or for a subcommand named after it.
+.TP
+.BR \-V ", " \-\-version
+Print the version.
+.
+.SH COMMANDS
+.SS Overriding a variable for one command
+.BR apply ,
+.BR cat ,
+.B check
+and
+.B var
+take the same three, which put a value into the namespace for that command
+alone and write nothing down.
+.TP
+.BR \-k ", " \-\-key " " \fIKEY\fR
+A dotted key, such as
+.IR ssh.permit_root_login .
+.TP
+.BR \-v ", " \-\-value " " \fIVALUE\fR
+Its value, in YAML syntax, so
+.I 22
+is a number and
+.I "'22'"
+is a string.
+.TP
+.BI \-\-kv " KEY=VALUE"
+Both at once, in YAML syntax.  Repeatable.
+.
+.SS detc apply [FILE]
+Bring the system to the state its objects declare.  With no
+.IR FILE ,
+everything; with one, the configuration file or the resource of that name
+alone.
+.B \-t
+.I TYPE
+narrows it to one type.
+.PP
+What is planned is only what differs, in the order the providers declare, and
+each change is reported as it is made.  Objects that could not be applied are
+reported and the run ends with a non\-zero status; the ones that succeeded are
+still applied and still recorded.
+.
+.SS detc list
+List the objects of the system: what they are, the name that addresses each,
+and the file it was read from.
+.TP
+.B \-\-types
+List the types instead of the objects.
+.TP
+.BR \-t ", " \-\-type " " \fITYPE\fR
+List only that type.
+.
+.SS detc cat FILE
+Show the content a template would write to
+.IR FILE ,
+instantiated against the namespace of this machine.
+.TP
+.B \-\-raw
+Show the template itself instead of the instantiated content.
+.TP
+.BR \-t ", " \-\-type " " \fITYPE\fR
+Which type
+.I FILE
+names.
+.
+.SS detc check [FILE]
+Check that the objects can be instantiated: that every template renders, that
+every probe answers with a document, that every resource matches the schema of
+its provider, and that every provider is there and answers.  It changes
+nothing and needs no privilege beyond reading.
+.PP
+The status is non\-zero if anything failed, which is what makes this the
+command to put in a pipeline.
+.
+.SS detc schema \-\-type TYPE
+.SS detc doc \-\-type TYPE
+Show what a type of resource accepts, as its own provider reports it \(em
+.B schema
+the document, and
+.B doc
+the same thing written out for a person.  Neither is written down anywhere in
+.BR detc :
+the provider is asked.
+.
+.SS detc var [FILE]
+Query the namespace, or set part of it.
+.PP
+With
+.B \-k
+alone it prints the value of that key.  With
+.B \-k
+and
+.BR \-v ,
+or with
+.BR \-\-kv ,
+it writes the override to
+.I /etc/detc/variables/user.d
+so that it survives.  With a
+.IR FILE ,
+it merges that whole document into the same place.  With none of them it
+prints the namespace.
+.TP
+.B \-\-probes
+List the probes.
+.TP
+.BR \-p ", " \-\-probe " " \fIPROBE\fR
+Run one probe and show what it reports, which is how a probe is debugged.
+.
+.SS detc bundle
+Build, check and install a tree of objects.  A bundle is a signed tar archive
+of variables, templates, resources, probes and providers that installs into the
+.I run
+prefixes, which is how a whole configuration reaches a machine as one file.
+Installing one takes away the bundle installed before it.
+.TP
+.B create [\fIDIR\fB] \-o \fIOUTPUT\fB [\-\-sign \fIKEY\fB]
+Build a bundle out of the source tree
+.I DIR
+(the current directory by default) and write it to
+.IR OUTPUT ,
+or to the standard output for
+.IR \- .
+.I KEY
+is an SSH private key, and a bundle without one can only be installed by a
+machine that was told to accept that.
+.TP
+.B verify \fIBUNDLE\fR
+Check a bundle and everything it carries, without installing it.
+.I BUNDLE
+is a file,
+.I \-
+for the standard input, or an
+.I http(s)://
+URL.
+.TP
+.B install \fIBUNDLE\fR
+Install it.  The signature is checked against
+.I allowed_signers
+of the tree being configured and nothing else, so a bundle cannot widen the
+trust that admitted it.
+.RS
+.TP
+.B \-\-persist
+Keep a copy, so that a reboot can put it back \(em the
+.I run
+prefixes do not survive one.
+.TP
+.B \-\-apply
+Apply the system once the bundle is installed.
+.TP
+.B \-\-allow\-unsigned
+Install a bundle that carries no signature.
+.RE
+.TP
+.BR restore " [" \-\-apply ]
+Install the kept copy again, which is what a machine does after a reboot.
+.TP
+.B status
+Show the bundle that is installed.
+.TP
+.B remove
+Take away the installed bundle, and the copy that was kept of it.
+.
+.SS detc report [ID]
+Show what a previous run did, out of the journal.
+.TP
+.B \-\-list
+List the runs there are.
+.TP
+.BR \-l ", " \-\-last
+Show the last one.
+.TP
+.BR \-o ", " \-\-only\-fails
+Show only what failed.
+.
+.SH THE JOURNAL
+An applying run leaves two commits in a git repository at
+.IR /var/lib/detc/journal.git :
+.B found
+is the state of the system as the run read it, and
+.B applied
+is the state it left behind.  The difference between two runs is therefore a
+.BR git-diff (1),
+and a change made outside
+.B detc
+shows up in the
+.B found
+commit of the next run.
+.PP
+The repository is mode 0700, because it holds rendered configuration files and
+the whole namespace, and either can carry a password.  It has no remote and is
+never pushed anywhere.
+.PP
+Three variables adjust it, and all three have defaults:
+.IR detc.journal.enabled ,
+.I detc.journal.user
+and
+.IR detc.journal.email .
+Setting the first to false turns the history off.
+.
+.SH EXIT STATUS
+.TP
+.B 0
+Everything that was asked for succeeded.
+.TP
+.B 1
+Something failed, and said so on the standard error: a template that could not
+be rendered, a provider that failed or is missing, an object that did not pass
+.BR check .
+A run that failed part way through has still applied and still recorded
+everything that came before.
+.
+.SH ENVIRONMENT
+.TP
+.B DETC_LOG_LEVEL
+The log level, overriding
+.BR \-d .
+It takes the level, optionally per module
+.RI ( detc::apply=debug ),
+and optionally a
+.I /text
+suffix that keeps only the messages containing that text.
+.TP
+.B DETC_LOG_STYLE
+Whether log lines are coloured:
+.IR auto ,
+.I always
+or
+.IR never .
+.TP
+.B DETC_ROOT
+Set by
+.B detc
+for every probe and provider it runs, and never read by it.  It names the root
+the run is about, which for a probe is the tree it must report on rather than
+the one it is running under.
+.TP
+.B DETC_LIVE
+Not read by
+.B detc
+either, and passed through to the same programs.  It says that the root is not
+.I /
+but the machine looking at it is the machine that will boot it, which is what
+has the probes report this machine's addresses and disks for a tree that is
+about to become it.  The initrd is the one caller that may say so.
+.TP
+.B DETC_RUN_LOCK
+Set by
+.BR detc ,
+and by no caller.  It names the file an applying run holds an exclusive
+.BR flock (2)
+on, released after the last journal commit and after
+.IR last.yaml ,
+so that
+.RB \(lq "flock \(dq$DETC_RUN_LOCK\(dq \fICOMMAND\fB" \(rq
+runs
+.I COMMAND
+once the run is really over.  It is set only while the lock is held, so
+.BR \-\-dry\-run ,
+.B check
+and
+.B var
+never name one, and a program that does not find it knows there is nothing to
+wait for.
+.
+.SH FILES
+Everything below is relative to
+.BR \-\-root .
+.TP
+.IR /usr/share/detc/ {variables,templates.d,resources.d}
+What the distribution ships.
+.TP
+.IR /usr/libexec/detc/ {probes,providers.d}
+The executables it ships.
+.TP
+.IR /run/detc/ ", " /run/lib/detc/
+Where an installed bundle lands, and what a reboot takes away.
+.TP
+.IR /etc/detc/ ", " /var/lib/detc/providers.d/
+The administrator's own, which win over both.
+.TP
+.I /etc/detc/variables/user.d/
+Written by
+.BR "detc var" ,
+one document per key, named
+.RI 90\- key .json
+with the dots of the key turned into dashes.  The
+.I 90\-
+puts it after the documents written by hand in the usual
+.I 50\-
+range.
+.TP
+.IR /etc/detc/allowed_signers ", " /usr/share/detc/allowed_signers
+Who may sign a bundle this machine will install, in the format of
+.BR ssh-keygen (1)
+.BR \-Y .
+.TP
+.I /var/lib/detc/journal.git
+The history.
+.TP
+.I /var/lib/detc/last.yaml
+What the last run did, which is what
+.B report
+reads when there is no journal.
+.TP
+.I /var/lib/detc/run.lock
+The lock named by
+.BR DETC_RUN_LOCK .
+.TP
+.IR /var/lib/detc/bundle.detc ", " /var/lib/detc/bundle.yaml
+The bundle kept by
+.BR \-\-persist ,
+and what is known about it.
+.TP
+.I /var/lib/detc/providers/
+Where a provider keeps what it recorded, one directory per type.  Not to be
+confused with
+.I /var/lib/detc/providers.d/
+above: that one holds providers, this one holds what they wrote down.
+.
+.SH EXAMPLES
+Set a variable, see what it does to a file, and then do it:
+.PP
+.EX
+$ detc var \-k ssh.permit_root_login \-v prohibit\-password
+$ detc cat /etc/ssh/sshd_config.d/60\-detc.conf
+$ detc \-\-dry\-run apply
+$ detc apply
+.EE
+.PP
+Try the same thing against an image mounted elsewhere, changing nothing on this
+machine:
+.PP
+.EX
+$ detc \-\-root /mnt check
+$ detc \-\-root /mnt \-\-dry\-run apply
+.EE
+.PP
+Build a signed bundle out of a tree of objects and install it on a machine that
+keeps it across a reboot:
+.PP
+.EX
+$ detc bundle create ./fleet \-o fleet.detc \-\-sign ~/.ssh/detc_ca
+$ detc bundle install fleet.detc \-\-persist \-\-apply
+.EE
+.PP
+Ask what a type of resource accepts, from the provider itself:
+.PP
+.EX
+$ detc doc \-\-type user
+.EE
+.
+.SH SEE ALSO
+.BR detcd (8),
+.BR detctl (8),
+.BR flock (1),
+.BR ssh-keygen (1),
+.BR dracut (8)
+.PP
+The guide, which is what this page is the short form of, is installed as
+.I README.md
+under
+.IR /usr/share/doc/packages/detc/ .
+Writing a probe, a provider, a template or a resource is documented beside it
+under
+.IR docs/authoring/ ,
+and configuring a machine from its initrd in
+.IR docs/detc\-inject.md .

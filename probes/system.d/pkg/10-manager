@@ -1,0 +1,32 @@
+#!/bin/sh
+
+# Which package manager the tree has.
+#
+# This fills `system.pkg.manager` with `zypper`, `dnf` or `apt-get`, and it is
+# the key that makes one core set work on more than one distribution: the `pkg`
+# and `repo` providers pick their backend by looking for the same programs, and
+# a fleet whose package is spelled differently in two families branches on this.
+#
+#     {% if system.pkg.manager == 'apt-get' %}openssh-server{% else %}openssh{% endif %}
+#
+# What is looked for is the program inside the tree, not the one on the machine
+# asking, which is the same rule the providers follow and the reason an image
+# being built reports its own manager.
+#
+# `system.os.id` says what the distribution calls itself; this says how to
+# install something on it.  They are not the same question, and a derivative
+# usually keeps the second answer while changing the first.
+
+set -eu
+
+root=${DETC_ROOT:-/}
+
+for manager in zypper dnf apt-get; do
+    if [ -x "$root/usr/bin/$manager" ]; then
+        printf 'manager: "%s"\n' "$manager"
+        exit 0
+    fi
+done
+
+# A tree with none of them is not a tree packages are installed into, and saying
+# so with a name would be inventing one

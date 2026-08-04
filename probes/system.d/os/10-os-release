@@ -1,0 +1,78 @@
+#!/bin/sh
+
+# Which distribution the tree is, out of `os-release`.
+#
+# This fills `system.os`, and it is the probe a fleet reads most: it is what a
+# template branches on and what the `pkg` provider's declarations are written
+# against.
+#
+# `/etc/os-release` is a symlink to `/usr/lib/os-release` on most systems, and
+# the specification says that the one in `/etc` wins where both are real files,
+# so that is the order they are read in.  Only the four fields worth branching
+# on are reported; the rest is marketing.
+#
+# What is read is the tree that detc was pointed at, so an image being built
+# reports the distribution being built and not the one building it.
+
+set -eu
+
+root=${DETC_ROOT:-/}
+
+yaml() {
+    printf '%s: "%s"\n' "$1" \
+        "$(printf '%s' "$2" | tr -d '\000-\010\013\014\016-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+}
+
+file=
+for candidate in etc/os-release usr/lib/os-release; do
+    if [ -f "$root/$candidate" ]; then
+        file=$root/$candidate
+        break
+    fi
+done
+
+# A tree with no `os-release` is not a distribution, and saying nothing about it
+# is better than saying that it is unknown: a template asking reaches for a
+# default, which is what it would have to do with an unknown anyway
+[ -n "$file" ] || exit 0
+
+# `KEY=value`, where the value is quoted the way a shell would quote it: single
+# quotes hold what is between them, double quotes let a backslash through in
+# front of the four characters a shell would otherwise read.  `PRETTY_NAME`
+# routinely has punctuation in it and occasionally a quote, and a probe that
+# handed the backslashes on would put them in the file it renders.
+field() {
+    awk -v key="$1" '
+        index($0, key "=") != 1 { next }
+        {
+            value = substr($0, length(key) + 2)
+            if (value ~ /^'\''.*'\''$/) {
+                print substr(value, 2, length(value) - 2)
+            } else if (value ~ /^".*"$/) {
+                print unescape(substr(value, 2, length(value) - 2))
+            } else {
+                print value
+            }
+            exit
+        }
+
+        function unescape(v,   out, at, c) {
+            out = ""
+            for (at = 1; at <= length(v); at++) {
+                c = substr(v, at, 1)
+                if (c == "\\" && at < length(v)) {
+                    at++
+                    c = substr(v, at, 1)
+                    if (c != "$" && c != "\"" && c != "`" && c != "\\") out = out "\\"
+                }
+                out = out c
+            }
+            return out
+        }
+    ' "$file"
+}
+
+for pair in ID:id ID_LIKE:id_like VERSION_ID:version_id PRETTY_NAME:pretty_name; do
+    value=$(field "${pair%:*}")
+    [ -z "$value" ] || yaml "${pair#*:}" "$value"
+done

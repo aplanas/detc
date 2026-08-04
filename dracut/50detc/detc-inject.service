@@ -1,0 +1,57 @@
+# Configure the system that is about to be booted, before it is booted.
+#
+# This unit exists only inside an initrd, which is why it lives in the dracut
+# module and not beside `detc.service`: there is no machine on which it would be
+# correct to install it into `/usr/lib/systemd/system`.
+#
+# ## When it runs
+#
+# After the root filesystem is mounted at `/sysroot` and everything
+# `/etc/fstab` asks for with it -- `initrd-fs.target` is the point at which
+# `/sysroot` is finished -- and before `initrd.target`, which is what
+# switch-root waits for.  That window is the whole reason to be here: the files
+# are written while nothing of the real system is running, so no service ever
+# starts once with the distribution's defaults and is then restarted into what
+# the fleet actually asked for.
+#
+# `After=network-online.target` with no `Wants=`.  A bundle given as a URL needs
+# the network, and `rd.neednet=1` is how a machine asks for it; a machine that
+# does not ask is not made to wait for a target that nothing is going to reach.
+#
+# ## When it fails
+#
+# Nothing requires this, and it is ordered `Before=initrd.target` rather than
+# required by it, so a source that cannot find its volume, a bundle whose
+# signature does not check out, or a provider that refuses, all leave the
+# machine booting.  `detc.service` runs on the other side of switch-root and
+# converges what it can, and there is a journal to read.  A configuration
+# mechanism that can brick a boot is a configuration mechanism nobody enables.
+
+[Unit]
+Description=Configure /sysroot from what this machine was handed
+Documentation=man:detc(8)
+DefaultDependencies=no
+ConditionPathExists=/etc/initrd-release
+Requires=initrd-fs.target
+After=initrd-root-fs.target initrd-fs.target network-online.target
+Before=initrd.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# Every credential named `detc.*`, so that `inject/20-credentials` sees
+# whatever the platform sent without this unit having to be changed when a fleet
+# starts sending one more
+ImportCredential=detc.*
+
+# The console as well as the journal: the journal of an initrd is handed on to
+# the system that is booted, but a machine that does not get that far is a
+# machine whose only output device is the console
+StandardOutput=journal+console
+StandardError=journal+console
+
+ExecStart=/usr/libexec/detc/detc-inject /sysroot
+
+[Install]
+WantedBy=initrd.target

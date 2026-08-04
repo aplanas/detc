@@ -1,0 +1,264 @@
+#!/bin/sh
+
+# Package repositories, so that a node can be told where its packages come from
+# before it is told which ones it wants.
+#
+# The name of the resource is the alias of the repository, which is what the
+# manager files it under and what `zypper lr` prints in its second column.  The
+# order is lower than the one of `pkg`, so a repository that a package needs is
+# added in the same run that installs it.
+#
+# The repository files are written here rather than instantiated as templates,
+# even though they are configuration files, because the format is the manager's
+# and a fleet that hard coded it would be writing a `.repo` for `zypper` and a
+# `.list` for `apt` and choosing between them in a template.  What is declared
+# is the repository; what it looks like on disk is this provider's business.
+#
+# `apt` is not implemented.  A Debian repository is a line whose fields are the
+# suite and the components rather than a URL, so it is a different declaration
+# and not a different backend, and a provider that guessed them would be
+# guessing what the fleet meant.
+
+set -eu
+
+fail() {
+    echo "repo: $*" >&2
+    exit 1
+}
+
+# The state that the declaration asks for, as `key<tab>value` lines.
+#
+# This is the same reader as in the other core providers, copied rather than
+# shared, because a provider is one executable and a fleet replaces it by
+# dropping one file of its own into a prefix.  A change to one of them is a
+# change to all of them.
+#
+# Only the object under `desired` is read, and only the shapes that a schema
+# here declares: strings, numbers, booleans, and arrays of those, which become
+# their elements joined by a comma.  The request arrives compact, the way detc
+# writes it, so there is no whitespace to step over.
+desired() {
+    awk '
+{
+  s = $0
+  n = length(s)
+  i = index(s, "\"desired\":{") + 11
+  if (i == 11 || substr(s, i, 1) == "}") exit
+  while (i <= n) {
+    k = str()
+    i++
+    print k "\t" val()
+    if (substr(s, i, 1) != ",") exit
+    i++
+  }
+}
+
+function str(   out, c) {
+  i++
+  out = ""
+  while (i <= n) {
+    c = substr(s, i, 1)
+    i++
+    if (c == "\"") return out
+    if (c == "\\") {
+      c = substr(s, i, 1)
+      i++
+      if (c == "n") c = "\n"
+      else if (c == "t") c = "\t"
+      else if (c == "u") { c = " "; i += 4 }
+    }
+    out = out c
+  }
+  return out
+}
+
+function val(   out, c) {
+  c = substr(s, i, 1)
+  if (c == "\"") return str()
+  if (c == "{") { print "an object is not a property this reads" > "/dev/stderr"; exit 1 }
+  if (c == "[") {
+    i++
+    out = ""
+    if (substr(s, i, 1) == "]") { i++; return out }
+    while (i <= n) {
+      out = out val()
+      c = substr(s, i, 1)
+      i++
+      if (c == "]") return out
+      out = out ","
+    }
+    return out
+  }
+  out = ""
+  while (i <= n && index(",}", substr(s, i, 1)) == 0) {
+    out = out substr(s, i, 1)
+    i++
+  }
+  return out
+}
+'
+}
+
+# The name of the object, out of the request.  The keys arrive in the order that
+# a JSON map sorts them, which puts `name` after `current`, `desired` and
+# `diff` -- last, in both requests -- so the one at the end of the line is the
+# top level one and a `name` inside the declaration is not mistaken for it.
+name_of() {
+    sed -n 's/.*,"name":"\([^"]*\)"}$/\1/p'
+}
+
+yaml() {
+    printf '%s: "%s"\n' "$1" "$(printf '%s' "$2" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+}
+
+# One key of an INI file that has no sections worth caring about, which is what
+# both `.repo` families are: a header naming the alias and `key=value` under it.
+ini() {
+    sed -n "s/^$1[[:space:]]*=[[:space:]]*//p" "$2" | head -n 1
+}
+
+# A repository that is off is spelled `0` by `zypper` and `False` by `dnf`, and
+# both read either, so what is reported back is the boolean that detc compares
+# and not the spelling that happened to be on disk.
+boolean() {
+    case "$1" in
+      1|true|True|yes|Yes) echo true ;;
+      *) echo false ;;
+    esac
+}
+
+root=${DETC_ROOT:-/}
+
+if [ -x "$root/usr/bin/zypper" ]; then
+    dir=$root/etc/zypp/repos.d
+elif [ -x "$root/usr/bin/dnf" ]; then
+    dir=$root/etc/yum.repos.d
+else
+    dir=
+fi
+
+case "${1-}" in
+  schema)
+    cat <<'EOF'
+description: A repository that the package manager installs from
+order: 5
+properties:
+  url:
+    type: string
+    description: Where the repository is, as the manager writes it in baseurl
+  enabled:
+    type: boolean
+    description: Whether the manager reads it
+    default: true
+  gpgcheck:
+    type: boolean
+    description: Whether the packages of the repository have to be signed
+    default: true
+  gpgkey:
+    type: string
+    description: Where the key that signs them is, when it is not in the keyring
+  priority:
+    type: integer
+    description: Which repository wins when two of them carry the same package
+  refresh:
+    type: boolean
+    description: Whether the metadata is refreshed on its own
+    default: true
+  present:
+    type: boolean
+    description: Whether the repository has to be configured at all
+    default: true
+EOF
+    ;;
+
+  inspect)
+    name=$(name_of)
+    [ -n "$name" ] || fail "the request does not name a repository"
+    [ -n "$dir" ] || fail "there is no package manager with repositories in $root"
+
+    file=$dir/$name.repo
+    if [ ! -f "$file" ]; then
+        echo "present: false"
+        exit 0
+    fi
+
+    echo "present: true"
+    yaml url "$(ini baseurl "$file")"
+    echo "enabled: $(boolean "$(ini enabled "$file")")"
+    echo "gpgcheck: $(boolean "$(ini gpgcheck "$file")")"
+    echo "refresh: $(boolean "$(ini autorefresh "$file")")"
+
+    key=$(ini gpgkey "$file")
+    [ -z "$key" ] || yaml gpgkey "$key"
+
+    priority=$(ini priority "$file")
+    [ -z "$priority" ] || echo "priority: $priority"
+    ;;
+
+  apply)
+    request=$(cat)
+    name=$(printf '%s' "$request" | name_of)
+    [ -n "$name" ] || fail "the request does not name a repository"
+    [ -n "$dir" ] || fail "there is no package manager with repositories in $root"
+
+    url=
+    enabled=true
+    gpgcheck=true
+    gpgkey=
+    priority=
+    refresh=true
+    present=true
+    while IFS='	' read -r key value; do
+        case "$key" in
+          url) url=$value ;;
+          enabled) enabled=$value ;;
+          gpgcheck) gpgcheck=$value ;;
+          gpgkey) gpgkey=$value ;;
+          priority) priority=$value ;;
+          refresh) refresh=$value ;;
+          present) present=$value ;;
+        esac
+    done <<EOF
+$(printf '%s' "$request" | desired)
+EOF
+
+    file=$dir/$name.repo
+
+    if [ "$present" != true ]; then
+        rm -f "$file"
+        exit 0
+    fi
+
+    [ -n "$url" ] || fail "$name has no url, which is the one thing a repository is"
+
+    # Written through a temporary file in the same directory, so that a manager
+    # reading the directory at the same time reads one repository or the other
+    # and never half of this one
+    mkdir -p "$dir"
+    tmp=$file.detc.$$
+    trap 'rm -f "$tmp"' EXIT INT TERM
+
+    {
+        echo "[$name]"
+        echo "name=$name"
+        echo "baseurl=$url"
+        echo "enabled=$(boolean "$enabled" | sed 's/true/1/;s/false/0/')"
+        echo "gpgcheck=$(boolean "$gpgcheck" | sed 's/true/1/;s/false/0/')"
+        echo "autorefresh=$(boolean "$refresh" | sed 's/true/1/;s/false/0/')"
+        [ -z "$gpgkey" ] || echo "gpgkey=$gpgkey"
+        [ -z "$priority" ] || echo "priority=$priority"
+    } > "$tmp"
+
+    chmod 0644 "$tmp"
+    mv "$tmp" "$file"
+    trap - EXIT INT TERM
+    ;;
+
+  "")
+    fail "no verb, expected schema, inspect or apply"
+    ;;
+
+  *)
+    fail "unknown verb $1, expected schema, inspect or apply"
+    ;;
+esac

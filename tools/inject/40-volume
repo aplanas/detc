@@ -1,0 +1,75 @@
+#!/bin/sh
+
+# A volume labelled `DETC`, holding a bundle or a variables document at a fixed
+# path.
+#
+#   /detc.detc     a bundle
+#   /detc.yaml     a variables document
+#
+# This is the mechanism that works everywhere: build a small ISO, attach it as a
+# CD-ROM, boot.  Nothing about it needs the hypervisor to know anything -- no
+# credentials, no OEM strings, no network -- which is why it is worth having even
+# though it is the least elegant of the four, and why it is last: a machine that
+# was told something more specific was told it on purpose.
+#
+#     detc bundle create -o fleet.detc --sign ~/.ssh/detc_ca ./tree
+#     xorriso -as mkisofs -V DETC -o seed.iso -graft-points /detc.detc=fleet.detc
+#
+# The label is the whole of the contract, and it is a label and not a device
+# because which device a CD-ROM turns up as is not something the fleet can know.
+# Any filesystem the kernel in the initrd can read will do; ISO 9660 and FAT are
+# the two that every tool can write, and are the two the dracut module makes
+# sure the modules for are there.
+#
+# ## Why it copies and unmounts
+#
+# What is handed on is a path in `/run`, not a path on the volume, so that this
+# script owns the mount for exactly as long as it runs.  A source that left a
+# filesystem mounted would be a source the driver has to remember to clean up
+# after, and switch-root does not run anybody's cleanup; leaving a CD-ROM held
+# open would then be one more thing that can keep a machine from rebooting.
+# The files are kilobytes.
+
+set -eu
+
+command -v mount > /dev/null 2>&1 || exit 0
+
+# Handed down rather than agreed on -- see `tools/inject/30-smbios`, which says why
+spool=${DETC_SPOOL:-/run/detc/sources}
+mount=$spool/volume
+umask 077
+
+device=
+if command -v blkid > /dev/null 2>&1; then
+    device=$(blkid -L DETC 2>/dev/null || blkid -L detc 2>/dev/null || true)
+fi
+
+if [ -z "$device" ]; then
+    for candidate in /dev/disk/by-label/DETC /dev/disk/by-label/detc; do
+        [ -e "$candidate" ] || continue
+        device=$candidate
+        break
+    done
+fi
+
+[ -n "$device" ] || exit 0
+
+mkdir -p "$spool" "$mount"
+
+# Read only, and `nodev`/`noexec`/`nosuid` because this came from outside the
+# machine and nothing on it is meant to be run
+mount -o ro,nodev,noexec,nosuid "$device" "$mount" 2>/dev/null || exit 0
+
+if [ -r "$mount/detc.detc" ]; then
+    cat "$mount/detc.detc" > "$spool/volume.detc"
+    printf 'bundle\t%s\n' "$spool/volume.detc"
+fi
+
+for name in detc.yaml detc.yml detc.json; do
+    [ -r "$mount/$name" ] || continue
+    cat "$mount/$name" > "$spool/volume.${name#detc.}"
+    printf 'vars\t%s\n' "$spool/volume.${name#detc.}"
+    break
+done
+
+umount "$mount" 2>/dev/null || true

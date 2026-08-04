@@ -1,0 +1,23 @@
+{#-
+  What is printed after a successful login, out of `motd.text`.
+
+  This is not part of the core set and is not installed.  `/etc/motd` does have
+  a drop-in directory on systems recent enough -- `/etc/motd.d/`, read by
+  pam_motd -- but not on all of them, and a core that wrote to whichever one
+  happened to exist would be two different features wearing one name.
+
+  A fleet that copies this gets the file, and whatever the distribution shipped
+  in it goes.  A fleet on a system with `/etc/motd.d/` should point this at
+  `etc/motd.d/60-detc` instead and leave `/etc/motd` alone, which is the same
+  template with a different destination.
+
+  The text is written exactly as it was given, and nothing is added to it --
+  not even a final newline, because a YAML block scalar already ends in one and
+  a second would be a blank line at the end of every login:
+
+    motd:
+      text: |
+        This node is managed by detc.
+        Local changes are overwritten.
+-#}
+{{ motd.text }}

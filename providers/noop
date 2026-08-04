@@ -1,0 +1,76 @@
+#!/bin/sh
+
+# A resource that does nothing, so that an installation can be checked.
+#
+# Nothing in the system is read and nothing is written: `inspect` reports back
+# exactly the state that was asked for, so a noop resource is always in sync and
+# the `apply` verb below is never reached.
+#
+# What an `ok` proves is everything around the resource -- that the provider was
+# found under one of its prefixes, that its schema parses, that the declaration
+# expanded through the namespace and passed validation, that a program was
+# started with the right working directory and DETC_ROOT, and that its answer
+# came back and compared equal.  Reaching a program at all is most of that, so
+# the conditions of the contract are complained about here rather than assumed:
+# an `ok` that a provider doing nothing could also have produced would say
+# nothing about the installation.
+
+set -eu
+
+fail() {
+    echo "noop: $*" >&2
+    exit 1
+}
+
+case "${1-}" in
+  schema)
+    cat <<'EOF'
+description: A resource that does nothing, to check that an installation works
+order: 0
+properties:
+  message:
+    type: string
+    description: Anything at all, reported back unchanged
+    default: ok
+EOF
+    ;;
+
+  inspect)
+    request=$(cat)
+
+    [ -n "${DETC_ROOT-}" ] || fail "DETC_ROOT is not in the environment"
+
+    # The state reported is the state asked for, copied out of the request
+    # rather than written out again, so that whatever the declaration says round
+    # trips exactly -- quotes and punctuation included -- and the resource is in
+    # sync whatever the message happens to be.  The key that carries it is
+    # looked for at either end of the request, so the order in which they arrive
+    # is not something this depends on
+    desired=$(printf '%s' "$request" | sed -n \
+        -e 's/^{"desired":\(.*\),"name":"[^"]*"}$/\1/p' \
+        -e 's/^{"name":"[^"]*","desired":\(.*\)}$/\1/p')
+
+    [ -n "$desired" ] || fail "cannot read the request: $request"
+
+    printf '%s\n' "$desired"
+    ;;
+
+  apply)
+    cat > /dev/null
+
+    # There is nothing to do, and nothing that could be done: a noop resource is
+    # in sync the moment it is inspected, so arriving here means the answer
+    # above did not come back the way it was sent.  detc inspects again after
+    # this and reports the difference that survived, which is the useful half of
+    # the complaint; this is the half that says where to look
+    echo "noop: inspect did not report back what was declared" >&2
+    ;;
+
+  "")
+    fail "no verb, expected schema, inspect or apply"
+    ;;
+
+  *)
+    fail "unknown verb $1, expected schema, inspect or apply"
+    ;;
+esac

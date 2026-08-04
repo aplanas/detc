@@ -1,0 +1,316 @@
+.\" Manual page for detctl.  See the comment at the top of detc.8 for why these
+.\" are roff and not markdown put through a converter.
+.TH DETCTL 8 2026\-08\-04 "detc 0.1.0" "System Administration"
+.
+.SH NAME
+detctl \- run a detc subcommand on other machines
+.
+.SH SYNOPSIS
+.B detctl
+.BI \-\-host " HOST"
+.RI [ OPTIONS ]
+.I SUBCOMMAND
+.RI [ ARGS ]
+.br
+.B detctl
+.BI \-\-command " COMMAND"
+.RI [ OPTIONS ]
+.I SUBCOMMAND
+.RI [ ARGS ]
+.
+.SH DESCRIPTION
+.B detctl
+takes the same subcommands as
+.BR detc (8),
+starts
+.BR detcd (8)
+on the far side, sends the call, and prints what comes back exactly as
+.B detc
+would have printed it there.
+.PP
+Nothing is installed on the machine that answers beyond the package itself, and
+nothing runs there between two calls.  This program knows nothing about SSH
+beyond how to build an argv, so a port, a user, a key or a jump host is what
+.BR ssh_config (5)
+is for and there is no second place to write them down.
+.PP
+Several machines are reached at once, each answering in a block of its own, in
+the order they were asked, while the terminal is told on the standard error how
+the run is going.  One machine is the way it has always been: the answers
+arrive as they are spoken, the standard error of the child is the one of the
+run, and the exit status is the one of whatever was started.
+.PP
+It is not the only client.
+.BR varlinkctl (1)
+reaches the same service and is better at showing the interface; what
+.B detctl
+adds is the output of
+.B detc
+instead of JSON, the fleet, and the exit status of the run.
+.
+.SS Naming a fleet
+.B \-\-host
+takes a host, several separated by commas, or any of the following, and the run
+is everything they add up to:
+.TP
+.I name
+A host, reached as
+.BR ssh (1)
+would reach it.
+.TP
+.I group
+A group of the inventory, which may name other groups.
+.TP
+.I pattern
+A shell pattern, such as
+.IR stage\-web* .
+It selects among the hosts the inventory names and never introduces one.
+.TP
+.IR name [ a : b ]
+A range, counted out:
+.I lab[01:12]
+is
+.I lab01
+to
+.IR lab12 ,
+machines that are written down nowhere.  It counts letters as well as numbers
+.RI ( rack[a:f] ),
+and counts an address like a name
+.RI ( 192.168.1.[10:250] ).
+The two ends are the whole of what it reaches, so a run is the size it was
+typed as and never the size the network happens to have.
+.TP
+.BI ! name
+Takes one back out, whatever put it in.
+.PP
+.B \-\-command
+names a machine that is not reached over SSH at all, by giving the shell
+command that starts
+.B detcd
+there.  Both may be given, and then the run is their union.
+.
+.SS The inventory
+The groups live in one YAML file belonging to whoever is typing:
+.I $XDG_CONFIG_HOME/detc/hosts.yaml
+.RI ( ~/.config/detc/hosts.yaml
+when that is unset), or wherever
+.B \-\-inventory
+or
+.B DETC_HOSTS
+says.
+.PP
+.EX
+dmz:
+  \- web1
+  \- web2.example
+stage:
+  \- stage\-web1
+  \- stage\-web2
+lab:
+  \- lab[01:12]     # a run of machines, counted out
+web:
+  \- dmz            # a group may name another
+  \- stage\-web*     # and a pattern gathers the ones named above
+.EE
+.PP
+It says which hosts there are and nothing about how to reach them.
+.
+.SH OPTIONS
+Global, so they go before the subcommand.  One of
+.B \-\-host
+and
+.B \-\-command
+is required.
+.TP
+.BI \-\-host " HOST"
+The machines to reach, as described above.  Repeatable.
+.TP
+.BI \-\-command " COMMAND"
+A shell command that starts
+.B detcd
+on something that is not a plain host, such as
+.RB \(lq "podman exec \-i web /usr/bin/detcd" \(rq.
+Repeatable.
+.TP
+.BI \-\-inventory " FILE"
+Read the groups from
+.I FILE
+instead of the one belonging to the user.
+.TP
+.BI \-\-remote\-path " PATH"
+Where
+.B detcd
+is on the far side.
+.I /usr/bin/detcd
+by default.
+.TP
+.B \-\-sudo
+Start
+.B detcd
+through
+.BR sudo (8),
+for a fleet reached as a user who is not root.
+.TP
+.BI \-o " OPTION"
+An option for
+.BR ssh (1),
+passed as its own
+.B \-o
+would take it.  Repeatable.
+.TP
+.BR \-j ", " \-\-jobs " " \fIN\fR
+How many machines to reach at a time, or
+.I 0
+for all of them at once.  Ten by default.  It bounds the
+.B ssh
+processes of one run and not the size of a fleet.
+.TP
+.B \-\-no\-progress
+Do not report on the standard error how the run is going.  It is reported only
+to a terminal in any case.
+.TP
+.BR \-\-watch [ =\fISECONDS\fR ]
+Run the command again every
+.I SECONDS
+\(em sixty when the number is left out \(em and print a run only when it is not
+the one before it.  A fleet that is converged therefore says nothing, and a
+block appearing is a machine that moved.
+.IP
+The
+.B =
+is required, because the option is followed by a subcommand and there would
+otherwise be no telling the two apart.
+.IP
+This is the one case where a run of one machine does not stream: nothing can be
+printed until it is known whether it changed.
+.TP
+.BI \-\-watch\-count " N"
+Stop after
+.I N
+runs of
+.B \-\-watch
+instead of running until it is interrupted.
+.TP
+.B \-\-dry\-run
+Say what would happen instead of doing it, on every machine of the run.
+.TP
+.BR \-d ", " \-\-debug
+Turn logging on, and repeat for more of it.  It is about this side of the
+conversation; for the other side, pass
+.B \-d
+to
+.B detcd
+with
+.BR \-\-remote\-path .
+.TP
+.BR \-h ", " \-\-help
+Print help.
+.TP
+.BR \-V ", " \-\-version
+Print the version.
+.
+.SH COMMANDS
+The same as
+.BR detc (8),
+with the same options:
+.BR apply ,
+.BR list ,
+.BR cat ,
+.BR check ,
+.BR doc ,
+.BR schema ,
+.BR var ,
+.B bundle
+and
+.BR report .
+.PP
+Paths in them are paths on the machine that answers, and the namespace a
+.B \-k
+or a
+.B \-\-kv
+overrides is the namespace of that machine.  The one thing that travels is a
+bundle: what
+.RB \(lq "detctl \-\-host web bundle install fleet.detc" \(rq
+sends is the file, and what admits it is the
+.I allowed_signers
+of each machine that installs it.
+.PP
+There is no way to ask for another root.  Which tree is configured is decided
+by whoever starts
+.B detcd
+on the far side.
+.
+.SH EXIT STATUS
+For one machine, the status of the run there \(em so a
+.B check
+that failed on that host fails here, and
+.BR 255 ,
+which is how
+.B ssh
+says the host could not be reached at all, comes through as itself.
+.PP
+For a fleet, the status is
+.B 0
+when every machine answered without failing and
+.B 1
+when any of them did not.  The blocks say which.
+.
+.SH ENVIRONMENT
+.TP
+.B DETC_HOSTS
+The inventory to read, for a run that is not driven from the home directory of
+anybody.
+.B \-\-inventory
+overrides it.
+.TP
+.BR DETC_LOG_LEVEL ", " DETC_LOG_STYLE
+As in
+.BR detc (8),
+and about this side only.
+.
+.SH FILES
+.TP
+.I ~/.config/detc/hosts.yaml
+The inventory.
+.TP
+.I ~/.ssh/config
+Everything about how a host is reached, which this program deliberately does
+not duplicate.
+.
+.SH EXAMPLES
+Ask a fleet what it would change, leaving one machine out:
+.PP
+.EX
+$ detctl \-\-host web,'!web3' \-\-dry\-run apply
+.EE
+.PP
+Watch a fleet until it is quiet, printing only the machines that move:
+.PP
+.EX
+$ detctl \-\-host web \-\-watch=30 check
+.EE
+.PP
+Send one bundle to everything in the inventory, keeping it across a reboot:
+.PP
+.EX
+$ detctl \-\-host '*' bundle install fleet.detc \-\-persist \-\-apply
+.EE
+.PP
+Reach something that is not a host:
+.PP
+.EX
+$ detctl \-\-command "podman exec \-i web /usr/bin/detcd" list
+.EE
+.PP
+Drive a fleet as an unprivileged user, twenty at a time:
+.PP
+.EX
+$ detctl \-\-host lab[01:12] \-\-sudo \-j 20 \-o ConnectTimeout=5 apply
+.EE
+.
+.SH SEE ALSO
+.BR detc (8),
+.BR detcd (8),
+.BR ssh (1),
+.BR ssh_config (5),
+.BR varlinkctl (1)

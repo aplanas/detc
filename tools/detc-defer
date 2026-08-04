@@ -1,0 +1,99 @@
+#!/bin/sh
+
+# A provider that agrees with whatever it is asked, so that a type which cannot
+# converge yet is skipped instead of failing the run.
+#
+# This is what the initrd stage puts in `run/lib/detc/providers.d` over `pkg`,
+# `repo` and `unit`: there is no package manager that installs into `/sysroot`
+# from an initrd, and `systemctl` cannot start anything in a system that is not
+# running yet.  Those resources belong to the first boot, where `detc.service`
+# converges them for real -- see `tools/detc-inject`, which installs this.
+#
+# ## Why not mask the provider
+#
+# The obvious answer is an empty file, which is how the prefix ladder removes
+# anything else.  It is the wrong answer here: a resource whose type has no
+# provider is an error and not a skip (`Providers::find` in `src/provider.rs`),
+# so masking `pkg` would end the run for a declaration that is perfectly
+# correct and merely early.  Deferring has to be something a provider does, and
+# so it is one.
+#
+# ## Why the real schema
+#
+# `schema` is answered by the provider that is being stood in for, run out of
+# `DETC_DEFER_FROM`, and not by a permissive schema written here.  Two reasons,
+# and either would be enough: detc refuses a property that the schema does not
+# declare, so a made up schema would reject exactly the declarations this exists
+# to let through; and the `order` in the schema is where the type sits in the
+# plan, so inventing one would reorder the run around a resource that is not
+# going to do anything.
+#
+# ## Why inspect reports back
+#
+# `inspect` copies the desired state out of the request, the same way
+# `providers/noop` does and for the same reason -- what comes back is exactly
+# what was asked for, so detc computes an empty difference and records `ok`.
+#
+# Reporting nothing would have been shorter and is wrong.  An absent resource is
+# a difference, so detc would call `apply`, which succeeds by doing nothing, and
+# the run would record a change that never happened.  For `unit` that is not
+# merely untidy: the digest in `detc.files` would be written down as one that has
+# been acted on, and the first boot would then skip the restart that the initrd
+# never performed.
+
+set -eu
+
+# The type is the name this was installed under, which is the same name as the
+# provider it stands in for.  No `basename`, so that this needs nothing at all
+# beyond the shell to answer the two verbs that matter
+kind=${0##*/}
+
+fail() {
+    echo "$kind: $*" >&2
+    exit 1
+}
+
+case "${1-}" in
+  schema)
+    from=${DETC_DEFER_FROM:-/usr/libexec/detc/providers.d}
+    [ -x "$from/$kind" ] || fail "there is no $kind in $from to take a schema from"
+
+    # `exec`, so that a provider which fails to describe itself fails this too
+    exec "$from/$kind" schema
+    ;;
+
+  inspect)
+    request=$(cat)
+
+    # Copied out of the request rather than written out again, so that whatever
+    # the declaration says round trips exactly.  JSON is YAML, so the object
+    # goes back as it arrived.  Both orderings are looked for, because which one
+    # detc writes is not part of the contract
+    desired=$(printf '%s' "$request" | sed -n \
+        -e 's/^{"desired":\(.*\),"name":"[^"]*"}$/\1/p' \
+        -e 's/^{"name":"[^"]*","desired":\(.*\)}$/\1/p')
+
+    [ -n "$desired" ] || fail "cannot read the request: $request"
+
+    printf '%s\n' "$desired"
+    ;;
+
+  apply)
+    cat > /dev/null
+
+    # Unreachable, in the same way as in `providers/noop`: this agreed with the
+    # declaration a moment ago, so arriving here means the answer did not come
+    # back the way it was sent.  Saying so is better than exiting 0, which would
+    # record work that this cannot do and is not pretending to
+    echo "$kind: deferred, but inspect did not report back what was declared" >&2
+    exit 1
+    ;;
+
+  "")
+    fail "no verb, expected schema, inspect or apply"
+    ;;
+
+  *)
+    fail "unknown verb $1, expected schema, inspect or apply"
+    ;;
+esac

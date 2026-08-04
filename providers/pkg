@@ -1,0 +1,260 @@
+#!/bin/sh
+
+# Packages, through whichever package manager the system has.
+#
+# The name of the resource is the name of the package, spelled the way the
+# distribution spells it: `pkg/openssh-server` on Debian is `pkg/openssh` on
+# openSUSE, and a fleet that spans both either declares the two and lets a
+# prefix mask the one that does not apply, or reads `system.pkg.manager` and
+# declares the name that goes with it.
+#
+# `zypper`, `dnf` and `apt-get` are driven the same way, and all three are asked
+# for their non interactive mode: there is nobody at the terminal, and a
+# provider that stopped to ask a question would hang the run instead of failing
+# it.  A root that is not `/` is handed to the manager as the tree to install
+# into, which is what builds an image; `apt-get` has no usable equivalent and
+# says so rather than installing into the machine doing the building.
+#
+# A package that is not in the system is reported as `installed: false` and not
+# as an absent resource, because `installed: false` is a state a declaration can
+# ask for, and a resource that reports nothing is one that detc will keep trying
+# to create.
+
+set -eu
+
+fail() {
+    echo "pkg: $*" >&2
+    exit 1
+}
+
+# The state that the declaration asks for, as `key<tab>value` lines.
+#
+# This is the same reader as in the other core providers, copied rather than
+# shared, because a provider is one executable and a fleet replaces it by
+# dropping one file of its own into a prefix.  A change to one of them is a
+# change to all of them.
+#
+# Only the object under `desired` is read, and only the shapes that a schema
+# here declares: strings, numbers, booleans, and arrays of those, which become
+# their elements joined by a comma.  The request arrives compact, the way detc
+# writes it, so there is no whitespace to step over.
+desired() {
+    awk '
+{
+  s = $0
+  n = length(s)
+  i = index(s, "\"desired\":{") + 11
+  if (i == 11 || substr(s, i, 1) == "}") exit
+  while (i <= n) {
+    k = str()
+    i++
+    print k "\t" val()
+    if (substr(s, i, 1) != ",") exit
+    i++
+  }
+}
+
+function str(   out, c) {
+  i++
+  out = ""
+  while (i <= n) {
+    c = substr(s, i, 1)
+    i++
+    if (c == "\"") return out
+    if (c == "\\") {
+      c = substr(s, i, 1)
+      i++
+      if (c == "n") c = "\n"
+      else if (c == "t") c = "\t"
+      else if (c == "u") { c = " "; i += 4 }
+    }
+    out = out c
+  }
+  return out
+}
+
+function val(   out, c) {
+  c = substr(s, i, 1)
+  if (c == "\"") return str()
+  if (c == "{") { print "an object is not a property this reads" > "/dev/stderr"; exit 1 }
+  if (c == "[") {
+    i++
+    out = ""
+    if (substr(s, i, 1) == "]") { i++; return out }
+    while (i <= n) {
+      out = out val()
+      c = substr(s, i, 1)
+      i++
+      if (c == "]") return out
+      out = out ","
+    }
+    return out
+  }
+  out = ""
+  while (i <= n && index(",}", substr(s, i, 1)) == 0) {
+    out = out substr(s, i, 1)
+    i++
+  }
+  return out
+}
+'
+}
+
+# The name of the resource, which no schema validates and which therefore has to
+# be a package name and not something else.
+# The name of the object, out of the request.  The keys arrive in the order that
+# a JSON map sorts them, which puts `name` after `current`, `desired` and
+# `diff` -- last, in both requests -- so the one at the end of the line is the
+# top level one and a `name` inside the declaration is not mistaken for it.
+name_of() {
+    sed -n 's/.*,"name":"\([^"]*\)"}$/\1/p'
+}
+
+# What is reported back is quoted, so that a version with a colon in it -- an
+# epoch, which is ordinary -- is one value and not a mapping.
+yaml() {
+    printf '%s: "%s"\n' "$1" "$(printf '%s' "$2" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+}
+
+root=${DETC_ROOT:-/}
+
+# The managers are run against the tree detc was pointed at, and told about it
+# only when it is not the running system: `/` is where they work by default, and
+# saying so explicitly only invites one of them to treat the run as the first
+# install into an empty tree.
+rpm_() {
+    if [ "$root" = / ]; then rpm "$@"; else rpm --root "$root" "$@"; fi
+}
+
+dpkg_query_() {
+    if [ "$root" = / ]; then dpkg-query "$@"; else dpkg-query --root "$root" "$@"; fi
+}
+
+zypper_() {
+    if [ "$root" = / ]; then
+        zypper --non-interactive "$@"
+    else
+        zypper --non-interactive --root "$root" "$@"
+    fi
+}
+
+dnf_() {
+    if [ "$root" = / ]; then
+        dnf --assumeyes "$@"
+    else
+        dnf --assumeyes --installroot "$root" "$@"
+    fi
+}
+
+# A tree is only recognised as having a manager when the program is in it, so a
+# root that holds no distribution is reported as such instead of being managed
+# with the tools of the machine that is looking at it.
+manager=
+if [ -x "$root/usr/bin/zypper" ]; then manager=zypper
+elif [ -x "$root/usr/bin/dnf" ]; then manager=dnf
+elif [ -x "$root/usr/bin/apt-get" ]; then manager=apt-get
+fi
+
+case "${1-}" in
+  schema)
+    cat <<'EOF'
+description: A package of the distribution
+order: 10
+properties:
+  installed:
+    type: boolean
+    description: Whether the package has to be in the system
+    default: true
+  version:
+    type: string
+    description: >-
+      The exact version to hold, for a package that is pinned.  It is only
+      reported for a package that is installed, so it cannot be declared
+      together with installed false.
+EOF
+    ;;
+
+  inspect)
+    name=$(name_of)
+    [ -n "$name" ] || fail "the request does not name a package"
+    [ -n "$manager" ] || fail "there is no package manager in $root"
+
+    case "$manager" in
+      zypper|dnf)
+        version=$(rpm_ -q --qf '%{VERSION}-%{RELEASE}' "$name" 2>/dev/null) || version=
+        ;;
+      apt-get)
+        # `${Version}` is dpkg-query's own format syntax and has to reach it
+        # unexpanded, which is what the single quotes are for
+        # shellcheck disable=SC2016
+        version=$(dpkg_query_ -W -f '${Version}' "$name" 2>/dev/null) || version=
+        ;;
+    esac
+
+    if [ -n "$version" ]; then
+        echo "installed: true"
+        yaml version "$version"
+    else
+        echo "installed: false"
+    fi
+    ;;
+
+  apply)
+    request=$(cat)
+    name=$(printf '%s' "$request" | name_of)
+    [ -n "$name" ] || fail "the request does not name a package"
+    [ -n "$manager" ] || fail "there is no package manager in $root"
+
+    installed=true
+    version=
+    while IFS='	' read -r key value; do
+        case "$key" in
+          installed) installed=$value ;;
+          version) version=$value ;;
+        esac
+    done <<EOF
+$(printf '%s' "$request" | desired)
+EOF
+
+    # A version pins the package, so what the manager is given is the argument
+    # that names it exactly.  Only the separator differs between the two
+    # families
+    case "$manager" in
+      apt-get) target=${version:+$name=$version} ;;
+      *) target=${version:+$name-$version} ;;
+    esac
+    target=${target:-$name}
+
+    case "$manager" in
+      zypper)
+        case "$installed" in
+          true) zypper_ install --no-recommends "$target" ;;
+          *) zypper_ remove "$name" ;;
+        esac
+        ;;
+      dnf)
+        case "$installed" in
+          true) dnf_ install "$target" ;;
+          *) dnf_ remove "$name" ;;
+        esac
+        ;;
+      apt-get)
+        [ "$root" = / ] || fail "apt-get cannot install into $root, only into /"
+        DEBIAN_FRONTEND=noninteractive
+        export DEBIAN_FRONTEND
+        case "$installed" in
+          true) apt-get --yes --no-install-recommends install "$target" ;;
+          *) apt-get --yes remove "$name" ;;
+        esac
+        ;;
+    esac
+    ;;
+
+  "")
+    fail "no verb, expected schema, inspect or apply"
+    ;;
+
+  *)
+    fail "unknown verb $1, expected schema, inspect or apply"
+    ;;
+esac

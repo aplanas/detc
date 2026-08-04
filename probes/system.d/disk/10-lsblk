@@ -1,0 +1,30 @@
+#!/bin/sh
+
+# The block devices of the machine, as `lsblk` reports them.
+#
+# This fills `system.disk.devices` with what `lsblk -J` writes: a tree of
+# devices, each with its partitions under `children`.  It is passed through
+# unchanged for the same reason the interfaces are -- the shape belongs to the
+# tool.  Only the name of the top key is changed, from `blockdevices` to
+# `devices`, so that the namespace does not say `system.disk.blockdevices`.
+#
+# Devices belong to the running machine, so a root that is not `/` is reported
+# on not at all.
+#
+# `DETC_LIVE=1` is how a caller says that the root is not `/` but the machine
+# looking at it is the machine that will boot it, and then these are its disks.
+# The one caller that can honestly say so is the initrd: `/sysroot` there was
+# mounted off one of the devices reported here.  Nothing else should set it --
+# see `tools/detc-inject`.
+
+set -eu
+
+root=${DETC_ROOT:-/}
+[ "$root" = / ] || [ "${DETC_LIVE:-0}" = 1 ] || exit 0
+
+command -v lsblk > /dev/null 2>&1 || exit 0
+
+devices=$(lsblk -J 2>/dev/null | sed '0,/"blockdevices"/s//"devices"/') || exit 0
+[ -n "$devices" ] || exit 0
+
+printf '%s\n' "$devices"

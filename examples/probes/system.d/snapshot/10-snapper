@@ -1,0 +1,43 @@
+#!/bin/sh
+
+# What the tree can be rolled back to, as `snapper` reports it.
+#
+# This fills `system.snapshot.configs` with what `snapper --jsonout list`
+# writes: one key per snapper configuration -- `root` on a stock install --
+# holding the list of that configuration's snapshots, each with its number, its
+# type, its description, and whether it is the default or the active one.  It is
+# passed through unchanged, for the same reason the interfaces and the block
+# devices of the core set are: the shape belongs to the tool.
+#
+#     {{ system.snapshot.configs.root | selectattr('active', 'eq', true)
+#        | map(attribute='number') | first }}
+#
+# The only thing added is the top, which `snapper` does not write: the
+# configurations are at the root of its document.  Mounting them there would put
+# `system.snapshot.root` in the namespace, which reads as the snapshot of the
+# root and is not what it is -- and a configuration can be called anything, so
+# it would be names somebody else chose sitting where a key of this subtree
+# goes.
+#
+# `--disable-used-space` is not an economy.  Working out how much room a
+# snapshot takes walks the whole of it, and this runs before a single template
+# is rendered; a fleet that wants that number is asking a question a probe
+# should not be answering on every run.
+#
+# It is an example and not part of the core set because `snapper` is neither on
+# every distribution nor of any use without a filesystem that snapshots.
+
+set -eu
+
+root=${DETC_ROOT:-/}
+
+command -v snapper > /dev/null 2>&1 || exit 0
+
+# `--root` is what lets this read an image being built rather than the machine
+# building it.  It works only without DBus, which is what should be asked for
+# anyway: during a first boot there is nothing listening yet
+snapshots=$(snapper --jsonout --no-dbus --root="$root" list --disable-used-space 2>/dev/null) || exit 0
+[ -n "$snapshots" ] || exit 0
+
+# JSON is YAML, so what the tool wrote goes in as it stands
+printf '{"configs": %s}\n' "$snapshots"

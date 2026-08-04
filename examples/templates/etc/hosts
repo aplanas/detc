@@ -1,0 +1,21 @@
+{#-
+  The names the node knows without asking anybody, out of `net.hosts`.
+
+  This is not part of the core set and is not installed.  `/etc/hosts` has no
+  drop-in directory, so the whole file is the template -- including the two
+  loopback lines, which are not optional and which nothing else would put back.
+  A fleet that copies this owns the file from then on.
+
+    net:
+      hosts:
+        - {ip: 10.0.0.1, names: [gateway, gw]}
+        - {ip: 10.0.0.2, names: [db]}
+
+  The first name on a line is the canonical one and the rest are aliases, which
+  is why `names` is a list and its order is kept.
+-#}
+# Written by detc.  Do not edit: it is rewritten on every run.
+127.0.0.1	localhost
+::1	localhost ip6-localhost ip6-loopback
+{% for host in net.hosts %}{{ host.ip }}	{{ host.names | join(' ') }}
+{% endfor -%}
