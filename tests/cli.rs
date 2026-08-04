@@ -67,9 +67,17 @@ fn test_list_shows_every_object() -> TestResult {
     assert!(!listed.contains("probe\t"), "{listed}");
     assert_eq!(listed.lines().count(), 2, "{listed}");
 
+    // A type that does not exist never reaches the command: it is a value of
+    // an option with a closed set of them, so the parser refuses it and says
+    // what the set is
     let output = detc(root, &["list", "--type", "nope"]);
     assert!(!output.status.success());
-    assert!(stderr(&output).contains("Unknown type nope"), "{output:?}");
+    let error = stderr(&output);
+    assert!(error.contains("invalid value 'nope'"), "{error}");
+    assert!(
+        error.contains("[possible values: probe, template, resource, provider]"),
+        "{error}"
+    );
 
     Ok(())
 }

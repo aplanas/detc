@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use detc::Result;
 
+use crate::detc::Type;
+
 /// A commit that a run of `apply` left in the journal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Commit {
@@ -34,13 +36,15 @@ pub(crate) struct Commit {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Record {
-    /// A type of object, as `list --types` names them.
-    Type(String),
+    /// A type of object, as `list --types` names them.  It is the [`Type`] that
+    /// `--type` takes and not a word, so the list that a client is told and the
+    /// list that the command line accepts are the same one.
+    Type(Type),
 
     /// An object of the system: what it is, what addresses it, and the file it
     /// was read from.
     Object {
-        r#type: String,
+        r#type: Type,
         name: String,
         source: String,
     },
@@ -112,7 +116,7 @@ impl Record {
     /// time, and is why the journal can store a line and report it later.
     pub(crate) fn line(&self) -> String {
         match self {
-            Record::Type(name) => name.clone(),
+            Record::Type(kind) => kind.to_string(),
 
             Record::Object {
                 r#type,
@@ -248,14 +252,14 @@ mod tests {
 
     #[test]
     fn every_other_record_ends_with_a_newline() {
-        assert_eq!(rendered(vec![Record::Type("probe".to_string())]), "probe\n");
+        assert_eq!(rendered(vec![Record::Type(Type::Probe)]), "probe\n");
     }
 
     #[test]
     fn an_object_is_the_type_the_name_and_the_source() {
         assert_eq!(
             Record::Object {
-                r#type: "template".to_string(),
+                r#type: Type::Template,
                 name: "/etc/chrony/chrony.conf".to_string(),
                 source: "/usr/share/detc/templates/chrony.conf".to_string(),
             }

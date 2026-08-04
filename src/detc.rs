@@ -13,17 +13,43 @@ use std::path::{Path, PathBuf};
 use std::result;
 use std::str::FromStr;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use env_logger::Env;
 use log::{LevelFilter, warn};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use detc::{Result, apply, bundle, err, journal, last, lock, provider, resource, template, var};
 
 use crate::record::{Commit, Record, Sink, TextSink};
 
-/// Types of objects that can be listed, checked and applied.
-const TYPES: &[&str] = &["probe", "template", "resource", "provider"];
+/// A type of object that the system has.
+///
+/// This is the whole vocabulary of `--type`, written down once: clap refuses
+/// anything else before a subcommand runs, `--types` prints these, the help of
+/// every option offers them, and the varlink interface accepts them and nothing
+/// more.  Adding a type of object here is what adds it everywhere.
+///
+/// The order is the one `--types` prints, and the one in which a name with no
+/// type is looked for.
+#[derive(ValueEnum, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[value(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum Type {
+    Probe,
+    Template,
+    Resource,
+    Provider,
+}
+
+impl fmt::Display for Type {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.to_possible_value()
+            .expect("a type of object is never skipped as a value of --type")
+            .get_name()
+            .fmt(f)
+    }
+}
 
 /// Root of the system when none is given in the command line.
 pub(crate) const DEFAULT_ROOT: &str = "/";
@@ -118,9 +144,9 @@ pub(crate) enum Commands {
         /// Configuration file or resource to apply, all of them by default
         file: Option<PathBuf>,
 
-        /// Type (list --types for all the possible types)
-        #[arg(short, long)]
-        r#type: Option<String>,
+        /// Type of object to apply
+        #[arg(short, long, value_enum)]
+        r#type: Option<Type>,
 
         #[command(flatten)]
         var: VarArgs,
@@ -132,9 +158,9 @@ pub(crate) enum Commands {
         #[arg(long)]
         types: bool,
 
-        /// Type (list --types for all the possible types)
-        #[arg(short, long)]
-        r#type: Option<String>,
+        /// Type of object to list
+        #[arg(short, long, value_enum)]
+        r#type: Option<Type>,
     },
 
     /// Describe a type of resource, from the schema of its provider
@@ -150,9 +176,9 @@ pub(crate) enum Commands {
         /// of a resource, or the name or the path of a probe or a provider
         object: PathBuf,
 
-        /// Type (list --types for all the possible types), guessed by default
-        #[arg(short, long)]
-        r#type: Option<String>,
+        /// Type of the object, guessed from the name by default
+        #[arg(short, long, value_enum)]
+        r#type: Option<Type>,
 
         /// Show the template or the declaration, instead of the instantiated
         /// content.  A probe and a provider are always shown as they are
@@ -168,9 +194,9 @@ pub(crate) enum Commands {
         /// Configuration file or probe to check, all of them by default
         file: Option<PathBuf>,
 
-        /// Type (list --types for all the possible types)
-        #[arg(short, long)]
-        r#type: Option<String>,
+        /// Type of object to check
+        #[arg(short, long, value_enum)]
+        r#type: Option<Type>,
 
         #[command(flatten)]
         var: VarArgs,
@@ -450,16 +476,6 @@ fn fetch(url: &str) -> Result<Vec<u8>> {
     )
 }
 
-/// Validate the type of object requested in the command line.  The type is
-/// optional, as the name that addresses an object usually says which one it is.
-fn check_type(kind: Option<&str>) -> Result<()> {
-    match kind {
-        None => Ok(()),
-        Some(kind) if TYPES.contains(&kind) => Ok(()),
-        Some(kind) => err!("Unknown type {kind}, use --types to list the valid ones"),
-    }
-}
-
 /// Get the probe that `probe` addresses among the ones that the system has
 /// installed, if there is one.
 ///
@@ -549,52 +565,52 @@ fn resolve_provider(provider: &Path, root: &Path) -> Result<PathBuf> {
 
 /// List the objects of the system, one per line, as the type of the object, the
 /// name that addresses it, and where it comes from.
-fn list(out: &mut dyn Sink, root: &Path, types: bool, kind: Option<&str>) -> Result<()> {
+fn list(out: &mut dyn Sink, root: &Path, types: bool, kind: Option<Type>) -> Result<()> {
     if types {
-        for kind in TYPES {
-            out.emit(Record::Type(kind.to_string()))?;
+        for kind in Type::value_variants() {
+            out.emit(Record::Type(*kind))?;
         }
         return Ok(());
     }
 
-    check_type(kind)?;
-
-    let object = |r#type: &str, name: String, source: String| Record::Object {
-        r#type: r#type.to_string(),
+    let object = |r#type: Type, name: String, source: String| Record::Object {
+        r#type,
         name,
         source,
     };
 
-    if kind.is_none() || kind == Some("probe") {
+    let asked = |t: Type| kind.is_none() || kind == Some(t);
+
+    if asked(Type::Probe) {
         for (mount, path) in var::Variables::probes(root)? {
-            out.emit(object("probe", mount, path.display().to_string()))?;
+            out.emit(object(Type::Probe, mount, path.display().to_string()))?;
         }
     }
 
-    if kind.is_none() || kind == Some("template") {
+    if asked(Type::Template) {
         for template in template::Templates::from_system(root)?.templates() {
             out.emit(object(
-                "template",
+                Type::Template,
                 template.target().display().to_string(),
                 template.source().display().to_string(),
             ))?;
         }
     }
 
-    if kind.is_none() || kind == Some("resource") {
+    if asked(Type::Resource) {
         for resource in resource::Resources::from_system(root)?.resources() {
             out.emit(object(
-                "resource",
+                Type::Resource,
                 resource.id().to_string(),
                 resource.source().display().to_string(),
             ))?;
         }
     }
 
-    if kind.is_none() || kind == Some("provider") {
+    if asked(Type::Provider) {
         for provider in provider::Providers::from_system(root)?.providers() {
             out.emit(object(
-                "provider",
+                Type::Provider,
                 provider.kind().to_string(),
                 provider.path().display().to_string(),
             ))?;
@@ -606,9 +622,8 @@ fn list(out: &mut dyn Sink, root: &Path, types: bool, kind: Option<&str>) -> Res
 
 /// Show the schema of a type of resource, as its provider writes it.
 ///
-/// The type here is the type of a resource, and not one of [`TYPES`]: only a
-/// provider declares what it accepts, so a template or a probe has nothing to
-/// show.
+/// The type here is the type of a resource, and not a [`Type`]: only a provider
+/// declares what it accepts, so a template or a probe has nothing to show.
 fn schema(out: &mut dyn Sink, root: &Path, kind: &str) -> Result<()> {
     out.emit(Record::Text(find_provider(root, kind)?.raw_schema()?))
 }
@@ -624,7 +639,7 @@ fn doc(out: &mut dyn Sink, root: &Path, kind: &str) -> Result<()> {
 /// template` is an easy thing to write when `--type` means something else in
 /// every other subcommand.
 fn find_provider(root: &Path, kind: &str) -> Result<provider::Provider> {
-    if TYPES.contains(&kind) {
+    if Type::from_str(kind, false).is_ok() {
         return err!(
             "{kind} is a type of object, not a type of resource - pass the type that a provider implements, as shown by `detc list --type provider`"
         );
@@ -647,7 +662,7 @@ enum Object {
 
 /// Resolve the object that `name` addresses, of the type that was named or of
 /// whichever type has it.
-fn resolve_object(root: &Path, name: &Path, kind: Option<&str>) -> Result<Object> {
+fn resolve_object(root: &Path, name: &Path, kind: Option<Type>) -> Result<Object> {
     match kind {
         Some(kind) => resolve_typed_object(root, name, kind),
         None => guess_object(root, name),
@@ -660,20 +675,18 @@ fn resolve_object(root: &Path, name: &Path, kind: Option<&str>) -> Result<Object
 /// it, in its own words, and a program is read even where the system has not
 /// installed it as one: naming a type is how a probe is tried before it is
 /// shipped.
-fn resolve_typed_object(root: &Path, name: &Path, kind: &str) -> Result<Object> {
+fn resolve_typed_object(root: &Path, name: &Path, kind: Type) -> Result<Object> {
     match kind {
-        "probe" => resolve_probe(name, root).map(Object::Probe),
-        "provider" => resolve_provider(name, root).map(Object::Provider),
+        Type::Probe => resolve_probe(name, root).map(Object::Probe),
+        Type::Provider => resolve_provider(name, root).map(Object::Provider),
 
-        "template" => template::Templates::from_system(root)?
+        Type::Template => template::Templates::from_system(root)?
             .find(name)
             .map(|template| Object::Template(template.clone())),
 
-        "resource" => resource::Resources::from_system(root)?
+        Type::Resource => resource::Resources::from_system(root)?
             .find(&name.to_string_lossy())
             .map(|resource| Object::Resource(resource.clone())),
-
-        kind => unreachable!("{kind} is a type that check_type does not accept"),
     }
 }
 
@@ -720,12 +733,10 @@ fn cat(
     out: &mut dyn Sink,
     root: &Path,
     name: &Path,
-    kind: Option<&str>,
+    kind: Option<Type>,
     raw: bool,
     args: &VarArgs,
 ) -> Result<()> {
-    check_type(kind)?;
-
     let text = match resolve_object(root, name, kind)? {
         Object::Template(template) if raw => template.content()?,
         Object::Template(template) => template.render(args.variables(root)?.value())?,
@@ -980,33 +991,32 @@ fn check(
     out: &mut dyn Sink,
     root: &Path,
     file: Option<&Path>,
-    kind: Option<&str>,
+    kind: Option<Type>,
     args: &VarArgs,
 ) -> Result<()> {
-    check_type(kind)?;
-
     let kind = match (kind, file) {
         // A single object is a template unless the type says otherwise, as the
         // configuration file is the usual way of addressing it
-        (None, Some(_)) => Some("template"),
+        (None, Some(_)) => Some(Type::Template),
         (kind, _) => kind,
     };
 
+    let asked = |t: Type| kind.is_none() || kind == Some(t);
     let mut failed = 0;
 
-    if kind.is_none() || kind == Some("probe") {
+    if asked(Type::Probe) {
         failed += check_probes(out, root, file)?;
     }
 
-    if kind.is_none() || kind == Some("template") {
+    if asked(Type::Template) {
         failed += check_templates(out, root, file, args)?;
     }
 
-    if kind.is_none() || kind == Some("resource") {
+    if asked(Type::Resource) {
         failed += check_resources(out, root, file, args)?;
     }
 
-    if kind.is_none() || kind == Some("provider") {
+    if asked(Type::Provider) {
         failed += check_providers(out, root)?;
     }
 
@@ -1193,20 +1203,18 @@ fn apply_system(
     out: &mut dyn Sink,
     root: &Path,
     file: Option<&Path>,
-    kind: Option<&str>,
+    kind: Option<Type>,
     dry_run: bool,
     args: &VarArgs,
 ) -> Result<()> {
-    check_type(kind)?;
-
     let kind = match (kind, file) {
         // A single object is a template unless the type says otherwise, as the
         // configuration file is the usual way of addressing it
-        (None, Some(_)) => Some("template"),
+        (None, Some(_)) => Some(Type::Template),
         (kind, _) => kind,
     };
 
-    if let Some(kind @ ("probe" | "provider")) = kind {
+    if let Some(kind @ (Type::Probe | Type::Provider)) = kind {
         return err!(
             "A {kind} is not applied, it is what the objects that are applied are made of"
         );
@@ -1236,14 +1244,14 @@ fn apply_system(
 
     let templates = template::Templates::from_system(root)?;
     let selected_templates = match (kind, file) {
-        (Some("resource"), _) => None,
+        (Some(Type::Resource), _) => None,
         (_, Some(file)) => Some(vec![templates.find(file)?]),
         (_, None) => Some(templates.templates().iter().collect()),
     };
 
     let resources = resource::Resources::from_system(root)?;
     let selected_resources = match (kind, file) {
-        (Some("template"), _) => None,
+        (Some(Type::Template), _) => None,
         (_, Some(id)) => Some(vec![resources.find(&id.to_string_lossy())?]),
         (_, None) => Some(resources.resources().iter().collect()),
     };
@@ -1563,16 +1571,14 @@ pub(crate) fn dispatch(
     dry_run: bool,
 ) -> Result<()> {
     match command {
-        Commands::List { types, r#type } => list(out, root, *types, r#type.as_deref()),
+        Commands::List { types, r#type } => list(out, root, *types, *r#type),
         Commands::Cat {
             object,
             r#type,
             raw,
             var,
-        } => cat(out, root, object, r#type.as_deref(), *raw, var),
-        Commands::Check { file, r#type, var } => {
-            check(out, root, file.as_deref(), r#type.as_deref(), var)
-        }
+        } => cat(out, root, object, *r#type, *raw, var),
+        Commands::Check { file, r#type, var } => check(out, root, file.as_deref(), *r#type, var),
         Commands::Var {
             file,
             var,
@@ -1591,7 +1597,7 @@ pub(crate) fn dispatch(
         Commands::Doc { r#type } => doc(out, root, r#type),
         Commands::Schema { r#type } => schema(out, root, r#type),
         Commands::Apply { file, r#type, var } => {
-            apply_system(out, root, file.as_deref(), r#type.as_deref(), dry_run, var)
+            apply_system(out, root, file.as_deref(), *r#type, dry_run, var)
         }
 
         Commands::Bundle { command } => bundle(out, root, command, dry_run),

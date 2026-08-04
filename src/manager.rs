@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use detc::{Result, err};
 
-use crate::detc::{BundleCommands, Commands, Source, VarArgs};
+use crate::detc::{BundleCommands, Commands, Source, Type, VarArgs};
 use crate::record::Record;
 use crate::varlink;
 
@@ -144,7 +144,7 @@ impl From<Var> for VarArgs {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ListParams {
     #[serde(default)]
-    r#type: Option<String>,
+    r#type: Option<Type>,
 }
 
 /// `Doc` and `Schema`, which describe a type of resource.
@@ -159,7 +159,7 @@ struct CatParams {
     name: String,
 
     #[serde(default)]
-    r#type: Option<String>,
+    r#type: Option<Type>,
 
     #[serde(default)]
     raw: bool,
@@ -175,7 +175,7 @@ struct CheckParams {
     name: Option<String>,
 
     #[serde(default)]
-    r#type: Option<String>,
+    r#type: Option<Type>,
 
     #[serde(default)]
     var: Var,
@@ -188,7 +188,7 @@ struct ApplyParams {
     name: Option<String>,
 
     #[serde(default)]
-    r#type: Option<String>,
+    r#type: Option<Type>,
 
     #[serde(default)]
     dry_run: bool,
@@ -386,9 +386,7 @@ pub(crate) fn call(command: &Commands, dry_run: bool) -> Result<(&'static Method
         Commands::List { types: true, .. } => ("ListTypes", json!({})),
         Commands::List { r#type, .. } => (
             "List",
-            varlink::parameters(&ListParams {
-                r#type: r#type.clone(),
-            })?,
+            varlink::parameters(&ListParams { r#type: *r#type })?,
         ),
 
         Commands::Cat {
@@ -400,7 +398,7 @@ pub(crate) fn call(command: &Commands, dry_run: bool) -> Result<(&'static Method
             "Cat",
             varlink::parameters(&CatParams {
                 name: name(object),
-                r#type: r#type.clone(),
+                r#type: *r#type,
                 raw: *raw,
                 var: Var::of(var)?,
             })?,
@@ -410,7 +408,7 @@ pub(crate) fn call(command: &Commands, dry_run: bool) -> Result<(&'static Method
             "Check",
             varlink::parameters(&CheckParams {
                 name: file.as_ref().map(name),
-                r#type: r#type.clone(),
+                r#type: *r#type,
                 var: Var::of(var)?,
             })?,
         ),
@@ -433,7 +431,7 @@ pub(crate) fn call(command: &Commands, dry_run: bool) -> Result<(&'static Method
             "Apply",
             varlink::parameters(&ApplyParams {
                 name: file.as_ref().map(name),
-                r#type: r#type.clone(),
+                r#type: *r#type,
                 dry_run,
                 var: Var::of(var)?,
             })?,
@@ -775,7 +773,8 @@ pub(crate) fn record(parameters: &Value) -> Result<Option<Record>> {
 mod tests {
     use super::*;
 
-    use varlink_parser::{Argument, VTypeExt};
+    use clap::ValueEnum;
+    use varlink_parser::{Argument, VStructOrEnum, VTypeExt};
 
     use crate::record::Commit;
 
@@ -927,6 +926,27 @@ mod tests {
         }
     }
 
+    /// The vocabulary of `--type` is declared twice, once for the command line
+    /// and once for whoever generates a client from the description, and the
+    /// two have to be the same list in the same words: a type added to [`Type`]
+    /// and not here is one that the command line takes and the interface
+    /// refuses.
+    #[test]
+    fn the_description_declares_the_types_of_object_that_the_enum_has() {
+        let idl = varlink_parser::IDL::try_from(IDL).expect("the description parses");
+
+        let VStructOrEnum::VEnum(declared) = &idl.typedefs["ObjectType"].elt else {
+            panic!("ObjectType is an enum");
+        };
+
+        let served: Vec<String> = Type::value_variants()
+            .iter()
+            .map(|kind| kind.to_string())
+            .collect();
+
+        assert_eq!(declared.elts, served);
+    }
+
     #[test]
     fn every_subcommand_reaches_a_method() {
         let var = |key: &[&str], value: &[&str], kv: &[&str]| VarArgs {
@@ -946,7 +966,7 @@ mod tests {
             (
                 Commands::List {
                     types: false,
-                    r#type: Some("probe".to_string()),
+                    r#type: Some(Type::Probe),
                 },
                 "List",
             ),
@@ -1135,7 +1155,7 @@ mod tests {
     fn a_call_comes_back_as_the_subcommand_it_was() {
         let apply = Commands::Apply {
             file: Some(PathBuf::from("/etc/hosts")),
-            r#type: Some("template".to_string()),
+            r#type: Some(Type::Template),
             var: VarArgs {
                 key: vec!["a".to_string()],
                 value: vec!["1".to_string()],
@@ -1151,7 +1171,7 @@ mod tests {
         match back {
             Commands::Apply { file, r#type, var } => {
                 assert_eq!(file, Some(PathBuf::from("/etc/hosts")));
-                assert_eq!(r#type.as_deref(), Some("template"));
+                assert_eq!(r#type, Some(Type::Template));
                 assert_eq!(var.key, ["a"]);
                 assert_eq!(var.value, ["1"]);
                 assert_eq!(var.kv, ["b=2"]);
@@ -1287,9 +1307,9 @@ mod tests {
     #[test]
     fn every_record_survives_the_trip_through_a_reply() {
         let records = [
-            Record::Type("probe".to_string()),
+            Record::Type(Type::Probe),
             Record::Object {
-                r#type: "template".to_string(),
+                r#type: Type::Template,
                 name: "/etc/hosts".to_string(),
                 source: "/usr/share/detc/templates.d/hosts".to_string(),
             },

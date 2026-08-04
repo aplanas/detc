@@ -14,10 +14,16 @@
 # reach in the system is decided by the machine that installs it.
 interface org.detc.Manager
 
+# A type of object that the system has.  This is the whole vocabulary: a call
+# that names anything else is refused, and a type added to the system is added
+# here.  It is not the type of a resource, which is whatever a provider chooses
+# to implement and travels as a plain string.
+type ObjectType (probe, template, resource, provider)
+
 # An object of the system: what it is, the name that addresses it, and the file
 # it was read from.
 type Object (
-  type: string,
+  type: ObjectType,
   name: string,
   source: string
 )
@@ -102,10 +108,10 @@ type Var (
 )
 
 # The types of object that the system has.  Streaming.
-method ListTypes() -> (type: ?string)
+method ListTypes() -> (type: ?ObjectType)
 
 # The objects of the system, of one type or of all of them.  Streaming.
-method List(type: ?string) -> (object: ?Object)
+method List(type: ?ObjectType) -> (object: ?Object)
 
 # What a template would write in the system, the state a resource declares, or
 # the program a probe or a provider is.  `name` addresses the object the way
@@ -114,7 +120,7 @@ method List(type: ?string) -> (object: ?Object)
 # the namespace reaches it; a program is never expanded.
 method Cat(
   name: string,
-  type: ?string,
+  type: ?ObjectType,
   raw: bool,
   var: Var
 ) -> (text: string)
@@ -123,7 +129,7 @@ method Cat(
 # the namespace runs the probes that the system has installed.  Streaming.
 method Check(
   name: ?string,
-  type: ?string,
+  type: ?ObjectType,
   var: Var
 ) -> (check: ?Verdict)
 
@@ -165,7 +171,7 @@ method GetBundle() -> (bundle: ?Bundle)
 # them.  With `dry_run`, say what would change and write nothing.  Streaming.
 method Apply(
   name: ?string,
-  type: ?string,
+  type: ?ObjectType,
   dry_run: bool,
   var: Var
 ) -> (change: ?Change)
