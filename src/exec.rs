@@ -43,6 +43,13 @@ pub fn is_executable(path: impl AsRef<Path>) -> bool {
 /// A program that exits with a failure, or that writes something that is not
 /// UTF-8, is an error: the caller cannot tell a truncated document from a
 /// complete one, and guessing would be worse than reporting it.
+///
+/// A program that leaves `stdin` unread is not an error.  A provider that
+/// answers the same thing whatever it is asked has nothing to read, and one
+/// that has seen enough of the request may stop before the end of it; either
+/// way it exits while this side is still writing, and the rest of the write is
+/// lost to a broken pipe.  That is discarded, and the program is judged by the
+/// status it exited with, like any other.
 pub fn run(
     path: impl AsRef<Path>,
     root: impl AsRef<Path>,
@@ -83,11 +90,22 @@ pub fn run(
     // The pipe has to be dropped after writing, or the child waits forever for
     // an end of file that never arrives
     if let Some(stdin) = stdin {
-        child
-            .stdin
-            .take()
-            .expect("the standard input was piped")
-            .write_all(stdin.as_bytes())?;
+        let mut pipe = child.stdin.take().expect("the standard input was piped");
+
+        // A program that exits without reading leaves nothing at the other end
+        // of the pipe, and the write lands on `EPIPE`.  That is the program
+        // saying it did not want the request, and not a failure of the run:
+        // what it exits with is checked below like any other, so a program that
+        // walked away in the middle of its work is still reported.  Waiting for
+        // it to be the failure it looks like would make every provider that
+        // ignores its standard input work or not depending on which of the two
+        // processes the scheduler ran first
+        match pipe.write_all(stdin.as_bytes()) {
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                debug!("{} did not read what it was given", path.display());
+            }
+            result => result?,
+        }
     }
 
     let output = child.wait_with_output()?;
@@ -256,6 +274,39 @@ mod tests {
         // Without a standard input the child reads an immediate end of file,
         // instead of inheriting the terminal and blocking
         assert_eq!(run(&program, root, &[], None)?, "[]\n");
+
+        Ok(())
+    }
+
+    /// A program is not obliged to read the request it was given.
+    ///
+    /// `providers/noop` reports back what it was asked for and one that always
+    /// answers the same thing has nothing to read at all, so a provider that
+    /// exits without draining its standard input is an ordinary provider.  The
+    /// write it leaves stranded fails with `EPIPE`, and taking that for the
+    /// failure of the run made such a provider work or not depending on whether
+    /// the scheduler ran it before this process got to write -- which is to say
+    /// it worked until the machine was busy.
+    #[test]
+    fn test_a_program_that_does_not_read_the_request_is_not_a_failure() -> TestResult {
+        let tmp_root = tempfile::tempdir()?;
+        let root = tmp_root.path();
+
+        let program = script(&root.join("deaf"), "echo answered\n")?;
+
+        // More than a pipe holds, so the write cannot be left in the buffer for
+        // a reader that never comes: it blocks until the program is gone, and
+        // the race that used to decide this is decided the same way every time
+        let request = "x".repeat(1 << 20);
+        assert_eq!(run(&program, root, &[], Some(&request))?, "answered\n");
+
+        // And a program that walks away in the middle of its work is still the
+        // failure it was, because that is what its status says and not what its
+        // standard input did
+        let program = script(&root.join("half"), "exit 3\n")?;
+        let error = run(&program, root, &[], Some(&request))
+            .expect_err("a program that exits with a failure is reported");
+        assert!(error.to_string().contains("failed with status"), "{error}");
 
         Ok(())
     }

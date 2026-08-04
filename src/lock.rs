@@ -171,6 +171,27 @@ fn flock_can_take(path: &Path) -> std::io::Result<bool> {
         .success())
 }
 
+/// The same, waiting a moment for a lock that was just released.
+///
+/// Closing the file releases it here, but an `flock` belongs to the open file
+/// description and not to the process, and a `fork` duplicates every descriptor
+/// this one had open.  So a child that another thread of the test binary
+/// started still holds the lock until it reaches `exec` and the descriptor is
+/// closed for it -- which is immediate on an idle machine and is not on a busy
+/// one.  Nothing in this file can close that window; it is what `fork` is.  The
+/// wait is therefore the whole of what a test can do, and it is not a wait for
+/// anything of ours: a lock that is really held is still held after it.
+#[cfg(test)]
+fn flock_takes_it_eventually(path: &Path) -> bool {
+    (0..100).any(|_| {
+        let taken = flock_can_take(path).expect("flock ran");
+        if !taken {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        taken
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,7 +268,7 @@ mod tests {
         };
 
         assert!(
-            flock_can_take(&path).expect("flock ran"),
+            flock_takes_it_eventually(&path),
             "flock could not take a lock that no run is holding"
         );
     }
