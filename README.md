@@ -1696,19 +1696,11 @@ something else.
   bundle is installed from a file or from the standard input, and a URL says
   that this build cannot fetch.
 
-The release profile is tuned for size and not for speed, because the binary is
+The release profile is tuned for size rather than speed, because the binary is
 the whole of what a node installs — baked into images, and fetched over whatever
-uplink a machine has on its first boot — while nothing it does is bound by
-throughput: a run parses a handful of documents and hashes files that are
-kilobytes.  It is 4.9M where the defaults give 13.2M, and on the operations a
-node actually performs it is not slower; `bundle create` over a large tree, run
-once on the machine that builds it, is about a tenth slower.
-
-The bill is the build.  Optimising across every crate at once, in one codegen
-unit, is what drops the unused half of a dependency, and it turns
-`cargo build --release` into minutes.  Development does not pay it: `cargo
-build`, `cargo test` and `make check` are all the debug profile and are as quick
-as they were.
+uplink a machine has on its first boot.  Optimising across every crate at once
+turns `cargo build --release` into minutes.  Development does not pay it: `cargo
+build`, `cargo test` and `make check` are all the debug profile.
 
 `cargo` builds the binary and stops there.  [The core set](#the-core-set) is
 data and executables that have to land under the prefixes `detc` reads, and the
@@ -1781,9 +1773,9 @@ table.  It builds three: `detc`, the binary and the core set; `detc-dracut`,
 [the first boot](#from-the-initrd-on-the-first-boot) — the half that is only
 reachable through dracut, and that a machine gets automatically when both are
 installed; and `detc-devel`, the two varlink interfaces, which is for whoever
-is writing a client and not for a node of a fleet.  A build in the Open Build Service has no network, so the crates
-travel with the source; [`packaging/_service`](packaging/_service) is what
-vendors them.
+is writing a client and not for a node of a fleet.  A build in the Open Build
+Service has no network, so the crates travel with the source;
+[`packaging/_service`](packaging/_service) is what vendors them.
 
 `make check` runs the gate: `cargo fmt --check`, `cargo clippy --all-targets`
 and `cargo test`.
