@@ -25,6 +25,14 @@ pub const PROBE_CATEGORIES: &[&str] = &["system"];
 /// ones are provided or persisted by the admin, so they win.
 pub const VARIABLE_NAMES: &[&str] = &["detc/variables/system", "detc/variables/user"];
 
+/// Extensions that are stripped from the name of a document, so that one can be
+/// called `nginx.yaml` and still be addressed as `nginx`.
+///
+/// They are the formats that [`Variables::from_str`] tries, which is why they
+/// are here and not beside the objects that are named this way: a name ends in
+/// one of these because the file is written in one of these.
+pub const NAME_EXTENSIONS: &[&str] = &["yaml", "yml", "json", "toml"];
+
 /// Name of the probes tree of a category, searched in the prefixes of the
 /// executables.
 pub fn probes_name(category: &str) -> String {
@@ -670,6 +678,161 @@ impl Variables {
     }
 }
 
+/// Remove the extension of a document from a name, so that a file can be called
+/// `nginx.yaml` and still be addressed as `nginx`.
+pub fn strip_extension(name: &str) -> String {
+    match name.rsplit_once('.') {
+        Some((stem, extension)) if NAME_EXTENSIONS.contains(&extension) => stem.to_string(),
+        _ => name.to_string(),
+    }
+}
+
+/// One document of variables, and where it was written.
+///
+/// [`Variables`] is every one of these merged together, and by then there is no
+/// telling which document said what: a key that two of them set holds one value,
+/// and the document that lost is not in the namespace at all.  A document is the
+/// thing that somebody wrote, which is what makes it worth addressing on its own
+/// — `detc var` answers what the system believes, and this answers who said so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Document {
+    group: String,
+    name: String,
+    source: PathBuf,
+}
+
+impl Document {
+    /// Which set of variables the document belongs to: `system` for what the
+    /// distribution ships, `user` for what the administrator wrote and what
+    /// `detc var --persist` left behind.
+    pub fn group(&self) -> &str {
+        &self.group
+    }
+
+    /// The name that addresses the document inside its group, which is empty
+    /// for the file that the drop-ins extend.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// How the document is addressed in the command line: `<group>/<name>` for
+    /// a drop-in, and the bare group for the file that they extend.
+    pub fn id(&self) -> String {
+        match self.name.is_empty() {
+            true => self.group.clone(),
+            false => format!("{}/{}", self.group, self.name),
+        }
+    }
+
+    /// Path of the file that holds the document.
+    pub fn source(&self) -> &Path {
+        &self.source
+    }
+
+    /// Read the document as it was written.
+    pub fn content(&self) -> Result<String> {
+        Ok(std::fs::read_to_string(&self.source).map_err(|e| {
+            format!(
+                "Cannot read variable document {}: {e}",
+                self.source.display()
+            )
+        })?)
+    }
+
+    /// Check that the document can take part in the namespace: that it parses
+    /// as one of the formats that are understood, and that the strategy it
+    /// asks for in [`MERGE_KEY`] is one that exists.
+    ///
+    /// Nothing is merged here, so this does not say that the namespace ends up
+    /// holding what the author meant.  Which document wins a key is a question
+    /// about all of them at once, and `detc var` is where it is answered.
+    pub fn check(&self) -> Result<()> {
+        Variables::from_file(&self.source)?.take_merge().map(|_| ())
+    }
+}
+
+/// The documents of variables that the system has.
+///
+/// They are in the order in which they are merged, and that order is the whole
+/// of what precedence means here: of two documents that set the same key, the
+/// later one wins.  Sorting them by name would show a precedence that the
+/// system does not have, as the groups are searched one after the other and not
+/// interleaved.
+#[derive(Debug)]
+pub struct Documents {
+    documents: Vec<Document>,
+}
+
+impl Documents {
+    /// Resolve the documents of variables that the system has, in merge order.
+    pub fn from_system(root: impl AsRef<Path>) -> Result<Self> {
+        let root = root.as_ref();
+        let mut documents = Vec::new();
+
+        for name in VARIABLE_NAMES {
+            let group = name
+                .rsplit('/')
+                .next()
+                .expect("a name of a variables tree has a last component");
+
+            for (key, source) in cfs::UAPICFS::with_root(name, root).entries()? {
+                documents.push(Document {
+                    group: group.to_string(),
+                    name: strip_extension(&key.to_string_lossy()),
+                    source,
+                });
+            }
+        }
+
+        // Only an extension tells `10-core.yaml` and `10-core.json` apart, and
+        // the extension is not part of the name, so the two address the same
+        // document and nothing says which one was asked for
+        for (position, document) in documents.iter().enumerate() {
+            if let Some(other) = documents[position + 1..]
+                .iter()
+                .find(|other| other.id() == document.id())
+            {
+                return err!(
+                    "Variable document {} is written twice, as {} and {}",
+                    document.id(),
+                    document.source().display(),
+                    other.source().display()
+                );
+            }
+        }
+
+        Ok(Self { documents })
+    }
+
+    /// The documents, in the order in which they are merged.
+    pub fn documents(&self) -> &[Document] {
+        &self.documents
+    }
+
+    /// Get the document that `id` addresses, if there is one.  The extension is
+    /// optional, as it is not part of the name.
+    ///
+    /// A caller that is looking for the object behind a name, and does not yet
+    /// know which kind of object it is, wants this rather than [`Self::find`].
+    pub fn get(&self, id: &str) -> Option<&Document> {
+        let id = strip_extension(id);
+
+        self.documents.iter().find(|document| document.id() == id)
+    }
+
+    /// Find the document that `id` addresses, and report that there is none
+    /// when there is none.
+    pub fn find(&self, id: &str) -> Result<&Document> {
+        match self.get(id) {
+            Some(document) => Ok(document),
+            None => err!(
+                "There is no variable document {}, use `detc list --type variable`",
+                strip_extension(id)
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1094,6 +1257,130 @@ mod tests {
             root.display().to_string()
         );
         assert_eq!(var.get_yaml("system.cwd")?.trim(), "system.d");
+
+        Ok(())
+    }
+
+    /// The documents are the files that the namespace was built from, listed in
+    /// the order in which they were merged and addressed one by one.
+    #[test]
+    fn test_the_documents_are_listed_in_the_order_they_are_merged() -> TestResult {
+        let tmp_root = tempfile::tempdir()?;
+        let root = tmp_root.path();
+
+        let system = root.join("usr/share/detc/variables/system.d");
+        fs::create_dir_all(&system)?;
+        fs::write(system.join("50-dns.yaml"), "dns:\n  domain: lan\n")?;
+        fs::write(
+            system.join("10-core.json"),
+            "{\"web\": {\"enabled\": true}}",
+        )?;
+
+        // The file that the drop-ins extend is a document too, and the group is
+        // the whole of its name
+        fs::create_dir_all(root.join("etc/detc/variables"))?;
+        fs::write(root.join("etc/detc/variables/user"), "ntp:\n  server: a\n")?;
+
+        let user = root.join("etc/detc/variables/user.d");
+        fs::create_dir_all(&user)?;
+        fs::write(user.join("90-ntp.yaml"), "ntp:\n  server: b\n")?;
+
+        let documents = Documents::from_system(root)?;
+        let ids: Vec<String> = documents.documents().iter().map(Document::id).collect();
+
+        // The drop-ins of a group are in lexicographic order, the groups are one
+        // after the other, and the file comes before the drop-ins that extend
+        // it -- which is the order that decides who wins `ntp.server`
+        assert_eq!(
+            ids,
+            ["system/10-core", "system/50-dns", "user", "user/90-ntp"]
+        );
+
+        assert_eq!(
+            Variables::from_documents(root)?
+                .get_yaml("ntp.server")?
+                .trim(),
+            "b"
+        );
+
+        // The extension is not part of the name, and naming it anyway addresses
+        // the same document
+        let document = documents.find("system/10-core.json")?;
+        assert_eq!(document.id(), "system/10-core");
+        assert_eq!(document.group(), "system");
+        assert_eq!(document.source(), system.join("10-core.json"));
+        assert_eq!(document.content()?, "{\"web\": {\"enabled\": true}}");
+
+        assert!(documents.get("system/nope").is_none());
+        let error = documents
+            .find("system/nope")
+            .expect_err("a document that is not there is reported");
+        assert!(
+            error.to_string().contains("There is no variable document"),
+            "{error}"
+        );
+
+        Ok(())
+    }
+
+    /// A document that cannot take part in the namespace says so, whether it is
+    /// the document or the strategy it asks for that is wrong.
+    #[test]
+    fn test_a_document_is_checked_without_being_merged() -> TestResult {
+        let tmp_root = tempfile::tempdir()?;
+        let root = tmp_root.path();
+
+        let system = root.join("usr/share/detc/variables/system.d");
+        fs::create_dir_all(&system)?;
+        fs::write(
+            system.join("10-ok.yaml"),
+            "_merge: full\nweb:\n  port: 80\n",
+        )?;
+        fs::write(system.join("20-broken.yaml"), "web: [unclosed\n")?;
+        fs::write(system.join("30-strategy.yaml"), "_merge: sideways\n")?;
+
+        let documents = Documents::from_system(root)?;
+        documents.find("system/10-ok")?.check()?;
+
+        let error = documents
+            .find("system/20-broken")?
+            .check()
+            .expect_err("a document that no parser understands is reported");
+        assert!(
+            error.to_string().contains("Format not recognized"),
+            "{error}"
+        );
+
+        let error = documents
+            .find("system/30-strategy")?
+            .check()
+            .expect_err("a strategy that does not exist is reported");
+        assert!(
+            error.to_string().contains("Unknown merge strategy"),
+            "{error}"
+        );
+
+        Ok(())
+    }
+
+    /// Only the extension tells two documents of one name apart, and the
+    /// extension is not part of the name.
+    #[test]
+    fn test_a_document_written_twice_is_refused() -> TestResult {
+        let tmp_root = tempfile::tempdir()?;
+        let root = tmp_root.path();
+
+        let system = root.join("usr/share/detc/variables/system.d");
+        fs::create_dir_all(&system)?;
+        fs::write(system.join("10-core.yaml"), "web:\n  enabled: true\n")?;
+        fs::write(
+            system.join("10-core.json"),
+            "{\"web\": {\"enabled\": false}}",
+        )?;
+
+        let error =
+            Documents::from_system(root).expect_err("two documents of one name are reported");
+        assert!(error.to_string().contains("is written twice"), "{error}");
 
         Ok(())
     }

@@ -150,7 +150,12 @@ everything; with one, the configuration file or the resource of that name
 alone.
 .B \-t
 .I TYPE
-narrows it to one type.
+narrows it to one type, which can only be
+.B template
+or
+.BR resource :
+a probe, a provider and a variable document are what the objects that are
+applied are made of, and are not applied themselves.
 .PP
 What is planned is only what differs, in the order the providers declare, and
 each change is reported as it is made.  Objects that could not be applied are
@@ -171,8 +176,9 @@ List only that type.
 Show what
 .I OBJECT
 holds: the content a template would write, instantiated against the namespace
-of this machine, the declaration of a resource expanded the same way, or the
-program that a probe or a provider is.
+of this machine, the declaration of a resource expanded the same way, the
+program that a probe or a provider is, or a variable document as it was
+written.
 .PP
 .I OBJECT
 is addressed the way
@@ -180,13 +186,15 @@ is addressed the way
 prints it, and either column of that line will do: the file a template
 instantiates, the
 .IR type / name
-of a resource, the mount point a probe feeds or its path, and the type a
-provider implements or its path.
+of a resource, the mount point a probe feeds or its path, the type a
+provider implements or its path, and the
+.IR group / name
+of a variable document.
 .TP
 .B \-\-raw
 Show the template or the declaration as it was written, before the variables
-reach it.  A probe and a provider are never expanded, and are always shown as
-they are.
+reach it.  A probe, a provider and a variable document are never expanded, and
+are always shown as they are.
 .TP
 .BR \-t ", " \-\-type " " \fITYPE\fR
 Which type
@@ -196,10 +204,11 @@ that is not installed as one, which is how a probe is tried before it is
 shipped.
 .
 .SS detc check [FILE]
-Check that the objects can be instantiated: that every template renders, that
-every probe answers with a document, that every resource matches the schema of
-its provider, and that every provider is there and answers.  It changes
-nothing and needs no privilege beyond reading.
+Check that the objects can be instantiated: that every variable document
+parses, that every probe answers with a document, that every template renders,
+that every resource matches the schema of its provider, and that every provider
+is there and answers.  It changes nothing and needs no privilege beyond
+reading.
 .PP
 The status is non\-zero if anything failed, which is what makes this the
 command to put in a pipeline.
@@ -216,6 +225,14 @@ the provider is asked.
 .
 .SS detc var [FILE]
 Query the namespace, or set part of it.
+.PP
+This is the namespace and not the documents it was built from.  A key holds one
+value here, whichever document won it, and the ones that lost are not in the
+answer at all.
+.B "detc list \-\-type variable"
+shows the documents themselves, and
+.B "detc cat"
+shows one of them as its author wrote it.
 .PP
 With
 .B \-k

@@ -673,18 +673,25 @@ probe     system.os                            /usr/libexec/detc/probes/system.d
 template  /etc/ssh/sshd_config.d/60-detc.conf  /usr/share/detc/templates.d/etc/ssh/sshd_config.d/60-detc.conf
 resource  unit/nginx                           /usr/share/detc/resources.d/unit/nginx
 provider  unit                                 /usr/libexec/detc/providers.d/unit
+variable  system/10-core                       /usr/share/detc/variables/system.d/10-core.yaml
 ```
 
-`--type probe|template|resource|provider` narrows the list down, and `--types`
-prints the types themselves.
+`--type probe|template|resource|provider|variable` narrows the list down, and
+`--types` prints the types themselves.
+
+The variable documents are the ones that build the namespace, in the order in
+which they are merged, and they are a different answer from the one
+[`detc var`](#detc-var) gives: there a key holds one value, whichever
+document won it, and the documents that lost are not in it at all.
 
 ### `detc cat <object>`
 
 Show what an object holds: the content that a template would write in the
-system, the declaration of a resource expanded against the namespace, or the
-program that a probe or a provider is.  `--raw` shows a template or a
-declaration as it was written, before the variables reach it; a program is
-never expanded, and is always shown as it is.
+system, the declaration of a resource expanded against the namespace, the
+program that a probe or a provider is, or a variable document as it was
+written.  `--raw` shows a template or a declaration as it was written, before
+the variables reach it; a program and a variable document are never expanded,
+and are always shown as they are.
 
 An object is addressed the way [`detc list`](#detc-list) prints it — either
 column of that line will do, so a probe is named by the mount point it feeds or
@@ -697,6 +704,7 @@ $ detc cat /etc/ssh/sshd_config.d/60-detc.conf   # what would be written
 $ detc cat --raw unit/nginx                      # the declaration, unexpanded
 $ detc cat system.disk                           # the probe behind a variable
 $ detc cat --type provider unit                  # the program that applies it
+$ detc cat --type variable system/10-core        # what one document declares
 ```
 
 A path of a program is enough on its own with `--type`, which is how one is
@@ -705,8 +713,9 @@ read before it is installed as anything.
 ### `detc check [file]`
 
 Report the objects that cannot be instantiated, and exit non zero if there is
-any of them.  Without arguments it runs every probe, instantiates every
-template, and checks every declaration against the schema of its provider.
+any of them.  Without arguments it parses every variable document, runs every
+probe, instantiates every template, and checks every declaration against the
+schema of its provider.
 
 ```console
 $ detc check

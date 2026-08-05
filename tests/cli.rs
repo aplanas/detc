@@ -25,7 +25,10 @@ fn test_list_shows_every_object() -> TestResult {
     // The types are the vocabulary of every `--type` option
     let output = detc(root, &["list", "--types"]);
     assert!(output.status.success(), "{}", stderr(&output));
-    assert_eq!(stdout(&output), "probe\ntemplate\nresource\nprovider\n");
+    assert_eq!(
+        stdout(&output),
+        "probe\ntemplate\nresource\nprovider\nvariable\n"
+    );
 
     // Without a type, every kind of object is listed, with its type, the name
     // that addresses it, and where it comes from
@@ -61,6 +64,17 @@ fn test_list_shows_every_object() -> TestResult {
     );
     assert!(listed.contains("resource\tunit/nginx\t"), "{listed}");
 
+    // A variable document is addressed by the group it belongs to and its
+    // name, and the extension is not part of that one either
+    assert!(
+        listed.contains(&format!(
+            "variable\tsystem/10-ssh\t{}",
+            root.join("usr/share/detc/variables/system.d/10-ssh.yaml")
+                .display()
+        )),
+        "{listed}"
+    );
+
     // And a type narrows the list down to one kind
     let output = detc(root, &["list", "--type", "template"]);
     let listed = stdout(&output);
@@ -75,7 +89,7 @@ fn test_list_shows_every_object() -> TestResult {
     let error = stderr(&output);
     assert!(error.contains("invalid value 'nope'"), "{error}");
     assert!(
-        error.contains("[possible values: probe, template, resource, provider]"),
+        error.contains("[possible values: probe, template, resource, provider, variable]"),
         "{error}"
     );
 
@@ -124,7 +138,8 @@ fn test_cat_instantiates_a_template() -> TestResult {
     let output = detc(root, &["cat", "/etc/hostname"]);
     assert!(!output.status.success());
     assert!(
-        stderr(&output).contains("There is no template, resource, probe or provider for"),
+        stderr(&output)
+            .contains("There is no template, resource, probe, provider or variable document for"),
         "{output:?}"
     );
 
@@ -194,6 +209,103 @@ fn test_cat_shows_every_type_of_object() -> TestResult {
     assert!(!output.status.success());
     assert!(
         stderr(&output).contains("There is no provider nope"),
+        "{output:?}"
+    );
+
+    Ok(())
+}
+
+/// A variable document is read as it was written, and it is the document and
+/// not the namespace.
+///
+/// `detc var` prints what the machine believes, with every document already
+/// merged into it and the ones that lost a key nowhere in the answer.  This is
+/// the other question -- who declared what -- and it is the reason a document
+/// is an object of its own rather than something only `detc var` knows about.
+#[test]
+fn test_cat_shows_a_variable_document_as_it_was_written() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    let source = root.join("usr/share/detc/variables/system.d/10-ssh.yaml");
+    let expected = fs::read_to_string(&source)?;
+
+    // The extension is not part of the name, and naming it anyway addresses
+    // the same document
+    for name in ["system/10-ssh", "system/10-ssh.yaml"] {
+        let output = detc(root, &["cat", "--type", "variable", name]);
+        assert!(output.status.success(), "{name}: {}", stderr(&output));
+        assert_eq!(stdout(&output), expected, "{name}");
+    }
+
+    // And without a type, because no other kind of object answers to that name
+    let output = detc(root, &["cat", "system/10-ssh"]);
+    assert_eq!(stdout(&output), expected, "{output:?}");
+
+    // Nothing expands a document: it is what the namespace is made of, so
+    // `--raw` has nothing left to take away
+    let output = detc(
+        root,
+        &["cat", "--raw", "--type", "variable", "system/10-ssh"],
+    );
+    assert_eq!(stdout(&output), expected, "{output:?}");
+
+    // A document that the admin wrote is in the other group, and the two are
+    // told apart by it
+    let user = root.join("etc/detc/variables/user.d");
+    fs::create_dir_all(&user)?;
+    fs::write(user.join("90-ntp.yaml"), "ntp:\n  server: pool.ntp.org\n")?;
+
+    let output = detc(root, &["cat", "user/90-ntp"]);
+    assert_eq!(stdout(&output), "ntp:\n  server: pool.ntp.org\n");
+
+    let output = detc(root, &["cat", "--type", "variable", "nope"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("There is no variable document nope"),
+        "{output:?}"
+    );
+
+    Ok(())
+}
+
+/// A document that cannot be parsed is reported by `check`, and a variable
+/// document is not something that `apply` acts on.
+#[test]
+fn test_check_reads_the_variable_documents() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    let output = detc(root, &["check", "--type", "variable"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "ok\tsystem/10-ssh\n");
+
+    // A strategy that does not exist is as broken as a document that does not
+    // parse: both leave the namespace without what the document was to give it
+    let user = root.join("etc/detc/variables/user.d");
+    fs::create_dir_all(&user)?;
+    fs::write(user.join("50-merge.yaml"), "_merge: sideways\n")?;
+    fs::write(user.join("60-broken.yaml"), "ntp: [unclosed\n")?;
+
+    let output = detc(root, &["check", "--type", "variable"]);
+    assert!(!output.status.success());
+    let checked = stdout(&output);
+    assert!(checked.contains("error\tuser/50-merge\t"), "{checked}");
+    assert!(checked.contains("Unknown merge strategy"), "{checked}");
+    assert!(checked.contains("error\tuser/60-broken\t"), "{checked}");
+
+    // One document at a time, the same as for any other type
+    let output = detc(root, &["check", "--type", "variable", "system/10-ssh"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "ok\tsystem/10-ssh\n");
+
+    // And it is not a thing that is applied
+    let output = detc(root, &["apply", "--type", "variable"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("A variable is not applied"),
         "{output:?}"
     );
 
@@ -634,6 +746,16 @@ fn complete(root: &Path) -> TestResult {
     fs::create_dir_all(&dropin)?;
     fs::write(dropin.join("90-ntp.yaml"), "ntp:\n  server: pool.ntp.org\n")?;
     Ok(())
+}
+
+/// Everything that `detc list` has to say about a machine that was given
+/// nothing but [`complete`], which is the document the admin wrote and no
+/// object that anybody shipped.
+fn only_what_the_admin_wrote(root: &Path) -> String {
+    format!(
+        "variable\tuser/90-ntp\t{}\n",
+        root.join("etc/detc/variables/user.d/90-ntp.yaml").display()
+    )
 }
 
 #[test]
@@ -1520,7 +1642,10 @@ fn test_a_bundle_carries_a_system_to_a_machine_that_has_none() -> TestResult {
     let root = tmp_root.path();
     complete(root)?;
 
-    assert_eq!(stdout(&detc(root, &["list"])), "");
+    assert_eq!(
+        stdout(&detc(root, &["list"])),
+        only_what_the_admin_wrote(root)
+    );
     assert_eq!(stdout(&detc(root, &["bundle", "status"])), "");
 
     // Nothing signed it, so nothing says who wrote it, and it takes saying so
@@ -1601,7 +1726,10 @@ fn test_a_bundle_carries_a_system_to_a_machine_that_has_none() -> TestResult {
         stdout(&output)
     );
 
-    assert_eq!(stdout(&detc(root, &["list"])), "");
+    assert_eq!(
+        stdout(&detc(root, &["list"])),
+        only_what_the_admin_wrote(root)
+    );
     assert_eq!(stdout(&detc(root, &["bundle", "status"])), "");
     assert!(!root.join("run/detc").exists());
     assert!(!root.join("run/lib/detc").exists());
@@ -1641,7 +1769,10 @@ fn test_a_bundle_that_persists_comes_back_after_a_reboot() -> TestResult {
 
     // A reboot is the tmpfs going away, and nothing else
     fs::remove_dir_all(root.join("run"))?;
-    assert_eq!(stdout(&detc(root, &["list"])), "");
+    assert_eq!(
+        stdout(&detc(root, &["list"])),
+        only_what_the_admin_wrote(root)
+    );
 
     // Applying the system is what puts it back, so a machine that reboots
     // needs no unit of its own, and the run records that it happened

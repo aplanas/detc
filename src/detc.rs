@@ -40,6 +40,7 @@ pub(crate) enum Type {
     Template,
     Resource,
     Provider,
+    Variable,
 }
 
 impl fmt::Display for Type {
@@ -617,6 +618,16 @@ fn list(out: &mut dyn Sink, root: &Path, types: bool, kind: Option<Type>) -> Res
         }
     }
 
+    if asked(Type::Variable) {
+        for document in var::Documents::from_system(root)?.documents() {
+            out.emit(object(
+                Type::Variable,
+                document.id(),
+                document.source().display().to_string(),
+            ))?;
+        }
+    }
+
     Ok(())
 }
 
@@ -652,12 +663,14 @@ fn find_provider(root: &Path, kind: &str) -> Result<provider::Provider> {
 ///
 /// A template and a resource are documents that the namespace expands; a probe
 /// and a provider are programs, and what there is to show of one is the program
-/// itself.
+/// itself.  A variable document is what the namespace is made of, so nothing
+/// expands it: it is read as it was written.
 enum Object {
     Template(template::Template),
     Resource(resource::Resource),
     Probe(PathBuf),
     Provider(PathBuf),
+    Variable(var::Document),
 }
 
 /// Resolve the object that `name` addresses, of the type that was named or of
@@ -687,6 +700,10 @@ fn resolve_typed_object(root: &Path, name: &Path, kind: Type) -> Result<Object> 
         Type::Resource => resource::Resources::from_system(root)?
             .find(&name.to_string_lossy())
             .map(|resource| Object::Resource(resource.clone())),
+
+        Type::Variable => var::Documents::from_system(root)?
+            .find(&name.to_string_lossy())
+            .map(|document| Object::Variable(document.clone())),
     }
 }
 
@@ -717,8 +734,12 @@ fn guess_object(root: &Path, name: &Path) -> Result<Object> {
         return Ok(Object::Provider(path));
     }
 
+    if let Some(document) = var::Documents::from_system(root)?.get(&id) {
+        return Ok(Object::Variable(document.clone()));
+    }
+
     err!(
-        "There is no template, resource, probe or provider for {id}; `detc list` shows the objects of the system, and --type says which of them to look in"
+        "There is no template, resource, probe, provider or variable document for {id}; `detc list` shows the objects of the system, and --type says which of them to look in"
     )
 }
 
@@ -727,8 +748,8 @@ fn guess_object(root: &Path, name: &Path) -> Result<Object> {
 /// provider is.
 ///
 /// `--raw` shows a template or a declaration as it was written, before the
-/// variables of the namespace reach it.  A program is never expanded, so it is
-/// always shown as it is.
+/// variables of the namespace reach it.  A program and a variable document are
+/// never expanded, so they are always shown as they are.
 fn cat(
     out: &mut dyn Sink,
     root: &Path,
@@ -744,6 +765,7 @@ fn cat(
         Object::Resource(resource) => resource.render(args.variables(root)?.value())?,
         Object::Probe(path) => program(&path, "probe")?,
         Object::Provider(path) => program(&path, "provider")?,
+        Object::Variable(document) => document.content()?,
     };
 
     out.emit(Record::Text(text))
@@ -795,6 +817,30 @@ fn check_probes(out: &mut dyn Sink, root: &Path, probe: Option<&Path>) -> Result
             var::Variables::from_probe(&path, root).map(|_| ()),
             path.display(),
         )? {
+            failed += 1;
+        }
+    }
+
+    Ok(failed)
+}
+
+/// Parse the documents that the namespace is built from, and report the ones
+/// that cannot take part in it.  Returns the number of broken documents.
+///
+/// A document that does not parse is a warning nowhere else: the namespace is
+/// collected before almost everything, and a run that stopped there would say
+/// that a template is broken when what is broken is a comma in a YAML file.
+fn check_variables(out: &mut dyn Sink, root: &Path, id: Option<&Path>) -> Result<usize> {
+    let documents = var::Documents::from_system(root)?;
+
+    let selected = match id {
+        Some(id) => vec![documents.find(&id.to_string_lossy())?],
+        None => documents.documents().iter().collect(),
+    };
+
+    let mut failed = 0;
+    for document in selected {
+        if checked(out, document.check(), document.id())? {
             failed += 1;
         }
     }
@@ -1020,6 +1066,10 @@ fn check(
         failed += check_providers(out, root)?;
     }
 
+    if asked(Type::Variable) {
+        failed += check_variables(out, root, file)?;
+    }
+
     if failed > 0 {
         return err!("{failed} object(s) cannot be instantiated");
     }
@@ -1214,7 +1264,7 @@ fn apply_system(
         (kind, _) => kind,
     };
 
-    if let Some(kind @ (Type::Probe | Type::Provider)) = kind {
+    if let Some(kind @ (Type::Probe | Type::Provider | Type::Variable)) = kind {
         return err!(
             "A {kind} is not applied, it is what the objects that are applied are made of"
         );

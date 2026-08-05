@@ -18,7 +18,7 @@ interface org.detc.Manager
 # that names anything else is refused, and a type added to the system is added
 # here.  It is not the type of a resource, which is whatever a provider chooses
 # to implement and travels as a plain string.
-type ObjectType (probe, template, resource, provider)
+type ObjectType (probe, template, resource, provider, variable)
 
 # An object of the system: what it is, the name that addresses it, and the file
 # it was read from.

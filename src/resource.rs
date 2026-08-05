@@ -43,6 +43,7 @@ use std::str::FromStr;
 
 use serde_json::{Map, Value};
 
+use crate::var::strip_extension;
 use crate::{Result, cfs, provider, template, var};
 
 /// Name of the resources tree, searched in the default prefixes.
@@ -64,10 +65,6 @@ pub const ORDER_KEY: &str = "_order";
 /// resource, so a declaration writes a file one way whether it depends on the
 /// content or on the success.
 pub const REQUIRES_KEY: &str = "_requires";
-
-/// Extensions that are stripped from the name of a resource, so that a
-/// declaration can be called `nginx.yaml` and still be addressed as `nginx`.
-const NAME_EXTENSIONS: &[&str] = &["yaml", "yml", "json", "toml"];
 
 /// A declaration, taken apart: what the provider is asked for, and the two
 /// reserved keys that are the run's business rather than the provider's.
@@ -311,15 +308,6 @@ fn split_id(key: &Path) -> Option<(String, String)> {
     }
 
     Some((kind, strip_extension(&name.to_string_lossy())))
-}
-
-/// Remove the extension of a document from a name, so that a declaration can be
-/// called `nginx.yaml` and still be addressed as `nginx`.
-fn strip_extension(name: &str) -> String {
-    match name.rsplit_once('.') {
-        Some((stem, extension)) if NAME_EXTENSIONS.contains(&extension) => stem.to_string(),
-        _ => name.to_string(),
-    }
 }
 
 #[cfg(test)]
