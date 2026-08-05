@@ -204,10 +204,15 @@ Four things follow, and each of them has bitten:
 
 ### Leaving the property out when there is no digest
 
-`detc check` and `detc apply -t resource` render no template, so they publish an **empty**
-`detc.files` (`unplanned()`, `src/apply.rs`).  The map is published rather than omitted
-precisely so that `| default('')` keeps working and a declaration written the way above passes
-a check as well as a run.
+`detc check`, `detc cat` and `detc apply -t resource` render no template, so they publish an
+**empty** `detc.files` (`unplanned()`, `src/apply.rs`).  The map is published rather than
+omitted precisely so that `| default('')` keeps working and a declaration written the way above
+passes a check as well as a run.
+
+A *template* reads an empty one in every command, including a full run: the map is built out of
+the rendered templates, so at the point a template renders there is nothing in it yet.  The map
+is the run's own, and empty everywhere it is not yet known — which is also why a document that
+writes `detc.files` reaches no rendering through it.
 
 But `config: ""` in a run that knows nothing about the file is a claim, and the `unit` provider
 would record it — making the next full run restart the service for a change that never

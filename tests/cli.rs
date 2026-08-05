@@ -532,6 +532,57 @@ fn test_the_core_document_leaves_an_empty_parent() -> TestResult {
     Ok(())
 }
 
+/// `detc.files` is what a run is about to write, and it belongs to the run.  A
+/// document can put something under that name, because the namespace reserves
+/// nothing -- but nothing renders through what it wrote.  A template is
+/// rendered before the map exists, as the map is built out of the templates,
+/// and a command that makes no plan has no digest to show.  Both read it empty,
+/// which is the answer `check` and `apply --type resource` already give.
+#[test]
+fn test_the_map_of_files_belongs_to_the_run() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    noop(root, "ok")?;
+
+    // A document that leaves something of its own under the name of the run
+    let documents = root.join("usr/share/detc/variables/system.d");
+    fs::create_dir_all(&documents)?;
+    fs::write(
+        documents.join("10-inject.yaml"),
+        "detc:\n  files:\n    etc/passwd: deadbeef\n",
+    )?;
+
+    // A template and a declaration that read the map
+    let templates = root.join("usr/share/detc/templates.d/etc");
+    fs::create_dir_all(&templates)?;
+    let reads_the_map = "files={{ detc.files | list | join(',') }}";
+    fs::write(templates.join("probe.conf"), format!("{reads_the_map}\n"))?;
+    fs::write(
+        root.join("usr/share/detc/resources.d/noop/ping"),
+        format!("message: \"{reads_the_map}\"\n"),
+    )?;
+
+    // The namespace holds what the document wrote, the way it holds any key
+    assert_eq!(
+        stdout(&detc(root, &["var", "-k", "detc.files"])),
+        "etc/passwd: deadbeef\n"
+    );
+
+    // And no rendering reads it there
+    assert_eq!(stdout(&detc(root, &["cat", "/etc/probe.conf"])), "files=\n");
+    assert_eq!(
+        stdout(&detc(root, &["cat", "--type", "resource", "noop/ping"])),
+        "message: \"files=\"\n"
+    );
+
+    // Including the rendering that a run writes into the system
+    let output = detc(root, &["apply"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(fs::read_to_string(root.join("etc/probe.conf"))?, "files=\n");
+
+    Ok(())
+}
+
 #[test]
 fn test_schema_shows_the_provider_contract() -> TestResult {
     let tmp_root = tempfile::tempdir()?;

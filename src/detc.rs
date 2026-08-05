@@ -811,15 +811,28 @@ fn cat(
 ) -> Result<()> {
     let text = match resolve_object(root, name, kind)? {
         Object::Template(template) if raw => template.content()?,
-        Object::Template(template) => template.render(args.variables(root)?.value())?,
+        Object::Template(template) => template.render(preview(root, args)?.value())?,
         Object::Resource(resource) if raw => resource.content()?,
-        Object::Resource(resource) => resource.render(args.variables(root)?.value())?,
+        Object::Resource(resource) => resource.render(preview(root, args)?.value())?,
         Object::Probe(path) => program(&path, "probe")?,
         Object::Provider(path) => program(&path, "provider")?,
         Object::Variable(document) => document.content()?,
     };
 
     out.emit(Record::Text(text))
+}
+
+/// The namespace that a preview renders against: the one the system has, with
+/// an empty map of configuration files, exactly as `check` sees it.
+///
+/// `cat` makes no plan, so it has no digest to publish, and a declaration that
+/// the run would never send is worse than one that reads its digests as empty
+/// -- which is the rendering `detc check --type resource` already answers for.
+/// Only the two objects that are instantiated ask for this: building the
+/// namespace runs every probe the system has, and showing a provider should not
+/// cost that.
+fn preview(root: &Path, args: &VarArgs) -> Result<var::Variables> {
+    apply::unplanned(&args.variables(root)?)
 }
 
 /// Read the program that a probe or a provider is.

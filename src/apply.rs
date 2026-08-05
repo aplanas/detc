@@ -601,6 +601,14 @@ impl Plan {
         let mut changes = Vec::new();
 
         if let Some(templates) = templates {
+            // A template cannot read what the run is about to write: the map is
+            // built out of the rendered templates themselves, so at this point
+            // there is nothing in it to read.  It renders against an empty one
+            // all the same -- empty and not absent, so that `detc.files` means
+            // the same thing wherever it is read, and so that a document cannot
+            // leave something of its own under a name the run owns
+            let var = unplanned(var)?;
+
             for template in templates {
                 let name = template.target().to_string_lossy().into_owned();
                 let id = template_id(root, template.target());
