@@ -12,11 +12,12 @@
 # A null is not stored as a null.  Documents are combined with RFC 7396 merge
 # patch, where a null *takes the key away*, which is how a drop-in unsets what
 # the one before it left.  So the nulls below are the documentation of what
-# there is to set and nothing else -- `detc var` on a node where nobody has set
-# anything shows `ssh: {}`.  What they do carry is the empty parent: templates
-# are rendered with undefined treated as an error, and `ssh.permit_root_login`
-# only answers "not set" rather than failing because `ssh` itself is here.
-# That is also why the templates test `is defined` and never `is not none`.
+# there is to set and nothing else -- on a node where nobody has set anything,
+# `detc var -k ssh` answers `{}` and not the five keys written below.  What
+# they do carry is the empty parent: templates are rendered with undefined
+# treated as an error, and `ssh.permit_root_login` only answers "not set"
+# rather than failing because `ssh` itself is here.  That is also why the
+# templates test `is defined` and never `is not none`.
 #
 # Some of the core templates are only in `examples/` and are not installed --
 # the ones for files that have no drop-in directory, where an empty rendering

@@ -91,8 +91,8 @@ ssh:
   password_authentication: null
 ```
 
-The nulls vanish and the parent remains, so `detc var` on a node where nobody has set anything
-prints `ssh: {}`, and a leaf under it answers "not set" instead of failing.  It costs nothing
+The nulls vanish and the parent remains, so `detc var -k ssh` on a node where nobody has set
+anything answers `{}`, and a leaf under it answers "not set" instead of failing.  It costs nothing
 and it is what lets a template guard a leaf with one `is defined` rather than defaulting its way
 down the chain.
 

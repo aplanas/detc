@@ -499,6 +499,39 @@ fn test_a_document_of_variables_is_merged_and_kept() -> TestResult {
     Ok(())
 }
 
+/// The core document says of itself that its nulls are taken away and the
+/// empty parent is what stays behind, and that is a claim about the shipped
+/// file rather than about a fixture.  It is here as a test because the
+/// sentence saying it went stale once: it named `ssh` when `ssh` was the only
+/// key in the document, and nobody adding the next one read it again.
+#[test]
+fn test_the_core_document_leaves_an_empty_parent() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    ship(root, "variables/system.d/10-core.yaml")?;
+
+    // A parent whose every leaf is null, and one written empty to begin with:
+    // both answer, which is the whole point of writing them down
+    let output = detc(root, &["var", "-k", "ssh"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "{}\n");
+
+    assert_eq!(stdout(&detc(root, &["var", "-k", "sysctl"])), "{}\n");
+
+    // The leaf itself is gone and not merely null -- the merge patch took the
+    // key away.  That is the half that makes the parent worth writing: a
+    // template asking for this reaches an undefined name under a defined one,
+    // which is what `is defined` is guarding
+    let output = detc(root, &["var", "-k", "ssh.permit_root_login"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        stderr(&output).contains("not present in the system"),
+        "{output:?}"
+    );
+
+    Ok(())
+}
+
 #[test]
 fn test_schema_shows_the_provider_contract() -> TestResult {
     let tmp_root = tempfile::tempdir()?;
