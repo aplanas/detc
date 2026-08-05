@@ -147,10 +147,19 @@ struct ListParams {
     r#type: Option<Type>,
 }
 
-/// `Doc` and `Schema`, which describe a type of resource.
+/// `Schema`.
 #[derive(Debug, Default, Serialize, Deserialize)]
-struct KindParams {
-    r#type: String,
+struct SchemaParams {
+    name: String,
+}
+
+/// `Doc`.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct DocParams {
+    name: String,
+
+    #[serde(default)]
+    r#type: Option<Type>,
 }
 
 /// `Cat`.
@@ -413,17 +422,18 @@ pub(crate) fn call(command: &Commands, dry_run: bool) -> Result<(&'static Method
             })?,
         ),
 
-        Commands::Doc { r#type } => (
+        Commands::Doc { object, r#type } => (
             "Doc",
-            varlink::parameters(&KindParams {
-                r#type: r#type.clone(),
+            varlink::parameters(&DocParams {
+                name: name(object),
+                r#type: *r#type,
             })?,
         ),
 
-        Commands::Schema { r#type } => (
+        Commands::Schema { provider } => (
             "Schema",
-            varlink::parameters(&KindParams {
-                r#type: r#type.clone(),
+            varlink::parameters(&SchemaParams {
+                name: name(provider),
             })?,
         ),
 
@@ -565,10 +575,11 @@ pub(crate) fn command(method: &Method, parameters: Option<Value>) -> Result<(Com
         }
 
         "Doc" => {
-            let params: KindParams = varlink::take(parameters)?;
+            let params: DocParams = varlink::take(parameters)?;
 
             (
                 Commands::Doc {
+                    object: PathBuf::from(params.name),
                     r#type: params.r#type,
                 },
                 false,
@@ -576,11 +587,11 @@ pub(crate) fn command(method: &Method, parameters: Option<Value>) -> Result<(Com
         }
 
         "Schema" => {
-            let params: KindParams = varlink::take(parameters)?;
+            let params: SchemaParams = varlink::take(parameters)?;
 
             (
                 Commands::Schema {
-                    r#type: params.r#type,
+                    provider: PathBuf::from(params.name),
                 },
                 false,
             )
@@ -851,7 +862,8 @@ mod tests {
             "List" => varlink::parameters(&ListParams::default()),
             "Cat" => varlink::parameters(&CatParams::default()),
             "Check" => varlink::parameters(&CheckParams::default()),
-            "Doc" | "Schema" => varlink::parameters(&KindParams::default()),
+            "Doc" => varlink::parameters(&DocParams::default()),
+            "Schema" => varlink::parameters(&SchemaParams::default()),
             "GetVariables" => varlink::parameters(&KeyParams::default()),
             "RunProbe" => varlink::parameters(&ProbeParams::default()),
             "ListRuns" => varlink::parameters(&RunsParams::default()),
@@ -989,13 +1001,14 @@ mod tests {
             ),
             (
                 Commands::Doc {
-                    r#type: "unit".to_string(),
+                    object: PathBuf::from("nginx.conf"),
+                    r#type: None,
                 },
                 "Doc",
             ),
             (
                 Commands::Schema {
-                    r#type: "unit".to_string(),
+                    provider: PathBuf::from("unit"),
                 },
                 "Schema",
             ),

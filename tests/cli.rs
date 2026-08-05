@@ -14,7 +14,7 @@ use std::process::Command;
 
 mod common;
 
-use common::{TestResult, bundle, detc, fixture, noop, program, source_tree, stderr, stdout};
+use common::{TestResult, bundle, detc, fixture, noop, program, ship, source_tree, stderr, stdout};
 
 #[test]
 fn test_list_shows_every_object() -> TestResult {
@@ -500,41 +500,108 @@ fn test_a_document_of_variables_is_merged_and_kept() -> TestResult {
 }
 
 #[test]
-fn test_schema_and_doc_show_the_provider_contract() -> TestResult {
+fn test_schema_shows_the_provider_contract() -> TestResult {
     let tmp_root = tempfile::tempdir()?;
     let root = tmp_root.path();
     fixture(root)?;
 
     // The schema is whatever the provider writes, untouched, so that it can be
     // fed to something else
-    let output = detc(root, &["schema", "--type", "unit"]);
+    let output = detc(root, &["schema", "unit"]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(
         stdout(&output).contains("enabled: {type: boolean"),
         "{output:?}"
     );
 
-    // The documentation is the same thing, for a person
-    let output = detc(root, &["doc", "--type", "unit"]);
-    assert!(output.status.success(), "{}", stderr(&output));
-    let doc = stdout(&output);
-    assert!(doc.starts_with("Manage a unit\n"), "{doc}");
-    assert!(doc.contains("order: 90"), "{doc}");
-    assert!(doc.contains("enabled (boolean, required)"), "{doc}");
+    // A provider is addressed by the type it implements or by the path of the
+    // program, which is how one is read before the system has installed it
+    let path = root.join("usr/libexec/detc/providers.d/unit");
+    let same = detc(root, &["schema", &path.to_string_lossy()]);
+    assert_eq!(stdout(&same), stdout(&output));
 
-    // A type of object is not a type of resource, and the two are easy to
-    // confuse because `--type` means the object everywhere else
-    let output = detc(root, &["doc", "--type", "template"]);
-    assert!(!output.status.success());
+    let elsewhere = root.join("unit");
+    fs::copy(&path, &elsewhere)?;
+    fs::set_permissions(&elsewhere, fs::Permissions::from_mode(0o755))?;
+    let output = detc(root, &["schema", &elsewhere.to_string_lossy()]);
+    assert!(output.status.success(), "{}", stderr(&output));
     assert!(
-        stderr(&output).contains("is a type of object, not a type of resource"),
+        stdout(&output).contains("enabled: {type: boolean"),
         "{output:?}"
     );
 
-    let output = detc(root, &["schema", "--type", "nope"]);
+    let output = detc(root, &["schema", "nope"]);
     assert!(!output.status.success());
     assert!(
-        stderr(&output).contains("There is no provider for nope"),
+        stderr(&output).contains("There is no provider nope"),
+        "{output:?}"
+    );
+
+    Ok(())
+}
+
+/// `doc` reads what somebody wrote at the head of the file, so every object of
+/// the system answers it the same way and the files it is asserted against are
+/// the ones the repository ships.
+#[test]
+fn test_doc_is_what_an_object_says_about_itself() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    ship(root, "probes/system.d/host/10-host")?;
+    ship(root, "templates/etc/modules-load.d/60-detc.conf")?;
+    ship(root, "variables/system.d/10-core.yaml")?;
+    noop(root, "hello")?;
+    ship(root, "resources/noop/ping")?;
+
+    // A probe, addressed the way `list` reports it, and the shebang is not part
+    // of what the program says about itself
+    let output = detc(root, &["doc", "--type", "probe", "host/10-host"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).starts_with("What the tree calls itself, and what it runs on.\n"),
+        "{output:?}"
+    );
+
+    // A template, by the file it writes
+    let output = detc(root, &["doc", "/etc/modules-load.d/60-detc.conf"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).starts_with("Written by detc.  Do not edit"),
+        "{output:?}"
+    );
+
+    // A variable document, by the group and the name it is merged under
+    let output = detc(root, &["doc", "system/10-core"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).starts_with("Every knob the core templates read, and nothing else.\n"),
+        "{output:?}"
+    );
+
+    let output = detc(root, &["doc", "noop/ping"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).starts_with("Is this installation working?\n"),
+        "{output:?}"
+    );
+
+    // A provider is the one object whose documentation is not all prose: what
+    // it publishes is appended to what it says
+    let output = detc(root, &["doc", "--type", "provider", "noop"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let doc = stdout(&output);
+    assert!(doc.starts_with("A resource that does nothing"), "{doc}");
+    assert!(doc.contains("\n## Schema\n"), "{doc}");
+    assert!(doc.contains("description:"), "{doc}");
+
+    // The provider of the fixture is a program that says nothing but how it is
+    // run, and there is nothing to show for it
+    let output = detc(root, &["doc", "--type", "provider", "unit"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("says nothing about itself"),
         "{output:?}"
     );
 
@@ -671,11 +738,12 @@ fn test_the_noop_provider_says_that_an_installation_works() -> TestResult {
 
     // And it says what it is and what may be written against it, which is the
     // whole of the contract that an administrator has to read
-    let output = detc(root, &["doc", "--type", "noop"]);
+    let output = detc(root, &["doc", "--type", "provider", "noop"]);
     assert!(output.status.success(), "{}", stderr(&output));
     let doc = stdout(&output);
+    assert!(doc.starts_with("A resource that does nothing"), "{doc}");
     assert!(doc.contains("order: 0"), "{doc}");
-    assert!(doc.contains("message (string, default \"ok\")"), "{doc}");
+    assert!(doc.contains("message:"), "{doc}");
 
     // The declaration is expanded through the namespace, the same as any other
     let output = detc(root, &["cat", "--type", "resource", "noop/ping"]);

@@ -19,7 +19,9 @@ use log::{LevelFilter, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use detc::{Result, apply, bundle, err, journal, last, lock, provider, resource, template, var};
+use detc::{
+    Result, apply, bundle, doc, err, journal, last, lock, provider, resource, template, var,
+};
 
 use crate::record::{Commit, Record, Sink, TextSink};
 
@@ -164,11 +166,16 @@ pub(crate) enum Commands {
         r#type: Option<Type>,
     },
 
-    /// Describe a type of resource, from the schema of its provider
+    /// Describe an object, from the comments at the head of its file
     Doc {
-        /// Type of resource (list --type provider for the ones available)
-        #[arg(short, long)]
-        r#type: String,
+        /// Object to describe: the file a template instantiates, the
+        /// <type>/<name> of a resource or of a variable document, or the name
+        /// or the path of a probe or a provider
+        object: PathBuf,
+
+        /// Type of the object, guessed from the name by default
+        #[arg(short, long, value_enum)]
+        r#type: Option<Type>,
     },
 
     /// Show what a template, a resource, a probe or a provider holds
@@ -203,11 +210,10 @@ pub(crate) enum Commands {
         var: VarArgs,
     },
 
-    /// Show the schema of a type of resource, as its provider writes it
+    /// Ask a provider for the schema of what it accepts
     Schema {
-        /// Type of resource (list --type provider for the ones available)
-        #[arg(short, long)]
-        r#type: String,
+        /// Provider to ask: the type it implements, or the path of the program
+        provider: PathBuf,
     },
 
     /// Query or set global variables
@@ -631,32 +637,65 @@ fn list(out: &mut dyn Sink, root: &Path, types: bool, kind: Option<Type>) -> Res
     Ok(())
 }
 
-/// Show the schema of a type of resource, as its provider writes it.
+/// Ask a provider for the schema of what it accepts, and show it as it wrote
+/// it.
 ///
-/// The type here is the type of a resource, and not a [`Type`]: only a provider
-/// declares what it accepts, so a template or a probe has nothing to show.
-fn schema(out: &mut dyn Sink, root: &Path, kind: &str) -> Result<()> {
-    out.emit(Record::Text(find_provider(root, kind)?.raw_schema()?))
+/// The provider is addressed the way `cat --type provider` addresses it, by the
+/// type it implements or by the path of the program, so a provider is read
+/// before it is shipped the same as a probe is.  What comes back is the
+/// document untouched, for a script; `detc doc` is the same thing under the
+/// prose the provider carries, for a person.
+fn schema(out: &mut dyn Sink, root: &Path, name: &Path) -> Result<()> {
+    let path = resolve_provider(name, root)?;
+    out.emit(Record::Text(provider::raw_schema(path, root)?))
 }
 
-/// Describe a type of resource for a person, from the schema of its provider.
-fn doc(out: &mut dyn Sink, root: &Path, kind: &str) -> Result<()> {
-    out.emit(Record::Text(find_provider(root, kind)?.schema()?.to_doc()))
-}
-
-/// Resolve the provider that implements a type of resource.
+/// Describe an object for a person, from what is written at the head of the
+/// file it was read from.
 ///
-/// The types of object are rejected with a message of their own, as `--type
-/// template` is an easy thing to write when `--type` means something else in
-/// every other subcommand.
-fn find_provider(root: &Path, kind: &str) -> Result<provider::Provider> {
-    if Type::from_str(kind, false).is_ok() {
-        return err!(
-            "{kind} is a type of object, not a type of resource - pass the type that a provider implements, as shown by `detc list --type provider`"
-        );
+/// The documentation of an object lives in the object, and not in a manual
+/// that `detc` carries: whoever changes a probe is the one holding the comment
+/// that says what it reports, and a bundle that arrives from somewhere else
+/// brings the documentation of everything it carries with it.  What counts as
+/// the head of a file is [`doc::header`].
+fn doc(out: &mut dyn Sink, root: &Path, name: &Path, kind: Option<Type>) -> Result<()> {
+    let object = resolve_object(root, name, kind)?;
+    let mut text = doc::header(source(&object))?;
+
+    // A provider is the one object whose documentation is not all prose.  What
+    // a resource of its type may declare is the schema, the provider is what
+    // publishes it, and a person reading about the type wants the two together
+    // -- `detc schema` is the same thing on its own, for a script
+    if let Object::Provider(path) = &object {
+        text.push_str("\n## Schema\n\n");
+        text.push_str(&published_schema(path, root));
     }
 
-    Ok(provider::Providers::from_system(root)?.find(kind)?.clone())
+    out.emit(Record::Text(text))
+}
+
+/// The schema that a provider publishes, or the reason it did not.
+///
+/// A provider that cannot answer is still a provider with something written at
+/// the head of it, and that is what was asked for.  Refusing to show any of it
+/// would keep the documentation from whoever is reading it precisely because
+/// the provider is broken; `detc check --type provider` is where a broken one
+/// is reported as a failure.
+fn published_schema(path: &Path, root: &Path) -> String {
+    match provider::raw_schema(path, root) {
+        Ok(schema) => schema,
+        Err(e) => format!("The provider does not say: {e}\n"),
+    }
+}
+
+/// The file that an object was read from, which is where its documentation is.
+fn source(object: &Object) -> &Path {
+    match object {
+        Object::Template(template) => template.source(),
+        Object::Resource(resource) => resource.source(),
+        Object::Probe(path) | Object::Provider(path) => path,
+        Object::Variable(document) => document.source(),
+    }
 }
 
 /// One object of the system, resolved from the name that addressed it.
@@ -1644,8 +1683,8 @@ pub(crate) fn dispatch(
             dry_run,
         ),
 
-        Commands::Doc { r#type } => doc(out, root, r#type),
-        Commands::Schema { r#type } => schema(out, root, r#type),
+        Commands::Doc { object, r#type } => doc(out, root, object, *r#type),
+        Commands::Schema { provider } => schema(out, root, provider),
         Commands::Apply { file, r#type, var } => {
             apply_system(out, root, file.as_deref(), *r#type, dry_run, var)
         }

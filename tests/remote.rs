@@ -76,6 +76,10 @@ fn test_a_remote_run_says_what_a_local_one_says() -> TestResult {
     let root = tmp_root.path();
     fixture(root)?;
 
+    // A provider with something written at the head of it, so that `doc` and
+    // `schema` have an answer to agree on and not an error
+    noop(root, "ok")?;
+
     // None of these change the system, so the two runs of each see the same
     // one and have to agree down to the byte
     let commands: &[&[&str]] = &[
@@ -86,8 +90,8 @@ fn test_a_remote_run_says_what_a_local_one_says() -> TestResult {
         &["cat", "--raw", "/etc/ssh/sshd_config.d/root.conf"],
         &["check"],
         &["check", "--type", "provider"],
-        &["doc", "--type", "unit"],
-        &["schema", "--type", "unit"],
+        &["doc", "--type", "provider", "noop"],
+        &["schema", "noop"],
         &["var"],
         &["var", "-k", "system.network.ip"],
         &[

@@ -25,6 +25,7 @@ macro_rules! err {
 pub mod apply;
 pub mod bundle;
 pub mod cfs;
+pub mod doc;
 pub mod exec;
 #[cfg(feature = "journal")]
 pub mod journal;

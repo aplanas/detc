@@ -767,27 +767,66 @@ counted: the object it waited on already is.
 A run that changes something is recorded in the history, see `detc report`.  A
 dry run is not: it changed nothing.
 
-### `detc schema --type <type>` and `detc doc --type <type>`
+### `detc doc`
 
-Show what a resource of that type may declare, as the provider writes it, or as
-prose:
+Show what an object says about itself.  The documentation is the block of
+comments at the head of its file, with the comment sign taken off; it ends at
+the first line that is neither a comment nor blank, and a shebang is not part of
+it.
 
 ```console
-$ detc doc --type pkg
-A package of the distribution
+$ detc doc --type provider pkg
+Packages, through whichever package manager the system has.
 
+The name of the resource is the name of the package, spelled the way the
+distribution spells it: `pkg/openssh-server` on Debian is `pkg/openssh` on
+openSUSE, and a fleet that spans both either declares the two and lets a
+prefix mask the one that does not apply, or reads `system.pkg.manager` and
+…
+
+## Schema
+
+description: A package of the distribution
 order: 10
-
 properties:
-  installed (boolean, default true)
-    Whether the package has to be in the system
-  version (string)
-    The exact version to hold, for a package that is pinned.  …
+  installed:
+    type: boolean
+    description: Whether the package has to be in the system
+    default: true
+  …
 ```
 
-Which is the answer of whichever provider of that type the system found, so it
-is also how to read [the core set](#the-core-set) on the node itself rather than
-here.
+The object is addressed the way [`detc cat`](#detc-cat) addresses it, so a
+template, a resource, a probe, a provider and a variable document all answer.
+Nothing is written down in a catalogue that `detc` keeps: whoever changes a file
+changes what it says, and a bundle brings the documentation of what it carries
+along with it.  That is also how to read [the core set](#the-core-set) on the
+node itself rather than here.
+
+A provider is the one object whose documentation is not all prose.  What a
+resource of that type may declare is the schema, and the provider is what
+publishes it, so the two are shown together.
+
+### `detc schema <provider>`
+
+The same schema on its own, as the provider writes it, for a script rather than
+a person:
+
+```console
+$ detc schema pkg
+description: A package of the distribution
+order: 10
+properties:
+  installed:
+    type: boolean
+    description: Whether the package has to be in the system
+    default: true
+  …
+```
+
+The provider is named by the type of resource it implements, or by the path of
+the program — which is how one is read before the system has installed it, the
+same as for a probe.
 
 ### `detc var`
 

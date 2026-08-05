@@ -359,40 +359,6 @@ impl Schema {
             })
             .collect()
     }
-
-    /// Describe the schema for a person, as `detc doc` shows it.
-    pub fn to_doc(&self) -> String {
-        let mut doc = String::new();
-
-        if let Some(description) = self.description() {
-            doc.push_str(description);
-            doc.push_str("\n\n");
-        }
-        doc.push_str(&format!("order: {}\n", self.order()));
-
-        if self.properties.is_empty() {
-            doc.push_str("\nThis type has no properties.\n");
-            return doc;
-        }
-
-        doc.push_str("\nproperties:\n");
-        for (name, property) in &self.properties {
-            doc.push_str(&format!("  {name} ({}", property.kind()));
-            if property.required() {
-                doc.push_str(", required");
-            }
-            if let Some(default) = property.default() {
-                doc.push_str(&format!(", default {default}"));
-            }
-            doc.push_str(")\n");
-
-            if let Some(description) = property.description() {
-                doc.push_str(&format!("    {description}\n"));
-            }
-        }
-
-        doc
-    }
 }
 
 /// A program that implements one type of resource.
@@ -401,6 +367,17 @@ pub struct Provider {
     kind: String,
     path: PathBuf,
     root: PathBuf,
+}
+
+/// Ask the program at `path` for its schema, whether or not the system has it
+/// installed as a provider.
+///
+/// A provider that is only a file of the machine has no type yet — the type is
+/// the name it is installed under — so it cannot be a [`Provider`], and asking
+/// it what it accepts is still a fair question.  That is how one is read before
+/// it is shipped, the same as for a probe.
+pub fn raw_schema(path: impl AsRef<Path>, root: impl AsRef<Path>) -> Result<String> {
+    exec::run(path, root, &[SCHEMA_VERB], None)
 }
 
 impl Provider {
@@ -836,41 +813,6 @@ properties:
                 .to_string()
                 .contains("Provider broken failed to schema"),
             "{error}"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_the_documentation_lists_the_properties() -> TestResult {
-        let schema = Schema::parse(
-            r#"
-description: Manage a unit
-order: 90
-properties:
-  enabled:
-    type: boolean
-    description: Whether the unit starts at boot
-    required: true
-  state:
-    type: string
-    default: started
-"#,
-        )?;
-
-        let doc = schema.to_doc();
-        assert!(doc.starts_with("Manage a unit\n"), "{doc}");
-        assert!(doc.contains("order: 90"), "{doc}");
-        assert!(doc.contains("enabled (boolean, required)"), "{doc}");
-        assert!(doc.contains("Whether the unit starts at boot"), "{doc}");
-        assert!(
-            doc.contains(r#"state (string, default "started")"#),
-            "{doc}"
-        );
-
-        assert!(
-            Schema::parse("{}")?.to_doc().contains("no properties"),
-            "a type without properties says so"
         );
 
         Ok(())

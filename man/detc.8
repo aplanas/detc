@@ -213,15 +213,49 @@ reading.
 The status is non\-zero if anything failed, which is what makes this the
 command to put in a pipeline.
 .
-.SS detc schema \-\-type TYPE
-.SS detc doc \-\-type TYPE
-Show what a type of resource accepts, as its own provider reports it \(em
-.B schema
-the document, and
-.B doc
-the same thing written out for a person.  Neither is written down anywhere in
+.SS detc doc OBJECT
+Show what
+.I OBJECT
+says about itself: the block of comments at the head of its file, with the
+comment sign taken off.  The block ends at the first line that is neither a
+comment nor blank, and a shebang is not part of it.
+.PP
+The documentation lives in the object and not in a catalogue that
+.B detc
+keeps, so whoever changes a probe or a template changes what it says, and a
+bundle brings the documentation of what it carries with it.
+.PP
+.I OBJECT
+is addressed the way
+.B detc cat
+addresses it.  For a provider the schema it publishes is appended to what its
+header says, under a
+.B ## Schema
+heading, because what a resource of that type may declare is part of
+describing it.
+.TP
+.BR \-t ", " \-\-type " " \fITYPE\fR
+Which type
+.I OBJECT
+names, guessed from the name when it is left out.
+.
+.SS detc schema PROVIDER
+Ask
+.I PROVIDER
+for the schema of what it accepts, and show the document as it wrote it.  It
+is not written down anywhere in
 .BR detc :
 the provider is asked.
+.PP
+.I PROVIDER
+is the type of resource it implements, as
+.B detc list \-\-type provider
+prints it, or the path of the program \(em which is how one is read before the
+system has installed it.
+.PP
+This is the schema on its own, for a script;
+.B detc doc
+is the same thing under the prose the provider carries, for a person.
 .
 .SS detc var [FILE]
 Query the namespace, or set part of it.
@@ -493,10 +527,12 @@ $ detc bundle create ./fleet \-o fleet.detc \-\-sign ~/.ssh/detc_ca
 $ detc bundle install fleet.detc \-\-persist \-\-apply
 .EE
 .PP
-Ask what a type of resource accepts, from the provider itself:
+Read what an object says about itself, and what a type of resource accepts:
 .PP
 .EX
-$ detc doc \-\-type user
+$ detc doc user/root
+$ detc doc \-\-type provider user
+$ detc schema user
 .EE
 .
 .SH SEE ALSO

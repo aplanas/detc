@@ -133,11 +133,15 @@ method Check(
   var: Var
 ) -> (check: ?Verdict)
 
-# A type of resource described for a person, from the schema of its provider.
-method Doc(type: string) -> (text: string)
+# An object described for a person, from the comments at the head of its file.
+# `name` and `type` address it the way `Cat` does.  For a provider the schema
+# it publishes is appended to what its header says.
+method Doc(name: string, type: ?ObjectType) -> (text: string)
 
-# The schema of a type of resource, as its provider writes it.
-method Schema(type: string) -> (text: string)
+# The schema that a provider publishes, as it writes it.  `name` is the type
+# the provider implements or the path of the program, the way `Cat` addresses
+# one.
+method Schema(name: string) -> (text: string)
 
 # The namespace as YAML: the given keys, or all of it when there are none.
 method GetVariables(key: []string) -> (text: string)
