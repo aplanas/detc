@@ -473,6 +473,55 @@ fn test_var_queries_and_persists() -> TestResult {
     Ok(())
 }
 
+/// An element of a list cannot be set on its own, and the command that
+/// persists refuses it like the ones that only render.
+///
+/// It is the persisting path that this is really about: it sets the value
+/// against an empty namespace so as not to run every probe to write a drop-in,
+/// so it never meets the list to complain about it.  What it wrote instead was
+/// an object nested under the number, which replaces the whole list with a map
+/// the next time the namespace is built -- and a template looping over it then
+/// walks the keys of that map.
+#[test]
+fn test_an_element_of_a_list_cannot_be_set() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+
+    let documents = root.join("usr/share/detc/variables/system.d");
+    fs::create_dir_all(&documents)?;
+    fs::write(
+        documents.join("10-dns.yaml"),
+        "dns:\n  nameservers: [1.1.1.1, 9.9.9.9]\n",
+    )?;
+
+    let output = detc(root, &["var", "-k", "dns.nameservers.0", "-v", "8.8.8.8"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        stderr(&output).contains("only a whole list can be set"),
+        "{output:?}"
+    );
+
+    // Nothing was persisted, and the list is still the one the document says
+    assert!(!root.join("etc/detc/variables/user.d").exists());
+    assert_eq!(
+        stdout(&detc(root, &["var", "-k", "dns.nameservers"])),
+        "- 1.1.1.1\n- 9.9.9.9\n"
+    );
+
+    // Setting the whole list is how it is done, and that still works
+    let output = detc(
+        root,
+        &["var", "-k", "dns.nameservers", "-v", r#"["8.8.8.8"]"#],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&detc(root, &["var", "-k", "dns.nameservers"])),
+        "- 8.8.8.8\n"
+    );
+
+    Ok(())
+}
+
 #[test]
 fn test_a_document_of_variables_is_merged_and_kept() -> TestResult {
     let tmp_root = tempfile::tempdir()?;

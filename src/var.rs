@@ -476,7 +476,10 @@ impl Variables {
     ///
     /// Unlike [`get_value`], a number is never an index: an element of a list
     /// cannot be set on its own, because the drop-in that persists it would
-    /// have to carry the rest of the list to say where the element sits.
+    /// have to carry the rest of the list to say where the element sits.  So a
+    /// number is refused wherever it appears in the key, and a map whose keys
+    /// are numbers is read by name but not written to a key at a time -- a
+    /// whole document says what it means, and `detc var <file>` merges one.
     ///
     /// [`get_value`]: Self::get_value
     pub fn set_value(&mut self, key: &str, value: &Value) -> Result<()> {
@@ -486,6 +489,23 @@ impl Variables {
         // be read back with the same syntax
         if components.iter().any(|component| component.is_empty()) {
             return err!("Cannot set {key} - the key has an empty component");
+        }
+
+        // A number is refused for what it says and not for what it happens to
+        // meet.  Reaching the list and complaining there only works when the
+        // namespace already holds one, and the one path that persists a value
+        // sets it against an empty namespace so as not to run every probe just
+        // to write a drop-in -- which left `dns.nameservers.0` creating an
+        // object under the number and the drop-in replacing the whole list with
+        // a map.  There is nothing to check against, and nothing worth
+        // checking: what a drop-in cannot say, it cannot say on any node
+        if let Some(index) = components
+            .iter()
+            .find(|component| component.parse::<usize>().is_ok())
+        {
+            return err!(
+                "Cannot set {key} - {index} addresses an element of a list, and only a whole list can be set.  Set the list, or merge a document with `detc var <file>`"
+            );
         }
 
         // Everything but the last component addresses the object that holds
@@ -940,6 +960,22 @@ mod tests {
             .set_value("dns.nameservers.0", &Value::from("8.8.8.8"))
             .expect_err("an element of a list cannot be set");
         assert!(err.to_string().contains("only a whole list can be set"));
+
+        // And refused for the number and not for the list it would have met.
+        // The path that persists a value sets it against an empty namespace, so
+        // one that only complained on reaching a list would accept this and
+        // write a drop-in that turns the list into a map
+        let err = Variables::new()
+            .set_value("dns.nameservers.0", &Value::from("8.8.8.8"))
+            .expect_err("an element of a list cannot be set");
+        assert!(err.to_string().contains("only a whole list can be set"));
+
+        // Wherever the number sits, and not only at the end
+        assert!(
+            Variables::new()
+                .set_value("system.net.interfaces.0.local", &Value::from("10.0.0.1"))
+                .is_err()
+        );
 
         // A number is an index only where there is a list, so a document whose
         // keys are numbers is still read by name

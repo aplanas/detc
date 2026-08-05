@@ -853,7 +853,11 @@ $ detc var mydns.yaml                             # a whole document, copied ver
 A value that is not a valid JSON document is taken as a plain string, so `-v
 yes` does not need to be quoted.  Only a whole list can be set: the drop-in that
 persists one element would have to carry the rest of the list to say where the
-element sits, so `detc var -k dns.nameservers.0 -v 8.8.8.8` is refused.
+element sits, so `detc var -k dns.nameservers.0 -v 8.8.8.8` is refused.  A
+number is refused wherever it appears in the key and whatever it addresses,
+because that is a fact about the drop-in and not about the node -- which also
+means a map whose keys are numbers is read by name but is set with a whole
+document, through `detc var <file>`.
 
 ### `detc bundle`
 
