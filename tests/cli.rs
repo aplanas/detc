@@ -594,7 +594,9 @@ fn test_doc_is_what_an_object_says_about_itself() -> TestResult {
     let doc = stdout(&output);
     assert!(doc.starts_with("A resource that does nothing"), "{doc}");
     assert!(doc.contains("\n## Schema\n"), "{doc}");
-    assert!(doc.contains("description:"), "{doc}");
+
+    // And it is set off as an example, the way the header sets off its own
+    assert!(doc.contains("\n    description:"), "{doc}");
 
     // The provider of the fixture is a program that says nothing but how it is
     // run, and there is nothing to show for it
@@ -742,8 +744,8 @@ fn test_the_noop_provider_says_that_an_installation_works() -> TestResult {
     assert!(output.status.success(), "{}", stderr(&output));
     let doc = stdout(&output);
     assert!(doc.starts_with("A resource that does nothing"), "{doc}");
-    assert!(doc.contains("order: 0"), "{doc}");
-    assert!(doc.contains("message:"), "{doc}");
+    assert!(doc.contains("\n    order: 0\n"), "{doc}");
+    assert!(doc.contains("\n      message:\n"), "{doc}");
 
     // The declaration is expanded through the namespace, the same as any other
     let output = detc(root, &["cat", "--type", "resource", "noop/ping"]);

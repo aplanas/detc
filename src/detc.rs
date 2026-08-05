@@ -668,24 +668,36 @@ fn doc(out: &mut dyn Sink, root: &Path, name: &Path, kind: Option<Type>) -> Resu
     // -- `detc schema` is the same thing on its own, for a script
     if let Object::Provider(path) = &object {
         text.push_str("\n## Schema\n\n");
-        text.push_str(&published_schema(path, root));
+
+        match provider::raw_schema(path, root) {
+            Ok(schema) => text.push_str(&indent(&schema)),
+
+            // A provider that cannot answer is still a provider with something
+            // written at the head of it, and that is what was asked for.
+            // Refusing to show any of it would keep the documentation from
+            // whoever is reading it precisely because the provider is broken;
+            // `detc check --type provider` is where that is a failure.  This
+            // is a sentence and not a document, so it is not set off as one
+            Err(e) => text.push_str(&format!("The provider does not say: {e}\n")),
+        }
     }
 
     out.emit(Record::Text(text))
 }
 
-/// The schema that a provider publishes, or the reason it did not.
+/// Set a block off as an example, the way the headers themselves set one off:
+/// four spaces, and nothing on a blank line so that no line ends in
+/// whitespace.
 ///
-/// A provider that cannot answer is still a provider with something written at
-/// the head of it, and that is what was asked for.  Refusing to show any of it
-/// would keep the documentation from whoever is reading it precisely because
-/// the provider is broken; `detc check --type provider` is where a broken one
-/// is reported as a failure.
-fn published_schema(path: &Path, root: &Path) -> String {
-    match provider::raw_schema(path, root) {
-        Ok(schema) => schema,
-        Err(e) => format!("The provider does not say: {e}\n"),
-    }
+/// Going through the lines also settles the ending, so a provider that writes
+/// a schema without a final newline does not run into whatever follows it.
+fn indent(text: &str) -> String {
+    text.lines()
+        .map(|line| match line.is_empty() {
+            true => String::from("\n"),
+            false => format!("    {line}\n"),
+        })
+        .collect()
 }
 
 /// The file that an object was read from, which is where its documentation is.
@@ -1720,6 +1732,20 @@ mod tests {
 
     fn source(locator: &str) -> result::Result<Source, String> {
         locator.parse()
+    }
+
+    /// The schema that `doc` appends is set off the way the headers set off an
+    /// example of their own, and a blank line inside it stays blank.
+    #[test]
+    fn a_block_is_set_off_without_a_line_that_ends_in_whitespace() {
+        assert_eq!(
+            indent("description: A unit\n\nproperties:\n  enabled: true\n"),
+            "    description: A unit\n\n    properties:\n      enabled: true\n"
+        );
+
+        // A provider that ends its schema without a newline is not run into
+        assert_eq!(indent("order: 70"), "    order: 70\n");
+        assert_eq!(indent(""), "");
     }
 
     #[test]

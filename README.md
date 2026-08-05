@@ -786,14 +786,14 @@ prefix mask the one that does not apply, or reads `system.pkg.manager` and
 
 ## Schema
 
-description: A package of the distribution
-order: 10
-properties:
-  installed:
-    type: boolean
-    description: Whether the package has to be in the system
-    default: true
-  …
+    description: A package of the distribution
+    order: 10
+    properties:
+      installed:
+        type: boolean
+        description: Whether the package has to be in the system
+        default: true
+      …
 ```
 
 The object is addressed the way [`detc cat`](#detc-cat) addresses it, so a
@@ -805,7 +805,8 @@ node itself rather than here.
 
 A provider is the one object whose documentation is not all prose.  What a
 resource of that type may declare is the schema, and the provider is what
-publishes it, so the two are shown together.
+publishes it, so the two are shown together — the schema indented, the way the
+headers set off an example of their own.
 
 ### `detc schema <provider>`
 
