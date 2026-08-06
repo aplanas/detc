@@ -180,13 +180,16 @@ method Apply(
   var: Var
 ) -> (change: ?Change)
 
-# Persist the variables as drop-ins of the namespace.  With `dry_run`, name the
-# drop-ins that would be written.  Streaming.
-method SetVariables(var: Var, dry_run: bool) -> (change: ?Change)
+# Write the variables as drop-ins of the namespace.  They last until the next
+# boot, unless `persist` keeps them, which also takes away the drop-in that the
+# same variable had until then.  With `dry_run`, name the drop-ins that would
+# be written and the ones that would be taken away.  Streaming.
+method SetVariables(var: Var, persist: bool, dry_run: bool) -> (change: ?Change)
 
-# Merge a document of variables into the namespace and keep it.  The file is
-# read on the machine that answers.  Streaming.
-method MergeDocument(file: string, dry_run: bool) -> (change: ?Change)
+# Merge a document of variables into the namespace and keep it, until the next
+# boot or, with `persist`, for good.  The file is read on the machine that
+# answers.  Streaming.
+method MergeDocument(file: string, persist: bool, dry_run: bool) -> (change: ?Change)
 
 # Install a bundle, taking away the one that was installed before it.  `bundle`
 # is the file itself, base64 encoded, and `url` is one that the machine that

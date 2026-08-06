@@ -18,10 +18,15 @@ Two names, searched in the data prefixes, in this order (`VARIABLE_NAMES`, `src/
 ```
 
 `system` is what the distribution ships; `user` is what the administrator wrote or what `detc
-var` persisted, and it wins.  Crossed with the three data prefixes that gives six places, read
+var` set, and it wins.  Crossed with the three data prefixes that gives six places, read
 lowest first, and each `*.d` directory merged in lexicographic order — so the whole ladder from
 `usr/share/detc/variables/system.d/10-core.yaml` up to
-`etc/detc/variables/user.d/90-anything.json`.
+`run/detc/variables/user.d/95-anything.json`.
+
+The order inside a `*.d` directory is by name across the prefixes, not by prefix: a `95-` in
+`run` is read after a `90-` in `etc`, and two drop-ins that share a name are one drop-in, the
+higher prefix winning.  That is what lets `detc var` put a variable in `run` and still be
+answered ahead of the copy `--persist` left in `etc`.
 
 **The document is the namespace root.**  A probe is mounted at a point derived from its path; a
 document is not.  What you write at the top level of the file is what a template addresses at
@@ -147,15 +152,25 @@ and where in the `.d` order it means to sit.
 
 ## Where `detc var` writes
 
-`detc var -k <key> -v <value>` and `detc var <file>` merge for the invocation **and persist**,
-into `etc/detc/variables/user.d/` at order `90` — `90-ssh-permit_root_login.json` for a key, and
-the document copied verbatim under its own name for a file, keeping a `NN-` prefix if it already
-has one.  90 puts it above the `50-` range an administrator writes by hand, because setting a
-variable is a deliberate act that should win.
+`detc var -k <key> -v <value>` and `detc var <file>` merge for the invocation **and keep it until
+the next boot**, in `run/detc/variables/user.d/` at order `95` — `95-ssh-permit_root_login.json`
+for a key, and the document copied verbatim under its own name for a file, keeping a `NN-` prefix
+if it already has one.
 
-`detc --dry-run var -k … -v …` prints the drop-in it would write and writes nothing.
+`--persist` writes to `etc/detc/variables/user.d/` at order `90` instead, where a reboot cannot
+reach it, and takes away the runtime drop-in it replaces.  Both orders are above the `50-` range
+an administrator writes by hand, because setting a variable is a deliberate act that should win,
+and `95` is above `90` so that a variable set now answers until the boot that gives the persisted
+one back.
 
-That directory is the node's, not yours.  Nothing you ship belongs in it.
+A document that carries its own `NN-` prefix keeps that name in either store, so the two stores
+cannot tell its copies apart.  Writing one to `run` while `etc` holds the same name is refused
+rather than silently ignored; persist it, or take the persisted one away.
+
+`detc --dry-run var -k … -v …` prints the drop-in it would write, and the runtime one it would
+take away, and writes nothing.
+
+Those two directories are the node's, not yours.  Nothing you ship belongs in either.
 
 ## Verifying it
 
@@ -192,7 +207,7 @@ $detc --root "$stage" cat --kv 'ssh: {permit_root_login: "no"}' \
       etc/ssh/sshd_config.d/60-detc.conf
 ```
 
-And check a drop-in of your own lands where you expect, without persisting it:
+And check a drop-in of your own lands where you expect, without writing it:
 
 ```bash
 $detc --root "$stage" --dry-run var -k ssh.x11_forwarding -v '"no"'

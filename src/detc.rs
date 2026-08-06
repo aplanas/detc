@@ -100,10 +100,10 @@ pub(crate) struct VarArgs {
 impl VarArgs {
     /// Whether these arguments write to the system instead of querying it.
     ///
-    /// Persisting a variable is the only thing besides `apply` that writes, and
+    /// Setting a variable is the only thing besides `apply` that writes, and
     /// the answer is needed in three places that must not disagree: the dry run
     /// below, the drop-ins it names, and the method that `detctl` sends.
-    pub(crate) fn persists(&self, file: Option<&Path>, probes: bool, probe: Option<&Path>) -> bool {
+    pub(crate) fn writes(&self, file: Option<&Path>, probes: bool, probe: Option<&Path>) -> bool {
         !probes
             && probe.is_none()
             && (file.is_some()
@@ -223,6 +223,11 @@ pub(crate) enum Commands {
 
         #[command(flatten)]
         var: VarArgs,
+
+        /// Keep the variables that are set, so that they survive a reboot.
+        /// Without it they are written under /run and last until the next boot
+        #[arg(long)]
+        persist: bool,
 
         /// List the available probes
         #[arg(long)]
@@ -1567,35 +1572,70 @@ fn report(
     })
 }
 
+/// What `var` was asked for.
+///
+/// The subcommand is five things told apart by which of these is set, and they
+/// travel together rather than as a row of flags, so that a caller cannot pair
+/// the wrong two.
+struct VarRequest<'a> {
+    /// A document of variables to merge, when there is one.
+    file: Option<&'a Path>,
+
+    /// The keys and values that were typed.
+    args: &'a VarArgs,
+
+    /// Whether what is set survives a reboot.  See [`var::Store`].
+    persist: bool,
+
+    /// List the probes rather than the variables.
+    probes: bool,
+
+    /// Run one probe and show what it reports.
+    probe: Option<&'a Path>,
+}
+
 /// Query or set the variables of the namespace.
 ///
-/// The variables that are set are persisted as user drop-ins, so that they are
+/// The variables that are set are written as user drop-ins, so that they are
 /// part of the namespace of the next run, while the ones that are queried are
-/// resolved from the system as it is now.
-fn variables(
-    out: &mut dyn Sink,
-    root: &Path,
-    file: Option<&Path>,
-    args: &VarArgs,
-    probes: bool,
-    probe: Option<&Path>,
-    dry_run: bool,
-) -> Result<()> {
-    // Persisting a variable is the only thing besides `apply` that writes to
-    // the system, so a dry run names the drop-ins instead of writing them.
+/// resolved from the system as it is now.  Where the drop-ins are kept is what
+/// `persist` decides, and [`var::Store`] says why it matters.
+fn variables(out: &mut dyn Sink, root: &Path, request: &VarRequest, dry_run: bool) -> Result<()> {
+    let VarRequest {
+        file,
+        args,
+        persist,
+        probes,
+        probe,
+    } = *request;
+
+    let store = var::Store::of(persist);
+
+    // Setting a variable is the only thing besides `apply` that writes to the
+    // system, so a dry run names the drop-ins instead of writing them.
     // Querying the namespace writes nothing and is left alone.
-    if dry_run && args.persists(file, probes, probe) {
+    if dry_run && args.writes(file, probes, probe) {
+        // What would be written, and the runtime drop-ins that persisting it
+        // would take away with it
         let mut dropins = Vec::new();
+        let mut cleared = Vec::new();
 
         if let Some(file) = file {
-            dropins.push(var::Variables::dropin_document_path(file, root)?);
+            dropins.push(var::Variables::dropin_document_path(file, store, root)?);
+            cleared.push(var::Variables::dropin_document_path(
+                file,
+                var::Store::Runtime,
+                root,
+            )?);
         }
         for (key, _) in args.pairs()? {
-            dropins.push(var::Variables::dropin_path(key, root));
+            dropins.push(var::Variables::dropin_path(key, store, root));
+            cleared.push(var::Variables::dropin_path(key, var::Store::Runtime, root));
         }
         for kv in &args.kv {
             for key in var::Variables::kv_keys(kv)? {
-                dropins.push(var::Variables::dropin_path(&key, root));
+                dropins.push(var::Variables::dropin_path(&key, store, root));
+                cleared.push(var::Variables::dropin_path(&key, var::Store::Runtime, root));
             }
         }
 
@@ -1607,6 +1647,17 @@ fn variables(
                 summary: Some(dropin.display().to_string()),
                 error: None,
             })?;
+        }
+
+        if persist {
+            for dropin in cleared.iter().filter(|dropin| dropin.exists()) {
+                out.emit(Record::Change {
+                    action: "remove".to_string(),
+                    object: "variable".to_string(),
+                    summary: Some(dropin.display().to_string()),
+                    error: None,
+                })?;
+            }
         }
 
         return Ok(());
@@ -1624,8 +1675,9 @@ fn variables(
         let text = var::Variables::from_probe(path, root)?.to_yaml()?;
         out.emit(Record::Text(text))?;
     } else if let Some(file) = file {
-        var::Variables::from_system(root)?.merge_file_and_persist(
+        var::Variables::from_system(root)?.merge_file_and_store(
             file,
+            store,
             root,
             var::DEFAULT_MERGE,
         )?;
@@ -1637,15 +1689,15 @@ fn variables(
         }
     } else if !args.key.is_empty() || !args.kv.is_empty() {
         // The overrides are written one by one, so the namespace of the system
-        // does not need to be collected to persist them
+        // does not need to be collected to write them
         let mut var = var::Variables::new();
 
         for (key, value) in args.pairs()? {
-            var.set_json_and_persist(key, value, root)?;
+            var.set_json_and_store(key, value, store, root)?;
         }
 
         for kv in &args.kv {
-            var.set_kv_and_persist(kv, root)?;
+            var.set_kv_and_store(kv, store, root)?;
         }
     } else {
         let text = var::Variables::from_system(root)?.to_yaml()?;
@@ -1696,15 +1748,19 @@ pub(crate) fn dispatch(
         Commands::Var {
             file,
             var,
+            persist,
             probes,
             probe,
         } => variables(
             out,
             root,
-            file.as_deref(),
-            var,
-            *probes,
-            probe.as_deref(),
+            &VarRequest {
+                file: file.as_deref(),
+                args: var,
+                persist: *persist,
+                probes: *probes,
+                probe: probe.as_deref(),
+            },
             dry_run,
         ),
 

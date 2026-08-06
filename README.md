@@ -841,18 +841,42 @@ $ detc var --probes                     # the available probes
 $ detc var -p 10-os-release             # the output of one probe
 ```
 
-Setting a variable persists it as a drop-in in
-`/etc/detc/variables/user.d/`, so it is part of the namespace of the next run:
+Setting a variable writes it as a drop-in, so it is part of the namespace of
+the next run:
 
 ```console
 $ detc var -k ssh.permit_root_login -v yes   # one key and its value
 $ detc var --kv "dns.domain: lan"                 # a YAML mapping of dotted keys
 $ detc var mydns.yaml                             # a whole document, copied verbatim
+$ detc var --persist -k dns.domain -v lan         # and keep it past the next boot
 ```
+
+By default the drop-in goes to `/run/detc/variables/user.d/`, which is the slot
+of what the boot injected: the value answers from the next run onwards and the
+next boot takes it away.  `--persist` writes it to `/etc/detc/variables/user.d/`
+instead, beside the documents written by hand, where a reboot cannot reach it.
+
+The two are ordered apart — `95-` for the runtime drop-in and `90-` for the
+persisted one — so the last thing typed is the one that answers whichever way
+round the two were written, and persisting an override takes away the runtime
+copy it replaces rather than leaving it behind:
+
+```console
+$ detc var -k dns.domain -v test          # run/…/95-dns-domain.json  ⇒ test
+$ detc var --persist -k dns.domain -v lan # etc/…/90-dns-domain.json  ⇒ lan
+$ detc var -k dns.domain -v test          # run/…/95-dns-domain.json  ⇒ test
+$ reboot                                  #                           ⇒ lan
+```
+
+A document that carries its own order is the exception, as the place in the
+sequence is the admin's: `detc var 10-early.yaml` writes `10-early.yaml` in
+either store, and because a drop-in is identified by its name across every
+prefix the persisted one is the one that is read.  Writing the runtime one that
+it would mask is refused rather than left behind for nothing to look at.
 
 A value that is not a valid JSON document is taken as a plain string, so `-v
 yes` does not need to be quoted.  Only a whole list can be set: the drop-in that
-persists one element would have to carry the rest of the list to say where the
+carries one element would have to carry the rest of the list to say where the
 element sits, so `detc var -k dns.nameservers.0 -v 8.8.8.8` is refused.  A
 number is refused wherever it appears in the key and whatever it addresses,
 because that is a fact about the drop-in and not about the node -- which also
@@ -1722,7 +1746,7 @@ Global, so they go before the subcommand (`detc --root /mnt list`):
 - `--root <PATH>` — work on a system mounted somewhere else, instead of `/`.
   Useful to prepare an image, or to try things out without touching the host.
 - `--dry-run` — say what would happen instead of doing it.  It covers everything
-  that writes: `apply`, the `var` invocations that persist a variable, and
+  that writes: `apply`, the `var` invocations that set a variable, and
   `bundle install`, `restore` and `remove`.
 - `-d` — turn logging on, repeat for more detail (error, warn, info, debug,
   trace).  Nothing is reported by default.  `DETC_LOG_LEVEL` and

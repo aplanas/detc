@@ -101,7 +101,7 @@ Say what would happen instead of doing it.  It covers everything that writes:
 .BR apply ,
 the
 .B var
-invocations that persist a variable, and
+invocations that set a variable, and
 .BR "bundle install" ,
 .B restore
 and
@@ -279,11 +279,17 @@ and
 or with
 .BR \-\-kv ,
 it writes the override to
-.I /etc/detc/variables/user.d
-so that it survives.  With a
+.I /run/detc/variables/user.d
+so that the next run reads it and the next boot takes it away.  With a
 .IR FILE ,
 it merges that whole document into the same place.  With none of them it
 prints the namespace.
+.TP
+.B \-\-persist
+Write what is set to
+.I /etc/detc/variables/user.d
+instead, where a reboot cannot reach it, and take away the runtime drop-in that
+it replaces.
 .TP
 .B \-\-probes
 List the probes.
@@ -464,16 +470,26 @@ Where an installed bundle lands, and what a reboot takes away.
 .IR /etc/detc/ ", " /var/lib/detc/providers.d/
 The administrator's own, which win over both.
 .TP
-.I /etc/detc/variables/user.d/
+.I /run/detc/variables/user.d/
 Written by
 .BR "detc var" ,
 one document per key, named
+.RI 95\- key .json
+with the dots of the key turned into dashes.  A reboot takes it away.
+.TP
+.I /etc/detc/variables/user.d/
+Written by
+.B "detc var \-\-persist"
+instead, named
 .RI 90\- key .json
-with the dots of the key turned into dashes.  The
+the same way.  The
 .I 90\-
 puts it after the documents written by hand in the usual
 .I 50\-
-range.
+range, and the
+.I 95\-
+of the one above puts that after this, so that a variable set now answers until
+the boot that gives this one back.
 .TP
 .IR /etc/detc/allowed_signers ", " /usr/share/detc/allowed_signers
 Who may sign a bundle this machine will install, in the format of

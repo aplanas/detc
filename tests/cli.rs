@@ -448,12 +448,18 @@ fn test_var_queries_and_persists() -> TestResult {
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(stdout(&output).contains("ip: 10.0.0.1"), "{output:?}");
 
-    // A key with a value is persisted, so the next run sees it
+    // A key with a value is written, so the next run sees it.  Nothing was
+    // asked to survive a reboot, so it is kept under /run
     let output = detc(
         root,
         &["var", "-k", "ssh.conf.permit_root_login", "-v", "prohibit"],
     );
     assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        root.join("run/detc/variables/user.d/95-ssh-conf-permit_root_login.json")
+            .is_file()
+    );
+    assert!(!root.join("etc/detc/variables/user.d").exists());
 
     let output = detc(root, &["var", "-k", "ssh.conf.permit_root_login"]);
     assert_eq!(stdout(&output), "prohibit\n");
@@ -462,9 +468,17 @@ fn test_var_queries_and_persists() -> TestResult {
     let output = detc(root, &["cat", "/etc/ssh/sshd_config.d/root.conf"]);
     assert_eq!(stdout(&output), "PermitRootLogin=prohibit\n");
 
-    // A mapping sets several variables at once
-    let output = detc(root, &["var", "--kv", "ntp.server: pool.ntp.org"]);
+    // A mapping sets several variables at once, and `--persist` is what keeps
+    // them past the next boot
+    let output = detc(
+        root,
+        &["var", "--persist", "--kv", "ntp.server: pool.ntp.org"],
+    );
     assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        root.join("etc/detc/variables/user.d/90-ntp-server.json")
+            .is_file()
+    );
 
     // With it, the whole system can be instantiated
     let output = detc(root, &["check"]);
@@ -501,7 +515,8 @@ fn test_an_element_of_a_list_cannot_be_set() -> TestResult {
         "{output:?}"
     );
 
-    // Nothing was persisted, and the list is still the one the document says
+    // Nothing was written, and the list is still the one the document says
+    assert!(!root.join("run/detc/variables/user.d").exists());
     assert!(!root.join("etc/detc/variables/user.d").exists());
     assert_eq!(
         stdout(&detc(root, &["var", "-k", "dns.nameservers"])),
@@ -531,19 +546,37 @@ fn test_a_document_of_variables_is_merged_and_kept() -> TestResult {
     let document = root.join("ntp.yaml");
     fs::write(&document, "ntp:\n  server: pool.ntp.org\n")?;
 
-    let output = detc(root, &["var", document.to_str().expect("a UTF-8 path")]);
+    let path = document.to_str().expect("a UTF-8 path");
+    let output = detc(root, &["var", path]);
     assert!(output.status.success(), "{}", stderr(&output));
 
     // The document is copied verbatim as a user drop-in, so it is part of the
-    // namespace of the next run
-    let dropin = root.join("etc/detc/variables/user.d/90-ntp.yaml");
+    // namespace of the next run, and until the next boot
+    let runtime = root.join("run/detc/variables/user.d/95-ntp.yaml");
     assert_eq!(
-        fs::read_to_string(dropin)?,
+        fs::read_to_string(&runtime)?,
         "ntp:\n  server: pool.ntp.org\n"
     );
+    assert!(!root.join("etc/detc/variables/user.d").exists());
 
     let output = detc(root, &["var", "-k", "ntp.server"]);
     assert_eq!(stdout(&output), "pool.ntp.org\n");
+
+    // Persisting it puts it where a reboot cannot reach it, and takes away the
+    // copy that answered until then
+    fs::write(&document, "ntp:\n  server: ntp.example.com\n")?;
+    let output = detc(root, &["var", "--persist", path]);
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let dropin = root.join("etc/detc/variables/user.d/90-ntp.yaml");
+    assert_eq!(
+        fs::read_to_string(dropin)?,
+        "ntp:\n  server: ntp.example.com\n"
+    );
+    assert!(!runtime.exists());
+
+    let output = detc(root, &["var", "-k", "ntp.server"]);
+    assert_eq!(stdout(&output), "ntp.example.com\n");
 
     Ok(())
 }
@@ -1790,12 +1823,13 @@ fn test_the_history_can_be_turned_off() -> TestResult {
 }
 
 #[test]
-fn test_a_dry_run_does_not_persist_a_variable() -> TestResult {
+fn test_a_dry_run_does_not_write_a_variable() -> TestResult {
     let tmp_root = tempfile::tempdir()?;
     let root = tmp_root.path();
     fixture(root)?;
 
-    let dropin = root.join("etc/detc/variables/user.d/90-ntp-server.json");
+    let runtime = root.join("run/detc/variables/user.d/95-ntp-server.json");
+    let persisted = root.join("etc/detc/variables/user.d/90-ntp-server.json");
 
     let output = detc(
         root,
@@ -1804,13 +1838,42 @@ fn test_a_dry_run_does_not_persist_a_variable() -> TestResult {
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(
         stdout(&output),
-        format!("create\tvariable\t{}\n", dropin.display())
+        format!("create\tvariable\t{}\n", runtime.display())
     );
-    assert!(!dropin.exists());
+    assert!(!runtime.exists());
 
     // Querying the namespace writes nothing, so a dry run answers as usual
     let output = detc(root, &["--dry-run", "var", "-k", "system.network.ip"]);
     assert_eq!(stdout(&output), "10.0.0.1\n");
+
+    // With something to persist, the run names the drop-in it would write and
+    // the runtime one that it would take away with it
+    let output = detc(root, &["var", "-k", "ntp.server", "-v", "here"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(runtime.is_file());
+
+    let output = detc(
+        root,
+        &[
+            "--dry-run",
+            "var",
+            "--persist",
+            "-k",
+            "ntp.server",
+            "-v",
+            "there",
+        ],
+    );
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "create\tvariable\t{}\nremove\tvariable\t{}\n",
+            persisted.display(),
+            runtime.display()
+        )
+    );
+    assert!(!persisted.exists());
+    assert!(runtime.is_file());
 
     Ok(())
 }

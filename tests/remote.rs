@@ -127,8 +127,8 @@ fn test_a_remote_run_changes_the_system_it_reaches() -> TestResult {
     let root = tmp_root.path();
     fixture(root)?;
 
-    // The variable is persisted where the service runs, and not where the
-    // client does
+    // The variable is written where the service runs, and not where the client
+    // does.  Nothing asked it to survive a reboot, so it lands under /run
     let output = detctl(
         root,
         "",
@@ -136,8 +136,39 @@ fn test_a_remote_run_changes_the_system_it_reaches() -> TestResult {
     );
     assert!(output.status.success(), "{}", stderr(&output));
 
+    assert!(
+        root.join("run/detc/variables/user.d/95-ssh-conf-permit_root_login.json")
+            .is_file()
+    );
+
     let output = detc(root, &["var", "-k", "ssh.conf.permit_root_login"]);
     assert_eq!(stdout(&output), "prohibit\n");
+
+    // And `--persist` crosses too, so the far side keeps it and takes away the
+    // drop-in that answered until then
+    let output = detctl(
+        root,
+        "",
+        &[
+            "var",
+            "--persist",
+            "-k",
+            "ssh.conf.permit_root_login",
+            "-v",
+            "prohibit",
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    assert!(
+        root.join("etc/detc/variables/user.d/90-ssh-conf-permit_root_login.json")
+            .is_file()
+    );
+    assert!(
+        !root
+            .join("run/detc/variables/user.d/95-ssh-conf-permit_root_login.json")
+            .exists()
+    );
 
     let output = detctl(
         root,

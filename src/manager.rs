@@ -226,6 +226,9 @@ struct SetParams {
     var: Var,
 
     #[serde(default)]
+    persist: bool,
+
+    #[serde(default)]
     dry_run: bool,
 }
 
@@ -233,6 +236,9 @@ struct SetParams {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct MergeParams {
     file: String,
+
+    #[serde(default)]
+    persist: bool,
 
     #[serde(default)]
     dry_run: bool,
@@ -460,19 +466,23 @@ pub(crate) fn call(command: &Commands, dry_run: bool) -> Result<(&'static Method
         ),
 
         Commands::Var {
-            file: Some(file), ..
+            file: Some(file),
+            persist,
+            ..
         } => (
             "MergeDocument",
             varlink::parameters(&MergeParams {
                 file: name(file),
+                persist: *persist,
                 dry_run,
             })?,
         ),
 
-        Commands::Var { var, .. } if var.persists(None, false, None) => (
+        Commands::Var { var, persist, .. } if var.writes(None, false, None) => (
             "SetVariables",
             varlink::parameters(&SetParams {
                 var: Var::of(var)?,
+                persist: *persist,
                 dry_run,
             })?,
         ),
@@ -614,6 +624,7 @@ pub(crate) fn command(method: &Method, parameters: Option<Value>) -> Result<(Com
             Commands::Var {
                 file: None,
                 var: VarArgs::default(),
+                persist: false,
                 probes: true,
                 probe: None,
             },
@@ -627,6 +638,7 @@ pub(crate) fn command(method: &Method, parameters: Option<Value>) -> Result<(Com
                 Commands::Var {
                     file: None,
                     var: VarArgs::default(),
+                    persist: false,
                     probes: false,
                     probe: Some(PathBuf::from(params.probe)),
                 },
@@ -644,6 +656,7 @@ pub(crate) fn command(method: &Method, parameters: Option<Value>) -> Result<(Com
                         key: params.key,
                         ..VarArgs::default()
                     },
+                    persist: false,
                     probes: false,
                     probe: None,
                 },
@@ -658,6 +671,7 @@ pub(crate) fn command(method: &Method, parameters: Option<Value>) -> Result<(Com
                 Commands::Var {
                     file: None,
                     var: params.var.into(),
+                    persist: params.persist,
                     probes: false,
                     probe: None,
                 },
@@ -672,6 +686,7 @@ pub(crate) fn command(method: &Method, parameters: Option<Value>) -> Result<(Com
                 Commands::Var {
                     file: Some(PathBuf::from(params.file)),
                     var: VarArgs::default(),
+                    persist: params.persist,
                     probes: false,
                     probe: None,
                 },
@@ -1024,6 +1039,7 @@ mod tests {
                 Commands::Var {
                     file: None,
                     var: var(&[], &[], &[]),
+                    persist: false,
                     probes: true,
                     probe: None,
                 },
@@ -1033,6 +1049,7 @@ mod tests {
                 Commands::Var {
                     file: None,
                     var: var(&[], &[], &[]),
+                    persist: false,
                     probes: false,
                     probe: Some(PathBuf::from("hostname")),
                 },
@@ -1042,6 +1059,7 @@ mod tests {
                 Commands::Var {
                     file: Some(PathBuf::from("data.yaml")),
                     var: var(&[], &[], &[]),
+                    persist: false,
                     probes: false,
                     probe: None,
                 },
@@ -1051,6 +1069,7 @@ mod tests {
                 Commands::Var {
                     file: None,
                     var: var(&["a"], &["1"], &[]),
+                    persist: false,
                     probes: false,
                     probe: None,
                 },
@@ -1060,6 +1079,7 @@ mod tests {
                 Commands::Var {
                     file: None,
                     var: var(&[], &[], &["a=1"]),
+                    persist: false,
                     probes: false,
                     probe: None,
                 },
@@ -1069,6 +1089,7 @@ mod tests {
                 Commands::Var {
                     file: None,
                     var: var(&["a"], &[], &[]),
+                    persist: false,
                     probes: false,
                     probe: None,
                 },
@@ -1078,6 +1099,7 @@ mod tests {
                 Commands::Var {
                     file: None,
                     var: var(&[], &[], &[]),
+                    persist: false,
                     probes: false,
                     probe: None,
                 },
@@ -1310,6 +1332,7 @@ mod tests {
                 value: vec!["1".to_string()],
                 kv: Vec::new(),
             },
+            persist: false,
             probes: false,
             probe: None,
         };

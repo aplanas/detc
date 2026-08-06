@@ -1,4 +1,5 @@
 use std::fmt;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -39,6 +40,10 @@ pub fn probes_name(category: &str) -> String {
     format!("detc/probes/{category}")
 }
 
+/// Drop-in directory where the variables set from the command line are kept
+/// until the next boot.
+const RUNTIME_DROPIN_DIR: &str = "run/detc/variables/user.d";
+
 /// Drop-in directory where the variables set from the command line are
 /// persisted.
 const USER_DROPIN_DIR: &str = "etc/detc/variables/user.d";
@@ -48,6 +53,61 @@ const USER_DROPIN_DIR: &str = "etc/detc/variables/user.d";
 /// admin, so it is late enough to win over the documents that they wrote by
 /// hand in the usual `50-` range.
 const USER_DROPIN_ORDER: &str = "90";
+
+/// Order of the drop-ins that are not persisted, which is later than the one
+/// above so that they win.  See [`Store`] for why they are ordered apart
+/// rather than kept under the same name in another prefix.
+const RUNTIME_DROPIN_ORDER: &str = "95";
+
+/// Where a variable set from the command line is written.
+///
+/// Setting a variable is a runtime override by default: it lands in `run`,
+/// which [`cfs::SEARCH_PREFIXES`] describes as the slot of what the boot
+/// injected, and the next boot takes it away.  Persisting it writes it under
+/// `etc` instead, beside the documents that the admin wrote by hand, where a
+/// reboot cannot reach it.
+///
+/// The two are ordered apart, and the runtime one later, because a drop-in is
+/// identified by its name across every prefix: the same name under `etc` would
+/// mask the one under `run`, and a variable set after it had been persisted
+/// would quietly answer with the persisted value.  A later order makes the
+/// last thing typed the one that answers, until the reboot that clears `run`
+/// gives the persisted value back.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Store {
+    /// [`RUNTIME_DROPIN_DIR`], at [`RUNTIME_DROPIN_ORDER`].
+    #[default]
+    Runtime,
+
+    /// [`USER_DROPIN_DIR`], at [`USER_DROPIN_ORDER`].
+    Persisted,
+}
+
+impl Store {
+    /// The store that a run writes to, told by whether it was asked to persist.
+    pub fn of(persist: bool) -> Self {
+        match persist {
+            true => Store::Persisted,
+            false => Store::Runtime,
+        }
+    }
+
+    /// The drop-in directory of the store, relative to the root.
+    fn dir(self) -> &'static str {
+        match self {
+            Store::Runtime => RUNTIME_DROPIN_DIR,
+            Store::Persisted => USER_DROPIN_DIR,
+        }
+    }
+
+    /// The order that the drop-ins of the store are written at.
+    fn order(self) -> &'static str {
+        match self {
+            Store::Runtime => RUNTIME_DROPIN_ORDER,
+            Store::Persisted => USER_DROPIN_ORDER,
+        }
+    }
+}
 
 /// Reserved key that a document can use to declare how it is combined with
 /// the namespace.  The directive is removed before the merge, so it never
@@ -546,12 +606,28 @@ impl Variables {
         Ok(())
     }
 
-    /// Set the variables described by a YAML mapping, and persist every one of
-    /// them as a user drop-in.
-    pub fn set_kv_and_persist(&mut self, kv: &str, root: impl AsRef<Path>) -> Result<()> {
+    /// Set the variables described by a YAML mapping, and write every one of
+    /// them as a user drop-in of `store`.
+    pub fn set_kv_and_store(
+        &mut self,
+        kv: &str,
+        store: Store,
+        root: impl AsRef<Path>,
+    ) -> Result<()> {
         for (key, value) in Self::kv_entries(kv)? {
             self.set_value(&key, &value)?;
-            self.persist_user_override(&key, &value, Self::dropin_name(&key), root.as_ref())?;
+            self.store_user_override(
+                &key,
+                &value,
+                Self::dropin_name(&key, store),
+                store,
+                root.as_ref(),
+            )?;
+            Self::clear_runtime(
+                store,
+                Self::dropin_name(&key, Store::Runtime),
+                root.as_ref(),
+            )?;
         }
 
         Ok(())
@@ -571,42 +647,51 @@ impl Variables {
         }
     }
 
-    /// Merge a document of variables in the namespace, and persist it as a
-    /// user drop-in, so that it is part of the namespace of the next run.
+    /// Merge a document of variables in the namespace, and write it as a user
+    /// drop-in of `store`, so that it is part of the namespace of the next run.
     ///
     /// The document is copied verbatim, so its comments and its merge
     /// directive are preserved.
-    pub fn merge_file_and_persist(
+    pub fn merge_file_and_store(
         &mut self,
         path: impl AsRef<Path>,
+        store: Store,
         root: impl AsRef<Path>,
         default: Merge,
     ) -> Result<()> {
         let path = path.as_ref();
 
         // Deserialized first, so that a document that cannot be understood is
-        // not persisted
+        // not written anywhere
         let var = Self::from_file(path)?;
 
-        let dropin = Self::dropin_document_path(path, root.as_ref())?;
-        Self::user_dropin_dir(root.as_ref())?;
+        let name = Self::dropin_file_name(path, store)?;
+        Self::refuse_if_masked(store, &name, root.as_ref())?;
+
+        let dropin = Self::store_dropin_dir(store, root.as_ref())?.join(&name);
 
         std::fs::copy(path, &dropin)
             .map_err(|e| format!("Failed to write {}: {}", dropin.display(), e))?;
-        debug!("Persisted variable document to {}", dropin.display());
+        debug!("Wrote variable document to {}", dropin.display());
+
+        Self::clear_runtime(
+            store,
+            Self::dropin_file_name(path, Store::Runtime)?,
+            root.as_ref(),
+        )?;
 
         self.merge_document(&[], var, default)
     }
 
-    /// Name of the drop-in that persists the override of a dotted key.
-    fn dropin_name(key: &str) -> String {
-        format!("{USER_DROPIN_ORDER}-{}.json", key.replace('.', "-"))
+    /// Name of the drop-in that `store` keeps the override of a dotted key in.
+    fn dropin_name(key: &str, store: Store) -> String {
+        format!("{}-{}.json", store.order(), key.replace('.', "-"))
     }
 
-    /// Name of the drop-in that persists a document.  A name that is already
-    /// ordered by a numeric prefix keeps it, as the admin chose where the
-    /// document belongs in the sequence.
-    fn dropin_file_name(path: &Path) -> Result<String> {
+    /// Name of the drop-in that `store` keeps a document in.  A name that is
+    /// already ordered by a numeric prefix keeps it, as the admin chose where
+    /// the document belongs in the sequence.
+    fn dropin_file_name(path: &Path, store: Store) -> Result<String> {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             return err!("Cannot use {} as a variable document", path.display());
         };
@@ -617,74 +702,147 @@ impl Variables {
         Ok(if ordered {
             name.to_string()
         } else {
-            format!("{USER_DROPIN_ORDER}-{name}")
+            format!("{}-{name}", store.order())
         })
     }
 
-    /// Where the override of a dotted key is persisted.  It is public so that
+    /// Where `store` keeps the override of a dotted key.  It is public so that
     /// the caller can say what a run would write without writing it.
-    pub fn dropin_path(key: &str, root: impl AsRef<Path>) -> PathBuf {
+    pub fn dropin_path(key: &str, store: Store, root: impl AsRef<Path>) -> PathBuf {
         root.as_ref()
-            .join(USER_DROPIN_DIR)
-            .join(Self::dropin_name(key))
+            .join(store.dir())
+            .join(Self::dropin_name(key, store))
     }
 
-    /// Where a document of variables is persisted.
-    pub fn dropin_document_path(path: impl AsRef<Path>, root: impl AsRef<Path>) -> Result<PathBuf> {
+    /// Where `store` keeps a document of variables.
+    pub fn dropin_document_path(
+        path: impl AsRef<Path>,
+        store: Store,
+        root: impl AsRef<Path>,
+    ) -> Result<PathBuf> {
         Ok(root
             .as_ref()
-            .join(USER_DROPIN_DIR)
-            .join(Self::dropin_file_name(path.as_ref())?))
+            .join(store.dir())
+            .join(Self::dropin_file_name(path.as_ref(), store)?))
     }
 
-    /// Set the value addressed by a dotted key, and persist it as a user
-    /// drop-in named after the key.
-    pub fn set_json_and_persist(
+    /// Set the value addressed by a dotted key, and write it as a user drop-in
+    /// of `store`, named after the key.
+    pub fn set_json_and_store(
         &mut self,
         key: &str,
         value: &str,
-        root: impl AsRef<Path>,
-    ) -> Result<()> {
-        self.set_json_and_persist_as(key, value, Self::dropin_name(key), root)
-    }
-
-    /// Set the value addressed by a dotted key, and persist it as the user
-    /// drop-in `path`, so that the caller decides its name, and with it where
-    /// the override belongs in the sequence of drop-ins.
-    pub fn set_json_and_persist_as(
-        &mut self,
-        key: &str,
-        value: &str,
-        path: impl AsRef<Path>,
+        store: Store,
         root: impl AsRef<Path>,
     ) -> Result<()> {
         let value = Self::json_or_string(value);
         self.set_value(key, &value)?;
-        self.persist_user_override(key, &value, path, root)
+        self.store_user_override(
+            key,
+            &value,
+            Self::dropin_name(key, store),
+            store,
+            root.as_ref(),
+        )?;
+
+        // The name carries the order of the store that wrote it, so the copy
+        // that persisting replaces is the one the runtime store would name
+        Self::clear_runtime(store, Self::dropin_name(key, Store::Runtime), root.as_ref())
     }
 
-    /// Create, if needed, the drop-in directory where the variables set from
-    /// the command line are persisted.
-    fn user_dropin_dir(root: &Path) -> Result<PathBuf> {
-        let dropin_dir = root.join(USER_DROPIN_DIR);
+    /// Set the value addressed by a dotted key, and write it as the user
+    /// drop-in `path` of `store`, so that the caller decides its name, and with
+    /// it where the override belongs in the sequence of drop-ins.
+    pub fn set_json_and_store_as(
+        &mut self,
+        key: &str,
+        value: &str,
+        path: impl AsRef<Path>,
+        store: Store,
+        root: impl AsRef<Path>,
+    ) -> Result<()> {
+        // The name was chosen by the caller, so it is the same one in either
+        // store, and there is no order to tell the two copies apart by
+        Self::refuse_if_masked(store, path.as_ref(), root.as_ref())?;
+
+        let value = Self::json_or_string(value);
+        self.set_value(key, &value)?;
+        self.store_user_override(key, &value, path.as_ref(), store, root.as_ref())?;
+
+        Self::clear_runtime(store, path.as_ref(), root.as_ref())
+    }
+
+    /// Create, if needed, the drop-in directory that `store` keeps the
+    /// variables set from the command line in.
+    fn store_dropin_dir(store: Store, root: &Path) -> Result<PathBuf> {
+        let dropin_dir = root.join(store.dir());
         std::fs::create_dir_all(&dropin_dir)
             .map_err(|e| format!("Failed to create directory {}: {}", dropin_dir.display(), e))?;
         Ok(dropin_dir)
     }
 
-    /// Write the override of a single dotted key as a user drop-in.
+    /// Refuse a runtime drop-in that a persisted one of the same name masks.
+    ///
+    /// The two stores order their own names apart, so this only reaches a
+    /// document that carries its own order, or a name that the caller chose:
+    /// there the place in the sequence is the admin's and cannot be moved, and
+    /// of two drop-ins that share a name it is the one under `etc` that is
+    /// read.  Writing the other anyway would leave behind a file that nothing
+    /// looks at, so what would happen is said instead.
+    fn refuse_if_masked(store: Store, name: impl AsRef<Path>, root: &Path) -> Result<()> {
+        if store == Store::Persisted {
+            return Ok(());
+        }
+
+        let persisted = root.join(USER_DROPIN_DIR).join(name.as_ref());
+
+        if persisted.is_file() {
+            return err!(
+                "{} is read instead of the drop-in this would write, as the two share a name: persist this one, or take that one away",
+                persisted.display()
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Take away the runtime drop-in that a persisted one replaces.
+    ///
+    /// Persisting an override is a promotion of it and not a second copy: the
+    /// runtime drop-in is read after the persisted one, so leaving it behind
+    /// would keep answering with the value that was just replaced.  An
+    /// override that is itself a runtime one has just been written, and there
+    /// is nothing to take away.
+    fn clear_runtime(store: Store, name: impl AsRef<Path>, root: &Path) -> Result<()> {
+        if store == Store::Runtime {
+            return Ok(());
+        }
+
+        let path = root.join(RUNTIME_DROPIN_DIR).join(name.as_ref());
+
+        match std::fs::remove_file(&path) {
+            Ok(()) => debug!("Removed the runtime override {}", path.display()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => (),
+            Err(e) => return err!("Failed to remove {}: {e}", path.display()),
+        }
+
+        Ok(())
+    }
+
+    /// Write the override of a single dotted key as a user drop-in of `store`.
     ///
     /// The document holds only the key that was set, nested in the chain of
     /// objects that addresses it, so that it overrides that one value and
     /// leaves the rest of the namespace alone.
-    fn persist_user_override(
+    fn store_user_override(
         &self,
         key: &str,
         value: &Value,
         path: impl AsRef<Path>,
+        store: Store,
         root: impl AsRef<Path>,
     ) -> Result<()> {
-        let path = Self::user_dropin_dir(root.as_ref())?.join(path);
+        let path = Self::store_dropin_dir(store, root.as_ref())?.join(path);
 
         let override_value = Self::nest(key.split('.'), value.clone());
 
@@ -692,7 +850,7 @@ impl Variables {
         std::fs::write(&path, json_string)
             .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
 
-        debug!("Persisted variable override to {}", path.display());
+        debug!("Wrote variable override to {}", path.display());
 
         Ok(())
     }
@@ -1223,7 +1381,11 @@ mod tests {
             "ssh:\n  conf:\n    login: yes\n",
         )?;
 
-        Variables::from_system(root)?.set_kv_and_persist("ssh.conf.login: prohibit", root)?;
+        Variables::from_system(root)?.set_kv_and_store(
+            "ssh.conf.login: prohibit",
+            Store::Persisted,
+            root,
+        )?;
 
         // The drop-in is ordered after the documents written by hand, so the
         // value that was set is the one that the next run reads
@@ -1233,7 +1395,12 @@ mod tests {
         // A document is copied verbatim, so its merge directive survives
         let document = root.join("mydns.yaml");
         fs::write(&document, "_merge: full\ndns:\n  nameservers:\n    - b\n")?;
-        Variables::from_system(root)?.merge_file_and_persist(&document, root, DEFAULT_MERGE)?;
+        Variables::from_system(root)?.merge_file_and_store(
+            &document,
+            Store::Persisted,
+            root,
+            DEFAULT_MERGE,
+        )?;
         assert!(dropin.join("90-mydns.yaml").is_file());
 
         let var = Variables::from_system(root)?;
@@ -1242,15 +1409,21 @@ mod tests {
         // A document that is already ordered keeps its place in the sequence
         let ordered = root.join("10-early.yaml");
         fs::write(&ordered, "dns:\n  domain: lan\n")?;
-        Variables::from_system(root)?.merge_file_and_persist(&ordered, root, DEFAULT_MERGE)?;
+        Variables::from_system(root)?.merge_file_and_store(
+            &ordered,
+            Store::Persisted,
+            root,
+            DEFAULT_MERGE,
+        )?;
         assert!(dropin.join("10-early.yaml").is_file());
 
         // The name of the drop-in can be chosen, to place the override before
         // the documents written by hand instead of after them
-        Variables::from_system(root)?.set_json_and_persist_as(
+        Variables::from_system(root)?.set_json_and_store_as(
             "dns.domain",
             "example.com",
             "05-domain.json",
+            Store::Persisted,
             root,
         )?;
         fs::write(dropin.join("50-domain.yaml"), "dns:\n  domain: lan\n")?;
@@ -1264,10 +1437,97 @@ mod tests {
         fs::write(&bad, "not: [a valid\n")?;
         assert!(
             Variables::from_system(root)?
-                .merge_file_and_persist(&bad, root, DEFAULT_MERGE)
+                .merge_file_and_store(&bad, Store::Persisted, root, DEFAULT_MERGE)
                 .is_err()
         );
         assert!(!dropin.join("90-bad.yaml").exists());
+
+        Ok(())
+    }
+
+    /// A variable that was not persisted is kept in `run`, and the last thing
+    /// that was set is the one that answers whichever way round the two were
+    /// written.
+    #[test]
+    fn test_a_variable_is_kept_until_the_next_boot_unless_it_is_persisted() -> TestResult {
+        let tmp_root = tempfile::tempdir()?;
+        let root = tmp_root.path();
+
+        let runtime = root.join("run/detc/variables/user.d");
+        let persisted = root.join("etc/detc/variables/user.d");
+
+        // Nothing was asked to survive, so nothing is written where a reboot
+        // cannot reach it
+        Variables::new().set_json_and_store("ntp.server", "a", Store::Runtime, root)?;
+        assert!(runtime.join("95-ntp-server.json").is_file());
+        assert!(!persisted.exists());
+        assert_eq!(
+            Variables::from_system(root)?.get_yaml("ntp.server")?.trim(),
+            "a"
+        );
+
+        // Persisting is a promotion of the same override, so the runtime copy
+        // is taken away rather than left behind to answer instead
+        Variables::new().set_json_and_store("ntp.server", "b", Store::Persisted, root)?;
+        assert!(persisted.join("90-ntp-server.json").is_file());
+        assert!(!runtime.join("95-ntp-server.json").exists());
+        assert_eq!(
+            Variables::from_system(root)?.get_yaml("ntp.server")?.trim(),
+            "b"
+        );
+
+        // And the other way round: the runtime drop-in is ordered after the
+        // persisted one, so setting a variable that was persisted takes effect
+        // now and is gone at the next boot
+        Variables::new().set_json_and_store("ntp.server", "c", Store::Runtime, root)?;
+        assert!(persisted.join("90-ntp-server.json").is_file());
+        assert_eq!(
+            Variables::from_system(root)?.get_yaml("ntp.server")?.trim(),
+            "c"
+        );
+
+        fs::remove_dir_all(root.join("run"))?;
+        assert_eq!(
+            Variables::from_system(root)?.get_yaml("ntp.server")?.trim(),
+            "b"
+        );
+
+        Ok(())
+    }
+
+    /// A name that carries its own order is the same name in either store, and
+    /// the persisted one is the one that is read, so writing the other is
+    /// refused instead of leaving behind a file that nothing looks at.
+    #[test]
+    fn test_a_runtime_document_that_a_persisted_one_masks_is_refused() -> TestResult {
+        let tmp_root = tempfile::tempdir()?;
+        let root = tmp_root.path();
+
+        let ordered = root.join("10-early.yaml");
+        fs::write(&ordered, "dns:\n  domain: lan\n")?;
+
+        Variables::from_system(root)?.merge_file_and_store(
+            &ordered,
+            Store::Persisted,
+            root,
+            DEFAULT_MERGE,
+        )?;
+
+        fs::write(&ordered, "dns:\n  domain: example.com\n")?;
+        let refused = Variables::from_system(root)?
+            .merge_file_and_store(&ordered, Store::Runtime, root, DEFAULT_MERGE)
+            .expect_err("the drop-in would be masked");
+
+        assert!(refused.to_string().contains("10-early.yaml"));
+        assert!(
+            !root
+                .join("run/detc/variables/user.d/10-early.yaml")
+                .exists()
+        );
+        assert_eq!(
+            Variables::from_system(root)?.get_yaml("dns.domain")?.trim(),
+            "lan"
+        );
 
         Ok(())
     }
