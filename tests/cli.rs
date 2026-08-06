@@ -2165,6 +2165,13 @@ fn test_a_bundle_that_persists_comes_back_after_a_reboot() -> TestResult {
         only_what_the_admin_wrote(root)
     );
 
+    // The copy outlived the content, so this is not a machine with no bundle:
+    // it is one that has this bundle and does not hold it yet, and it says so
+    assert_eq!(
+        stdout(&detc(root, &["bundle", "status"])),
+        "fleet\t1\tunsigned\tlocal\tkept\n"
+    );
+
     // Applying the system is what puts it back, so a machine that reboots
     // needs no unit of its own, and the run records that it happened
     let output = detc(root, &["apply"]);
@@ -2191,6 +2198,249 @@ fn test_a_bundle_that_persists_comes_back_after_a_reboot() -> TestResult {
     let output = detc(root, &["apply"]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(!stdout(&output).contains("restored"), "{}", stdout(&output));
+
+    Ok(())
+}
+
+#[test]
+fn test_a_bundle_that_was_kept_is_taken_away_before_it_comes_back() -> TestResult {
+    let tmp_built = tempfile::tempdir()?;
+    let file = bundle(tmp_built.path())?;
+
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    complete(root)?;
+
+    let output = detc(
+        root,
+        &[
+            "bundle",
+            "install",
+            file.to_str().unwrap(),
+            "--persist",
+            "--allow-unsigned",
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    // The reboot, which leaves the copy and nothing to unlink.  This is the
+    // machine whose restore keeps failing -- a key that was withdrawn -- and
+    // saying no to the bundle has to work there or it works nowhere
+    fs::remove_dir_all(root.join("run"))?;
+
+    let output = detc(root, &["--dry-run", "bundle", "remove"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "remove\tbundle fleet 1\t0 written, 0 removed\n"
+    );
+    assert!(root.join("var/lib/detc/bundle.detc").is_file());
+
+    let output = detc(root, &["bundle", "remove"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "removed\tbundle fleet 1\t0 written, 0 removed\n"
+    );
+
+    // The copy is gone, so the machine knows no bundle and applying it brings
+    // nothing back
+    assert!(!root.join("var/lib/detc/bundle.detc").exists());
+    assert_eq!(stdout(&detc(root, &["bundle", "status"])), "");
+
+    let output = detc(root, &["apply"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!stdout(&output).contains("restored"), "{}", stdout(&output));
+
+    // And there is nothing left to say no to
+    let output = detc(root, &["bundle", "remove"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("no bundle installed"),
+        "{}",
+        stderr(&output)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_the_variables_of_the_administrator_are_not_a_bundle_to_carry() -> TestResult {
+    let tmp_built = tempfile::tempdir()?;
+    let built = tmp_built.path();
+
+    let tree = built.join("fleet");
+    source_tree(built, &tree)?;
+    fs::create_dir_all(tree.join("variables/user.d"))?;
+    fs::write(
+        tree.join("variables/user.d/95-dns-domain.json"),
+        "{\"dns\": {\"domain\": \"from-the-bundle\"}}\n",
+    )?;
+
+    // The tree that `detc var` writes is the one place where a bundle and a
+    // command would name the same file.  A document left there was written to
+    // be shipped, so building stops rather than leaving it out of the bundle
+    let file = built.join("fleet.detc");
+    let output = detc(
+        built,
+        &[
+            "bundle",
+            "create",
+            &tree.to_string_lossy(),
+            "-o",
+            &file.to_string_lossy(),
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("is where `detc var` writes"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("variables/system.d instead"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!file.exists());
+
+    // Where it belongs, the same document builds and installs, and it still
+    // loses to whatever the administrator sets
+    fs::remove_dir_all(tree.join("variables/user.d"))?;
+    fs::write(
+        tree.join("variables/system.d/95-dns-domain.json"),
+        "{\"dns\": {\"domain\": \"from-the-bundle\"}}\n",
+    )?;
+
+    let output = detc(
+        built,
+        &[
+            "bundle",
+            "create",
+            &tree.to_string_lossy(),
+            "-o",
+            &file.to_string_lossy(),
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    complete(root)?;
+
+    let output = detc(
+        root,
+        &[
+            "bundle",
+            "install",
+            file.to_str().unwrap(),
+            "--allow-unsigned",
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!root.join("run/detc/variables/user.d").exists());
+    assert_eq!(
+        stdout(&detc(root, &["var", "-k", "dns.domain"])),
+        "from-the-bundle\n"
+    );
+
+    // So the drop-in that `detc var` writes is the administrator's alone, and
+    // nothing the bundle carries is in the way of it
+    let output = detc(root, &["var", "-k", "dns.domain", "-v", "\"mine\""]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        root.join("run/detc/variables/user.d/95-dns-domain.json")
+            .is_file()
+    );
+    assert_eq!(stdout(&detc(root, &["var", "-k", "dns.domain"])), "mine\n");
+
+    Ok(())
+}
+
+#[test]
+fn test_a_variable_is_not_set_over_a_file_that_a_bundle_owns() -> TestResult {
+    let tmp_built = tempfile::tempdir()?;
+    let file = bundle(tmp_built.path())?;
+
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    complete(root)?;
+
+    let output = detc(
+        root,
+        &[
+            "bundle",
+            "install",
+            file.to_str().unwrap(),
+            "--allow-unsigned",
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    // A bundle can no longer carry the tree that `detc var` writes, so the way
+    // to hold one of its drop-ins is to have installed the bundle before that
+    // was true.  The tmpfs clears it at the next boot, and until then the file
+    // is still a bundle's and still not a variable to set
+    let dropin = root.join("run/detc/variables/user.d/95-dns-domain.json");
+    fs::create_dir_all(dropin.parent().expect("the drop-in has a directory"))?;
+    fs::write(&dropin, "{\"dns\": {\"domain\": \"from-the-bundle\"}}\n")?;
+
+    let listing = root.join("run/detc/bundle.files");
+    let owned = format!(
+        "{}run/detc/variables/user.d/95-dns-domain.json\n",
+        fs::read_to_string(&listing)?
+    );
+    fs::write(&listing, &owned)?;
+
+    for arguments in [
+        vec!["var", "-k", "dns.domain", "-v", "\"mine\""],
+        vec!["var", "--persist", "-k", "dns.domain", "-v", "\"mine\""],
+        vec!["var", "--unset", "-k", "dns.domain"],
+    ] {
+        let output = detc(root, &arguments);
+        assert!(!output.status.success(), "{arguments:?}");
+        assert!(
+            stderr(&output).contains("belongs to the bundle fleet 1"),
+            "{arguments:?}: {}",
+            stderr(&output)
+        );
+
+        // Nothing was written, nothing was taken away, and the value the
+        // bundle put there is the one the namespace still answers with
+        assert_eq!(
+            fs::read_to_string(&dropin)?,
+            "{\"dns\": {\"domain\": \"from-the-bundle\"}}\n"
+        );
+        assert!(
+            !root
+                .join("etc/detc/variables/user.d/90-dns-domain.json")
+                .exists()
+        );
+        assert_eq!(
+            stdout(&detc(root, &["var", "-k", "dns.domain"])),
+            "from-the-bundle\n"
+        );
+    }
+
+    // A dry run says the same thing, rather than naming a write it cannot do
+    let output = detc(
+        root,
+        &["--dry-run", "var", "-k", "dns.domain", "-v", "\"mine\""],
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("belongs to the bundle fleet 1"),
+        "{}",
+        stderr(&output)
+    );
+
+    // A key that the bundle does not carry is set the way it always was
+    let output = detc(root, &["var", "-k", "dns.search", "-v", "\"example\""]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        root.join("run/detc/variables/user.d/95-dns-search.json")
+            .is_file()
+    );
 
     Ok(())
 }

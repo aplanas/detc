@@ -1455,6 +1455,7 @@ mod tests {
                 signer: "fleet@example".to_string(),
                 origin: "https://dist.example/fleet.detc".to_string(),
                 persist: true,
+                installed: true,
             },
             Record::Line("error\tunit nginx".to_string()),
             Record::Text("key: value\n".to_string()),

@@ -1259,17 +1259,28 @@ fn bundle(out: &mut dyn Sink, root: &Path, command: &BundleCommands, dry_run: bo
             }
         }
 
-        // Nothing installed says nothing, the way listing an empty system does
-        BundleCommands::Status => match bundle::installed(root)? {
-            Some(what) => out.emit(Record::Bundle {
-                name: what.name,
-                version: what.version,
-                signer: what.signer,
-                origin: what.origin,
-                persist: what.persist,
-            }),
-            None => Ok(()),
-        },
+        // A bundle that was kept is reported even when nothing is installed,
+        // because that machine is not one that has no bundle: it is one that
+        // will have this one again at the next restore.  Knowing neither says
+        // nothing, the way listing an empty system does
+        BundleCommands::Status => {
+            let (bundle, installed) = match bundle::installed(root)? {
+                Some(what) => (Some(what), true),
+                None => (bundle::stored(root)?, false),
+            };
+
+            match bundle {
+                Some(what) => out.emit(Record::Bundle {
+                    name: what.name,
+                    version: what.version,
+                    signer: what.signer,
+                    origin: what.origin,
+                    persist: what.persist,
+                    installed,
+                }),
+                None => Ok(()),
+            }
+        }
 
         BundleCommands::Remove => match bundle::remove(root, dry_run)? {
             Some(outcome) => {
@@ -1627,32 +1638,23 @@ fn variables(out: &mut dyn Sink, root: &Path, request: &VarRequest, dry_run: boo
     // Setting a variable is the only thing besides `apply` that writes to the
     // system, so a dry run names the drop-ins instead of writing them.
     // Querying the namespace writes nothing and is left alone.
-    if dry_run && args.writes(file, probes, probe) {
+    if args.writes(file, probes, probe) {
         // What would be written, and the runtime drop-ins that persisting it
         // would take away with it
-        let mut dropins = Vec::new();
-        let mut cleared = Vec::new();
+        let (dropins, cleared) = affected(file, args, store, root)?;
 
-        if let Some(file) = file {
-            dropins.push(var::Variables::dropin_document_path(file, store, root)?);
-            cleared.push(var::Variables::dropin_document_path(
-                file,
-                var::Store::Runtime,
-                root,
-            )?);
-        }
-        for (key, _) in args.pairs()? {
-            dropins.push(var::Variables::dropin_path(key, store, root));
-            cleared.push(var::Variables::dropin_path(key, var::Store::Runtime, root));
-        }
-        for kv in &args.kv {
-            for key in var::Variables::kv_keys(kv)? {
-                dropins.push(var::Variables::dropin_path(&key, store, root));
-                cleared.push(var::Variables::dropin_path(&key, var::Store::Runtime, root));
-            }
+        // Before anything is written, and on a dry run as well, so that a run
+        // that says what it would do does not say something it cannot
+        refuse_bundled(root, &dropins)?;
+        if persist {
+            refuse_bundled(root, &cleared)?;
         }
 
-        for dropin in dropins {
+        if !dry_run {
+            return set_variables(root, file, args, store);
+        }
+
+        for dropin in &dropins {
             let action = if dropin.exists() { "update" } else { "create" };
             out.emit(Record::Change {
                 action: action.to_string(),
@@ -1687,34 +1689,115 @@ fn variables(out: &mut dyn Sink, root: &Path, request: &VarRequest, dry_run: boo
         let path = resolve_probe(probe, root)?;
         let text = var::Variables::from_probe(path, root)?.to_yaml()?;
         out.emit(Record::Text(text))?;
-    } else if let Some(file) = file {
-        var::Variables::from_system(root)?.merge_file_and_store(
-            file,
-            store,
-            root,
-            var::DEFAULT_MERGE,
-        )?;
-    } else if !args.key.is_empty() && args.value.is_empty() {
-        // Keys without values query the namespace
+    } else if !args.key.is_empty() {
+        // Keys without values query the namespace.  Keys with them wrote above,
+        // which is what `writes` said and this no longer has to agree with
         let var = var::Variables::from_system(root)?;
         for key in &args.key {
             out.emit(Record::Text(var.get_yaml(key)?))?;
         }
-    } else if !args.key.is_empty() || !args.kv.is_empty() {
-        // The overrides are written one by one, so the namespace of the system
-        // does not need to be collected to write them
-        let mut var = var::Variables::new();
-
-        for (key, value) in args.pairs()? {
-            var.set_json_and_store(key, value, store, root)?;
-        }
-
-        for kv in &args.kv {
-            var.set_kv_and_store(kv, store, root)?;
-        }
     } else {
         let text = var::Variables::from_system(root)?.to_yaml()?;
         out.emit(Record::Text(text))?;
+    }
+
+    Ok(())
+}
+
+/// Write what a request sets, once every drop-in it touches is known to be the
+/// administrator's.
+///
+/// A whole document replaces the store it lands in, and keys are written one by
+/// one so that the namespace of the system does not have to be collected to
+/// write them.
+fn set_variables(
+    root: &Path,
+    file: Option<&Path>,
+    args: &VarArgs,
+    store: var::Store,
+) -> Result<()> {
+    if let Some(file) = file {
+        return var::Variables::from_system(root)?.merge_file_and_store(
+            file,
+            store,
+            root,
+            var::DEFAULT_MERGE,
+        );
+    }
+
+    let mut var = var::Variables::new();
+
+    for (key, value) in args.pairs()? {
+        var.set_json_and_store(key, value, store, root)?;
+    }
+
+    for kv in &args.kv {
+        var.set_kv_and_store(kv, store, root)?;
+    }
+
+    Ok(())
+}
+
+/// The drop-ins that a request to set variables would write, and the runtime
+/// ones that persisting it would take away with it.
+///
+/// Both are worked out before anything happens, so that the run that names them
+/// and the run that writes them cannot disagree about which files are involved.
+fn affected(
+    file: Option<&Path>,
+    args: &VarArgs,
+    store: var::Store,
+    root: &Path,
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+    let mut dropins = Vec::new();
+    let mut cleared = Vec::new();
+
+    if let Some(file) = file {
+        dropins.push(var::Variables::dropin_document_path(file, store, root)?);
+        cleared.push(var::Variables::dropin_document_path(
+            file,
+            var::Store::Runtime,
+            root,
+        )?);
+    }
+
+    for (key, _) in args.pairs()? {
+        dropins.push(var::Variables::dropin_path(key, store, root));
+        cleared.push(var::Variables::dropin_path(key, var::Store::Runtime, root));
+    }
+
+    for kv in &args.kv {
+        for key in var::Variables::kv_keys(kv)? {
+            dropins.push(var::Variables::dropin_path(&key, store, root));
+            cleared.push(var::Variables::dropin_path(&key, var::Store::Runtime, root));
+        }
+    }
+
+    Ok((dropins, cleared))
+}
+
+/// Refuse any of `paths` that the installed bundle put there.
+///
+/// A bundle installs into `run`, which is where a variable that was not
+/// persisted is written, so the two can name the same file.  Nothing else that
+/// `detc` writes can, and the tree that made this reachable is no longer one a
+/// bundle can carry -- but a bundle installed before that was true is still on
+/// disk until the next boot, and a file that a bundle owns is not one that
+/// setting a variable may quietly replace or take away.
+fn refuse_bundled(root: &Path, paths: &[PathBuf]) -> Result<()> {
+    for path in paths {
+        let Ok(relative) = path.strip_prefix(root) else {
+            continue;
+        };
+
+        if let Some(what) = bundle::owner(root, relative)? {
+            return err!(
+                "{} belongs to the bundle {} {}, and is not a variable of this system to set: take the bundle away with `detc bundle remove`, or set a key that it does not carry",
+                path.display(),
+                what.name,
+                what.version
+            );
+        }
     }
 
     Ok(())
@@ -1741,6 +1824,19 @@ fn unset_variables(out: &mut dyn Sink, root: &Path, args: &VarArgs, dry_run: boo
     if !args.value.is_empty() || !args.kv.is_empty() {
         return err!("Taking a variable away needs the key alone, and no value");
     }
+
+    // Every key is asked about before any of them is taken away, so that a
+    // command naming one that a bundle owns leaves the system as it found it
+    // rather than half undone
+    let paths: Vec<PathBuf> = args
+        .key
+        .iter()
+        .flat_map(|key| {
+            [var::Store::Runtime, var::Store::Persisted]
+                .map(|store| var::Variables::dropin_path(key, store, root))
+        })
+        .collect();
+    refuse_bundled(root, &paths)?;
 
     for key in &args.key {
         for store in [var::Store::Runtime, var::Store::Persisted] {

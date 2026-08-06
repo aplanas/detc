@@ -326,7 +326,14 @@ or to the standard output for
 .IR \- .
 .I KEY
 is an SSH private key, and a bundle without one can only be installed by a
-machine that was told to accept that.
+machine that was told to accept that.  A source tree that holds
+.I variables/user.d
+is refused, because that is where
+.B detc var
+writes: ship those documents as
+.I variables/system.d
+instead, which still wins over the distribution and still loses to whatever the
+administrator sets.
 .TP
 .B verify \fIBUNDLE\fR
 Check a bundle and everything it carries, without installing it.
@@ -360,10 +367,22 @@ Install a bundle that carries no signature.
 Install the kept copy again, which is what a machine does after a reboot.
 .TP
 .B status
-Show the bundle that is installed.
+Show the bundle the machine knows, and nothing when it knows none.  The last
+field says whether it comes back after a reboot:
+.B transient
+for one that will not,
+.B persistent
+for one that a copy was kept of, and
+.B kept
+for the copy alone, which is the machine that has rebooted and has not been
+restored yet.
 .TP
 .B remove
-Take away the installed bundle, and the copy that was kept of it.
+Take away the installed bundle, and the copy that was kept of it.  A bundle in
+the
+.B kept
+state is taken away as well, which is how a machine whose restore keeps failing
+stops arming it again at every boot.
 .
 .SS detc report [ID]
 Show what a previous run did, out of the journal.
@@ -504,7 +523,10 @@ range, and the
 of the one above puts that after this, so that a variable set now answers until
 the boot that gives this one back.
 .B "detc var \-\-unset"
-takes both away, and nothing else in either directory.
+takes both away, and nothing else in either directory.  Both directories are the
+administrator's alone: a bundle cannot carry
+.IR variables/user.d ,
+and a variable is not set over a file that the installed bundle owns.
 .TP
 .IR /etc/detc/allowed_signers ", " /usr/share/detc/allowed_signers
 Who may sign a bundle this machine will install, in the format of

@@ -903,6 +903,15 @@ because that is a fact about the drop-in and not about the node -- which also
 means a map whose keys are numbers is read by name but is set with a whole
 document, through `detc var <file>`.
 
+Both stores are the administrator's alone.  A bundle cannot carry
+`variables/user.d/`, so nothing a bundle installs lands on what was typed here.
+The rule is enforced from both ends: a write, a persist or an `--unset` that
+would touch a file the installed bundle owns is refused, naming the bundle and
+saying to take it away with `detc bundle remove`, instead of quietly unlinking
+something that arrived with the bundle.  Nothing is written until every path the
+command would touch has been checked, so a command naming several keys is never
+half done.
+
 ### `detc bundle`
 
 Build, check and install a tree of objects, see [Bundles](#bundles).
@@ -913,7 +922,7 @@ Build, check and install a tree of objects, see [Bundles](#bundles).
 | `verify <file\|-\|url>` | Check that a bundle can be trusted and that everything it carries can be installed |
 | `install <file\|-\|url>` | Install it, taking away the one before it.  `--persist`, `--apply`, `--allow-unsigned` |
 | `restore` | Install again the copy that `--persist` kept |
-| `status` | The bundle that is installed, and nothing when there is none |
+| `status` | The bundle the machine knows, and nothing when it knows none |
 | `remove` | Take it away, and the copy that was kept of it |
 
 ```console
@@ -922,6 +931,14 @@ installed  bundle fleet 3  12 written, 0 removed
 $ detc bundle status
 fleet  3  fleet@example  local  persistent
 ```
+
+The last word is `transient` for a bundle that a reboot takes away, `persistent`
+for one that a copy was kept of, and `kept` for a machine that holds the copy and
+not the content — which is every persistent node between the reboot and the
+restore.  `kept` is not *no bundle*: this one comes back at the next `apply`.
+`remove` works there too, and takes away the copy, which is the only way to stop
+a bundle whose restore keeps failing — a signing key that was withdrawn, say —
+from re-arming itself at every boot.
 
 ### `detc report [id]`
 
@@ -1306,7 +1323,7 @@ executables in one place, plus a `bundle.yaml` that names it:
 ```
 fleet/
 ├── bundle.yaml               name: fleet, version: "3"
-├── variables/system.d/…      variables/user.d/…
+├── variables/system.d/…
 ├── templates.d/…
 ├── resources.d/…
 ├── probes/system.d/…
@@ -1321,6 +1338,14 @@ derived from its name and never declared.  A 0 byte file masks, as everywhere
 else, so a bundle can suppress a default without shipping a replacement.  Two
 builds of the same tree produce the same bytes, which is what lets a mirror be
 checked against what was built.
+
+`variables/user.d/` is the one tree of the system that a bundle cannot carry,
+and `create` refuses rather than leaving it out.  It is where `detc var` writes,
+in the same prefix a bundle installs into, so a bundle that reached it would
+overwrite a variable somebody set — and the next install would put its own back.
+Ship it as `variables/system.d/` instead, which still wins over the distribution
+because of the prefix it lands in, and still loses to whatever the administrator
+sets.
 
 The file itself has two members, so nothing has to be hashed and `tar tf` still
 says what you have:

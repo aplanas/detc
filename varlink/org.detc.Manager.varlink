@@ -82,15 +82,21 @@ type RunDetail (
   lines: []string
 )
 
-# The bundle that is installed in the system: what it calls itself, who signed
-# it, where it was taken from, and whether a copy of it was kept for the next
-# boot.  The signer is `unsigned` when the bundle carried no signature.
+# The bundle that the system knows: what it calls itself, who signed it, where
+# it was taken from, whether a copy of it was kept for the next boot, and
+# whether what it holds is in the system now.  The signer is `unsigned` when the
+# bundle carried no signature.
+#
+# The last two are not the same question.  The copy outlives the tmpfs that the
+# content lives in, so a machine between the reboot and the restore answers with
+# `persist` and without `installed`, and holds none of what the bundle carries.
 type Bundle (
   name: string,
   version: string,
   signer: string,
   origin: string,
-  persist: bool
+  persist: bool,
+  installed: bool
 )
 
 # A variable, and the value it takes.  The value is written in the YAML syntax,
@@ -168,7 +174,9 @@ method GetFailures(id: ?int) -> (line: ?string)
 # that answers fetches itself.  Exactly one of the two.  Streaming.
 method VerifyBundle(bundle: ?string, url: ?string) -> (check: ?Verdict)
 
-# The bundle that is installed, and nothing when there is none.  Streaming.
+# The bundle that is installed, or the one that was kept when a reboot has taken
+# the installed one away and nothing has restored it yet, and nothing when the
+# machine knows neither.  Streaming.
 method GetBundle() -> (bundle: ?Bundle)
 
 # Bring the system to the state that its objects declare, one object or all of

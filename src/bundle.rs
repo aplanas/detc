@@ -29,7 +29,6 @@
 //! payload.tar
 //! ├── bundle.yaml               the name and the version, authored
 //! ├── variables/system.d/…      →  run/detc/…                     0644
-//! ├── variables/user.d/…        →  run/detc/…                     0644
 //! ├── templates.d/…             →  run/detc/…                     0644
 //! ├── resources.d/…             →  run/detc/…                     0644
 //! ├── probes/system.d/…         →  run/lib/detc/…                 0755
@@ -41,6 +40,11 @@
 //! else is data.  The names that are accepted are the names that the system
 //! looks for, taken from the modules that look for them, so a tree that can be
 //! shipped is a tree that will be read.
+//!
+//! All of them but `variables/user.d`, which is where `detc var` writes.  It is
+//! the one name that a bundle and a command would both install into the same
+//! prefix under, and a bundle that reached it could take away a variable that
+//! somebody set — so it is refused, and a bundle ships `variables/system.d`.
 //!
 //! Everything lands under `run`, which [`var::PROBE_PREFIXES`] describes as the
 //! slot of *whatever is injected during the first boot*: below the admin, who
@@ -294,8 +298,14 @@ pub fn restore(root: &Path, dry_run: bool) -> Result<Outcome> {
 ///
 /// Nothing installed is nothing to do, which is what lets this be called
 /// without asking first.
+///
+/// A bundle that was kept but is not installed is still taken away, because
+/// that is the machine between the reboot that emptied the tmpfs and the
+/// restore that fills it again -- and the machine whose restore keeps failing,
+/// which is the one that most needs to be able to say no to it.  There is
+/// nothing to unlink there, so what is removed is the copy alone.
 pub fn remove(root: &Path, dry_run: bool) -> Result<Option<Outcome>> {
-    let Some(bundle) = installed(root)? else {
+    let Some(bundle) = installed(root)?.or(stored(root)?) else {
         return Ok(None);
     };
 
@@ -337,14 +347,38 @@ pub fn needs_restore(root: &Path) -> bool {
     root.join(STORED_FILE).is_file() && !root.join(data_path(MANIFEST)).is_file()
 }
 
+/// The bundle that installed `path`, when the installed one claims it.
+///
+/// `path` is relative to the root, the way the list of what was installed holds
+/// it.  A path that no bundle could have written is answered without reading
+/// anything, so asking about a file in `etc` costs nothing: that is the
+/// administrator's prefix and a bundle never reaches it.
+///
+/// This is what lets a command that writes refuse a path that is not its own.
+/// The list is the only record there is, and it goes away with the tmpfs it
+/// describes, so a stale answer is not something that can be reached from here.
+pub fn owner(root: &Path, path: &Path) -> Result<Option<Bundle>> {
+    if !ours(path) || !recorded(root)?.contains(path) {
+        return Ok(None);
+    }
+
+    installed(root)
+}
+
 /// The trees that a payload can carry, and whether what is in them is code.
 ///
 /// These are the names that the system searches for, taken from the modules
 /// that search for them, so a tree that is looked up somewhere is a tree that a
 /// bundle can ship, and the two cannot drift apart.
+///
+/// All of them but [`var::USER_VARIABLES_NAME`], which is the admin's and is
+/// where `detc var` writes.  It is the one place where the paths a bundle
+/// installs and the paths a command writes would be the same, and a bundle that
+/// reached it could take away a variable that somebody set.
 fn trees() -> Vec<(String, bool)> {
     let mut trees: Vec<(String, bool)> = var::VARIABLE_NAMES
         .iter()
+        .filter(|name| **name != var::USER_VARIABLES_NAME)
         .chain([&template::TEMPLATES_NAME, &resource::RESOURCES_NAME])
         .map(|name| (tree(name), false))
         .collect();
@@ -401,20 +435,48 @@ fn place(name: &str) -> Result<(PathBuf, u32)> {
         }
     }
 
+    if let Some(reason) = refused(name) {
+        return err!("{reason}");
+    }
+
     err!(
         "A bundle cannot hold {name}, because it is not one of the trees that a bundle carries: {}",
         places()
     )
 }
 
+/// Why a name is refused outright, rather than simply not being one of the
+/// trees that a bundle carries.
+///
+/// The difference is that this one *is* a tree of the system, so a file left in
+/// it is a document that somebody wrote and meant to ship.  Leaving it out with
+/// a warning that a default log level does not print would build a bundle that
+/// is quietly missing it, which is why building stops here instead.
+fn refused(name: &str) -> Option<String> {
+    let user = tree(var::USER_VARIABLES_NAME);
+
+    (name == user || name.starts_with(&format!("{user}.d/"))).then(|| {
+        format!(
+            "A bundle cannot hold {name}, because {user}.d is where `detc var` writes and is the administrator's.  Ship it as {}.d instead, which still wins over the distribution and still loses to whatever the administrator sets",
+            tree(var::VARIABLE_NAMES[0])
+        )
+    })
+}
+
 /// Whether anything under a directory could be part of a payload.
 ///
 /// Creating a bundle asks this before walking, so that a `.git` is stepped over
 /// instead of walked to report every object in it.
+///
+/// The one tree that [`trees`] leaves out is walked into all the same, so that
+/// [`place`] refuses each file in it by name and whoever built the tree is told
+/// why.  Pruning the directory here would leave them a debug line instead.
 fn reachable(dir: &str) -> bool {
     trees()
-        .iter()
-        .any(|(tree, _)| tree.starts_with(dir) || dir.starts_with(&format!("{tree}.")))
+        .into_iter()
+        .map(|(tree, _)| tree)
+        .chain([tree(var::USER_VARIABLES_NAME)])
+        .any(|tree| tree.starts_with(dir) || dir.starts_with(&format!("{tree}.")))
 }
 
 /// Where a file of a bundle lands, relative to the root.
@@ -482,6 +544,12 @@ fn collect(dir: &Path, entries: &mut Vec<tar::Entry>) -> Result<()> {
                 );
             }
         } else if entry.file_type().is_file() {
+            // A tree of the system that a bundle may not carry stops the build,
+            // where a file that is simply in the wrong place is left behind
+            if let Some(reason) = refused(&name) {
+                return err!("{reason}");
+            }
+
             match place(&name) {
                 Ok((_, mode)) => entries.push(tar::Entry::new(name, mode, fs::read(entry.path())?)),
                 Err(e) => warn!("{e}"),
@@ -906,6 +974,71 @@ mod tests {
     }
 
     #[test]
+    fn what_a_bundle_installed_says_so_and_nothing_else_does() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let (tree, root) = (tmp.path().join("tree"), tmp.path().join("root"));
+        source(&tree)?;
+
+        let installed_path = Path::new("run/detc/variables/system.d/10-ssh.yaml");
+
+        // Nothing is installed, so nothing is claimed
+        assert_eq!(owner(&root, installed_path)?, None);
+
+        let file = create(&tree, None)?.1;
+        install(&root, &file, LOCAL_ORIGIN, false, true, false)?;
+
+        let what = owner(&root, installed_path)?.expect("the bundle claims it");
+        assert_eq!(what.name, "fleet");
+        assert_eq!(what.version, "1");
+
+        // A path in the prefix that a bundle installs into, that this one did
+        // not write, and a path in the prefix that no bundle can reach
+        assert_eq!(owner(&root, Path::new("run/detc/templates.d/etc/x"))?, None);
+        assert_eq!(
+            owner(&root, Path::new("etc/detc/variables/user.d/90-a.json"))?,
+            None
+        );
+
+        remove(&root, false)?;
+        assert_eq!(owner(&root, installed_path)?, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn a_bundle_that_was_kept_can_be_taken_away_before_it_is_restored() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let (tree, root) = (tmp.path().join("tree"), tmp.path().join("root"));
+        source(&tree)?;
+
+        let file = create(&tree, None)?.1;
+        install(&root, &file, LOCAL_ORIGIN, true, true, false)?;
+
+        // The reboot, which takes the content and leaves the copy
+        fs::remove_dir_all(root.join("run"))?;
+        assert_eq!(installed(&root)?, None);
+        assert!(needs_restore(&root));
+
+        // There is nothing left to unlink, so what is taken away is the copy,
+        // and taking it away is what stops the next boot bringing it back.
+        // Without this the machine whose restore keeps failing -- a key that
+        // was withdrawn -- has no way to say no to it
+        let outcome = remove(&root, true)?.expect("the copy is still a bundle");
+        assert_eq!(outcome.bundle.name, "fleet");
+        assert_eq!(outcome.removed, 0);
+        assert!(needs_restore(&root));
+
+        let outcome = remove(&root, false)?.expect("the copy is still a bundle");
+        assert_eq!(outcome.removed, 0);
+        assert_eq!(stored(&root)?, None);
+        assert!(!needs_restore(&root));
+
+        assert_eq!(remove(&root, false)?, None);
+
+        Ok(())
+    }
+
+    #[test]
     fn what_a_bundle_cannot_carry_is_refused_before_anything_is_written() -> Result<()> {
         let tmp = tempfile::tempdir()?;
         let root = tmp.path();
@@ -1084,16 +1217,46 @@ mod tests {
     fn a_bundle_carries_what_the_system_looks_for() {
         let names: Vec<(String, bool)> = trees();
 
+        // Every tree the system searches but the one that `detc var` writes
         assert_eq!(
             names,
             [
                 ("variables/system".to_string(), false),
-                ("variables/user".to_string(), false),
                 ("templates".to_string(), false),
                 ("resources".to_string(), false),
                 ("probes/system".to_string(), true),
                 ("providers".to_string(), true),
             ]
+        );
+
+        // And it is walked into all the same, so that whoever put a document
+        // there is told why it is not shipping rather than left to notice
+        assert!(reachable("variables/user.d"));
+    }
+
+    #[test]
+    fn the_variables_of_the_administrator_are_not_a_bundle_to_carry() {
+        // The tree that `detc var` writes into `run`, which is the one prefix a
+        // bundle also installs into: a bundle that reached it could take away a
+        // variable that somebody set, and the next install would put it back
+        for name in [
+            "variables/user",
+            "variables/user.d/95-dns-domain.json",
+            "variables/user.d/50-fleet.yaml",
+        ] {
+            let error = place(name)
+                .expect_err("the administrator's tree")
+                .to_string();
+
+            assert!(error.contains("is where `detc var` writes"), "{error}");
+            assert!(error.contains("variables/system.d instead"), "{error}");
+        }
+
+        // The tree beside it is what a bundle ships variables as, and it still
+        // wins over the distribution because of the prefix it lands in
+        assert_eq!(
+            place("variables/system.d/95-dns-domain.json").unwrap().0,
+            PathBuf::from("run/detc/variables/system.d/95-dns-domain.json")
         );
     }
 

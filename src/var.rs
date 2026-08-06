@@ -21,10 +21,16 @@ pub const PROBE_PREFIXES: &[&str] = &["usr/libexec", "run/lib", "var/lib"];
 /// and populates the subtree of the namespace named after it.
 pub const PROBE_CATEGORIES: &[&str] = &["system"];
 
+/// Name of the variable document that the admin owns, which is the one that
+/// `detc var` writes and the one tree of the namespace that a bundle cannot
+/// carry: the two would be writing the same paths, and whoever set a variable
+/// last would be undone by the next install.
+pub const USER_VARIABLES_NAME: &str = "detc/variables/user";
+
 /// Names of the variable documents, from the lowest to the highest priority.
 /// The system variables are the ones shipped by the distribution, and the user
 /// ones are provided or persisted by the admin, so they win.
-pub const VARIABLE_NAMES: &[&str] = &["detc/variables/system", "detc/variables/user"];
+pub const VARIABLE_NAMES: &[&str] = &["detc/variables/system", USER_VARIABLES_NAME];
 
 /// Extensions that are stripped from the name of a document, so that one can be
 /// called `nginx.yaml` and still be addressed as `nginx`.

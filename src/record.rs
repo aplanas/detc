@@ -67,14 +67,19 @@ pub(crate) enum Record {
     Probe { mount: String, path: String },
 
     /// The bundle that is installed in the system: what it calls itself, who
-    /// signed it, where it was taken from, and whether a copy of it was kept
-    /// for the next boot.
+    /// signed it, where it was taken from, whether a copy of it was kept for
+    /// the next boot, and whether what it holds is in the system now.
+    ///
+    /// The last two are not the same question.  A copy that was kept outlives
+    /// the tmpfs that the content lives in, so between the reboot and the
+    /// restore there is a bundle that the machine knows and does not hold.
     Bundle {
         name: String,
         version: String,
         signer: String,
         origin: String,
         persist: bool,
+        installed: bool,
     },
 
     /// A run of `apply`, as the journal lists it.
@@ -148,12 +153,16 @@ impl Record {
                 signer,
                 origin,
                 persist,
+                installed,
             } => {
                 // Whether it comes back after a reboot is what a fleet asks
-                // about a machine, so it is part of the line and not a flag
-                let kept = match persist {
-                    true => "persistent",
-                    false => "transient",
+                // about a machine, so it is part of the line and not a flag.
+                // One word for the three states there are, as a bundle that is
+                // not installed was always one that a copy was kept of
+                let kept = match (installed, persist) {
+                    (false, _) => "kept",
+                    (true, true) => "persistent",
+                    (true, false) => "transient",
                 };
 
                 format!("{name}\t{version}\t{signer}\t{origin}\t{kept}")
@@ -314,22 +323,30 @@ mod tests {
 
     #[test]
     fn a_bundle_says_what_it_is_and_where_it_came_from() {
-        let bundle = |persist| Record::Bundle {
+        let bundle = |persist, installed| Record::Bundle {
             name: "fleet".to_string(),
             version: "3".to_string(),
             signer: "fleet@example".to_string(),
             origin: "https://dist.example/fleet.detc".to_string(),
             persist,
+            installed,
         };
 
         assert_eq!(
-            bundle(true).line(),
+            bundle(true, true).line(),
             "fleet\t3\tfleet@example\thttps://dist.example/fleet.detc\tpersistent"
         );
 
         assert_eq!(
-            bundle(false).line(),
+            bundle(false, true).line(),
             "fleet\t3\tfleet@example\thttps://dist.example/fleet.detc\ttransient"
+        );
+
+        // The copy is there and the content is not, which is the machine that
+        // has rebooted and not restored yet
+        assert_eq!(
+            bundle(true, false).line(),
+            "fleet\t3\tfleet@example\thttps://dist.example/fleet.detc\tkept"
         );
     }
 
