@@ -59,6 +59,12 @@ const USER_DROPIN_ORDER: &str = "90";
 /// rather than kept under the same name in another prefix.
 const RUNTIME_DROPIN_ORDER: &str = "95";
 
+/// What [`Variables::source_of`] answers for a key that the namespace holds and
+/// no document sets, which leaves the probes as the only thing that can have
+/// reported it.  A probe is not addressed by a path the way a document is, and
+/// finding out which one would mean running them again one at a time.
+pub const PROBED: &str = "a probe";
+
 /// Where a variable set from the command line is written.
 ///
 /// Setting a variable is a runtime override by default: it lands in `run`,
@@ -748,6 +754,61 @@ impl Variables {
         // The name carries the order of the store that wrote it, so the copy
         // that persisting replaces is the one the runtime store would name
         Self::clear_runtime(store, Self::dropin_name(key, Store::Runtime), root.as_ref())
+    }
+
+    /// Take away the drop-in that `store` keeps the override of a dotted key
+    /// in, and answer with it when there was one.
+    ///
+    /// A key that the store never held is not a failure: the same command has
+    /// to answer for a fleet where only some of the machines were ever told the
+    /// variable, and a removal that finds nothing has already arrived where it
+    /// was going.  Only the drop-ins that `detc var` writes are reachable this
+    /// way — the name is derived from the key, so a document that the admin
+    /// wrote is never behind it.
+    pub fn unset_key(key: &str, store: Store, root: impl AsRef<Path>) -> Result<Option<PathBuf>> {
+        let path = Self::dropin_path(key, store, root);
+
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                debug!("Removed the variable override {}", path.display());
+                Ok(Some(path))
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => err!("Failed to remove {}: {e}", path.display()),
+        }
+    }
+
+    /// What answers for a dotted key, when anything does: the document that
+    /// sets it, or [`PROBED`] for a value that the machine reports about
+    /// itself.
+    ///
+    /// Taking a drop-in away uncovers whatever was under it rather than
+    /// removing a variable, so this is what tells the two apart afterwards.
+    /// The whole namespace is collected, probes and all, because "is it still
+    /// set" has no other honest answer — and a probe is then named as one,
+    /// since no document holds the value and none can be pointed at.
+    pub fn source_of(key: &str, root: impl AsRef<Path>) -> Result<Option<String>> {
+        let root = root.as_ref();
+
+        if Self::from_system(root)?.get_value(key).is_err() {
+            return Ok(None);
+        }
+
+        // The documents come back in merge order, so the last one that sets the
+        // key is the one that won it.  A null takes the key away instead of
+        // setting it, which is why the value and not the presence is looked at
+        let source = Documents::from_system(root)?
+            .documents()
+            .iter()
+            .rfind(|document| {
+                Self::from_file(document.source())
+                    .ok()
+                    .and_then(|var| var.get_value(key).ok().map(|value| !value.is_null()))
+                    .unwrap_or(false)
+            })
+            .map(|document| document.source().display().to_string());
+
+        Ok(Some(source.unwrap_or_else(|| PROBED.to_string())))
     }
 
     /// Set the value addressed by a dotted key, and write it as the user
@@ -1491,6 +1552,78 @@ mod tests {
             Variables::from_system(root)?.get_yaml("ntp.server")?.trim(),
             "b"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_a_variable_is_taken_away_from_both_stores() -> TestResult {
+        let tmp_root = tempfile::tempdir()?;
+        let root = tmp_root.path();
+
+        let documents = root.join("usr/share/detc/variables/system.d");
+        fs::create_dir_all(&documents)?;
+        fs::write(documents.join("10-core.yaml"), "ntp:\n  server: shipped\n")?;
+
+        Variables::new().set_json_and_store("ntp.server", "a", Store::Persisted, root)?;
+        Variables::new().set_json_and_store("ntp.server", "b", Store::Runtime, root)?;
+
+        // Each store answers for its own copy, and the key is in both
+        for store in [Store::Runtime, Store::Persisted] {
+            let taken = Variables::unset_key("ntp.server", store, root)?;
+            assert_eq!(
+                taken,
+                Some(Variables::dropin_path("ntp.server", store, root))
+            );
+        }
+
+        // A store that no longer holds it says so instead of failing, so the
+        // same call can be made twice, or on a machine that never had it
+        assert_eq!(
+            Variables::unset_key("ntp.server", Store::Runtime, root)?,
+            None
+        );
+
+        // What is left is what was under the drop-ins all along
+        assert_eq!(
+            Variables::from_system(root)?.get_yaml("ntp.server")?.trim(),
+            "shipped"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_what_answers_for_a_key_is_the_document_that_won_it() -> TestResult {
+        let tmp_root = tempfile::tempdir()?;
+        let root = tmp_root.path();
+
+        let documents = root.join("usr/share/detc/variables/system.d");
+        fs::create_dir_all(&documents)?;
+        fs::write(
+            documents.join("10-core.yaml"),
+            "ntp:\n  server: shipped\ndns:\n  domain: lan\n",
+        )?;
+
+        // A key that nothing sets is not in the namespace at all
+        assert_eq!(Variables::source_of("nothing.here", root)?, None);
+
+        let core = documents.join("10-core.yaml").display().to_string();
+        assert_eq!(Variables::source_of("ntp.server", root)?, Some(core));
+
+        // Of two documents that set it, the later one is the one that answers
+        let user = root.join("etc/detc/variables/user.d");
+        fs::create_dir_all(&user)?;
+        fs::write(user.join("50-ntp.yaml"), "ntp:\n  server: local\n")?;
+        assert_eq!(
+            Variables::source_of("ntp.server", root)?,
+            Some(user.join("50-ntp.yaml").display().to_string())
+        );
+
+        // A null takes the key away rather than setting it, so a document that
+        // holds one is not the document that answers -- there is none to answer
+        fs::write(user.join("60-dns.yaml"), "dns:\n  domain: null\n")?;
+        assert_eq!(Variables::source_of("dns.domain", root)?, None);
 
         Ok(())
     }

@@ -186,6 +186,16 @@ method Apply(
 # be written and the ones that would be taken away.  Streaming.
 method SetVariables(var: Var, persist: bool, dry_run: bool) -> (change: ?Change)
 
+# Take away the drop-ins that `SetVariables` wrote for the given keys, the
+# persisted ones as well as the ones that last until the next boot.  Only those
+# are reached: a document that somebody wrote, or that a bundle installed, is
+# never taken away here, so a key can still be set afterwards -- which is what
+# the `remains` action reports, with the file that now answers for it, or `a
+# probe` when the machine is the one reporting the value.  A key that no drop-in
+# holds is not a failure.  With `dry_run`, name the drop-ins that would be taken
+# away.  Streaming.
+method UnsetVariables(key: []string, dry_run: bool) -> (change: ?Change)
+
 # Merge a document of variables into the namespace and keep it, until the next
 # boot or, with `persist`, for good.  The file is read on the machine that
 # answers.  Streaming.

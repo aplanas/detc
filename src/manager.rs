@@ -73,6 +73,7 @@ pub(crate) const METHODS: &[Method] = &[
     method("GetBundle", "bundle", true, false),
     method("Apply", "change", true, true),
     method("SetVariables", "change", true, true),
+    method("UnsetVariables", "change", true, true),
     method("MergeDocument", "change", true, true),
     method("InstallBundle", "change", true, true),
     method("RemoveBundle", "change", true, true),
@@ -227,6 +228,17 @@ struct SetParams {
 
     #[serde(default)]
     persist: bool,
+
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// `UnsetVariables`.  The keys alone, as there is no value to take away and no
+/// store to choose: both of them are cleared.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct UnsetParams {
+    #[serde(default)]
+    key: Vec<String>,
 
     #[serde(default)]
     dry_run: bool,
@@ -465,6 +477,18 @@ pub(crate) fn call(command: &Commands, dry_run: bool) -> Result<(&'static Method
             varlink::parameters(&ProbeParams { probe: name(probe) })?,
         ),
 
+        // Before the arms that write, as taking a variable away carries neither
+        // a value nor a store and would otherwise read as a plain query
+        Commands::Var {
+            var, unset: true, ..
+        } => (
+            "UnsetVariables",
+            varlink::parameters(&UnsetParams {
+                key: var.key.clone(),
+                dry_run,
+            })?,
+        ),
+
         Commands::Var {
             file: Some(file),
             persist,
@@ -625,6 +649,7 @@ pub(crate) fn command(method: &Method, parameters: Option<Value>) -> Result<(Com
                 file: None,
                 var: VarArgs::default(),
                 persist: false,
+                unset: false,
                 probes: true,
                 probe: None,
             },
@@ -639,6 +664,7 @@ pub(crate) fn command(method: &Method, parameters: Option<Value>) -> Result<(Com
                     file: None,
                     var: VarArgs::default(),
                     persist: false,
+                    unset: false,
                     probes: false,
                     probe: Some(PathBuf::from(params.probe)),
                 },
@@ -657,6 +683,7 @@ pub(crate) fn command(method: &Method, parameters: Option<Value>) -> Result<(Com
                         ..VarArgs::default()
                     },
                     persist: false,
+                    unset: false,
                     probes: false,
                     probe: None,
                 },
@@ -672,6 +699,26 @@ pub(crate) fn command(method: &Method, parameters: Option<Value>) -> Result<(Com
                     file: None,
                     var: params.var.into(),
                     persist: params.persist,
+                    unset: false,
+                    probes: false,
+                    probe: None,
+                },
+                params.dry_run,
+            )
+        }
+
+        "UnsetVariables" => {
+            let params: UnsetParams = varlink::take(parameters)?;
+
+            (
+                Commands::Var {
+                    file: None,
+                    var: VarArgs {
+                        key: params.key,
+                        ..VarArgs::default()
+                    },
+                    persist: false,
+                    unset: true,
                     probes: false,
                     probe: None,
                 },
@@ -687,6 +734,7 @@ pub(crate) fn command(method: &Method, parameters: Option<Value>) -> Result<(Com
                     file: Some(PathBuf::from(params.file)),
                     var: VarArgs::default(),
                     persist: params.persist,
+                    unset: false,
                     probes: false,
                     probe: None,
                 },
@@ -885,6 +933,7 @@ mod tests {
             "GetRun" | "GetFailures" => varlink::parameters(&RunParams::default()),
             "Apply" => varlink::parameters(&ApplyParams::default()),
             "SetVariables" => varlink::parameters(&SetParams::default()),
+            "UnsetVariables" => varlink::parameters(&UnsetParams::default()),
             "MergeDocument" => varlink::parameters(&MergeParams::default()),
             "VerifyBundle" => varlink::parameters(&VerifyParams::default()),
             "GetBundle" => Ok(json!({})),
@@ -1040,6 +1089,7 @@ mod tests {
                     file: None,
                     var: var(&[], &[], &[]),
                     persist: false,
+                    unset: false,
                     probes: true,
                     probe: None,
                 },
@@ -1050,6 +1100,7 @@ mod tests {
                     file: None,
                     var: var(&[], &[], &[]),
                     persist: false,
+                    unset: false,
                     probes: false,
                     probe: Some(PathBuf::from("hostname")),
                 },
@@ -1060,6 +1111,7 @@ mod tests {
                     file: Some(PathBuf::from("data.yaml")),
                     var: var(&[], &[], &[]),
                     persist: false,
+                    unset: false,
                     probes: false,
                     probe: None,
                 },
@@ -1070,6 +1122,7 @@ mod tests {
                     file: None,
                     var: var(&["a"], &["1"], &[]),
                     persist: false,
+                    unset: false,
                     probes: false,
                     probe: None,
                 },
@@ -1080,6 +1133,7 @@ mod tests {
                     file: None,
                     var: var(&[], &[], &["a=1"]),
                     persist: false,
+                    unset: false,
                     probes: false,
                     probe: None,
                 },
@@ -1090,6 +1144,18 @@ mod tests {
                     file: None,
                     var: var(&["a"], &[], &[]),
                     persist: false,
+                    unset: true,
+                    probes: false,
+                    probe: None,
+                },
+                "UnsetVariables",
+            ),
+            (
+                Commands::Var {
+                    file: None,
+                    var: var(&["a"], &[], &[]),
+                    persist: false,
+                    unset: false,
                     probes: false,
                     probe: None,
                 },
@@ -1100,6 +1166,7 @@ mod tests {
                     file: None,
                     var: var(&[], &[], &[]),
                     persist: false,
+                    unset: false,
                     probes: false,
                     probe: None,
                 },
@@ -1333,6 +1400,7 @@ mod tests {
                 kv: Vec::new(),
             },
             persist: false,
+            unset: false,
             probes: false,
             probe: None,
         };

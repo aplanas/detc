@@ -487,6 +487,131 @@ fn test_var_queries_and_persists() -> TestResult {
     Ok(())
 }
 
+/// `--unset` undoes what `detc var` wrote, and says what is left once it has.
+///
+/// Both stores are cleared and not the one that a flag names, because a
+/// variable that was persisted and then set again lives in two files at once.
+/// And a drop-in taken away uncovers what was under it rather than removing a
+/// variable, which is the half of this that a plain `rm` cannot report.
+#[test]
+fn test_a_variable_that_was_set_is_taken_away_again() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    let key = "ssh.conf.permit_root_login";
+    let runtime = root.join("run/detc/variables/user.d/95-ssh-conf-permit_root_login.json");
+    let persisted = root.join("etc/detc/variables/user.d/90-ssh-conf-permit_root_login.json");
+
+    // Persisted first and then set again, so that the variable is in both
+    // stores and taking away either one on its own would leave it set
+    assert!(
+        detc(root, &["var", "--persist", "-k", key, "-v", "yes"])
+            .status
+            .success()
+    );
+    assert!(
+        detc(root, &["var", "-k", key, "-v", "prohibit"])
+            .status
+            .success()
+    );
+    assert!(runtime.is_file() && persisted.is_file());
+
+    // A dry run names both of them and unlinks neither
+    let output = detc(root, &["--dry-run", "var", "--unset", "-k", key]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "remove\tvariable\t{}\nremove\tvariable\t{}\n",
+            runtime.display(),
+            persisted.display()
+        )
+    );
+    assert!(runtime.is_file() && persisted.is_file());
+
+    // The real run takes both away, and reports the document that answers now
+    let output = detc(root, &["var", "--unset", "-k", key]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "remove\tvariable\t{}\nremove\tvariable\t{}\nremains\tvariable {key}\t{}\n",
+            runtime.display(),
+            persisted.display(),
+            root.join("usr/share/detc/variables/system.d/10-ssh.yaml")
+                .display()
+        )
+    );
+    assert!(!runtime.exists() && !persisted.exists());
+
+    // Which is the value the document had all along
+    assert_eq!(stdout(&detc(root, &["var", "-k", key])), "no\n");
+
+    // Nothing left to take away is not a failure, and says nothing either: the
+    // same command has to answer for a fleet where only some of the machines
+    // were ever told the variable
+    let output = detc(root, &["var", "--unset", "-k", "not.set.anywhere"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+
+    // A key that only `detc var` ever set leaves the namespace with it
+    assert!(
+        detc(root, &["var", "-k", "ntp.server", "-v", "pool.ntp.org"])
+            .status
+            .success()
+    );
+    let output = detc(root, &["var", "--unset", "-k", "ntp.server"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!stdout(&output).contains("remains"), "{output:?}");
+    assert!(!detc(root, &["var", "-k", "ntp.server"]).status.success());
+
+    // A value that a probe reports is named as one, since no document holds it
+    // and taking a drop-in away cannot reach the machine describing itself
+    assert!(
+        detc(root, &["var", "-k", "system.network.ip", "-v", "10.0.0.9"])
+            .status
+            .success()
+    );
+    let output = detc(root, &["var", "--unset", "-k", "system.network.ip"]);
+    assert!(
+        stdout(&output).contains("remains\tvariable system.network.ip\ta probe"),
+        "{output:?}"
+    );
+    assert_eq!(
+        stdout(&detc(root, &["var", "-k", "system.network.ip"])),
+        "10.0.0.1\n"
+    );
+
+    Ok(())
+}
+
+/// Taking a variable away is the key alone: there is no value to take away, no
+/// store to choose, and no document to merge.
+#[test]
+fn test_taking_a_variable_away_refuses_what_it_cannot_mean() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    for arguments in [
+        vec!["var", "--unset"],
+        vec!["var", "--unset", "-k", "a", "-v", "1"],
+        vec!["var", "--unset", "-k", "a", "--kv", "a: 1"],
+        vec!["var", "--unset", "-k", "a", "--persist"],
+        vec!["var", "--unset", "-k", "a", "--probes"],
+    ] {
+        let output = detc(root, &arguments);
+        assert!(!output.status.success(), "{arguments:?} {output:?}");
+    }
+
+    // And nothing of the sort was written on the way to refusing
+    assert!(!root.join("run/detc/variables/user.d").exists());
+    assert!(!root.join("etc/detc/variables/user.d").exists());
+
+    Ok(())
+}
+
 /// An element of a list cannot be set on its own, and the command that
 /// persists refuses it like the ones that only render.
 ///

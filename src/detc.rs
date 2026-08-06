@@ -229,6 +229,11 @@ pub(crate) enum Commands {
         #[arg(long)]
         persist: bool,
 
+        /// Take away the drop-ins that were written for the given keys, in
+        /// both stores, instead of setting anything
+        #[arg(long, requires = "key", conflicts_with_all = ["file", "value", "kv", "persist", "probes", "probe"])]
+        unset: bool,
+
         /// List the available probes
         #[arg(long)]
         probes: bool,
@@ -1574,7 +1579,7 @@ fn report(
 
 /// What `var` was asked for.
 ///
-/// The subcommand is five things told apart by which of these is set, and they
+/// The subcommand is six things told apart by which of these is set, and they
 /// travel together rather than as a row of flags, so that a caller cannot pair
 /// the wrong two.
 struct VarRequest<'a> {
@@ -1586,6 +1591,9 @@ struct VarRequest<'a> {
 
     /// Whether what is set survives a reboot.  See [`var::Store`].
     persist: bool,
+
+    /// Take the keys away rather than set them.
+    unset: bool,
 
     /// List the probes rather than the variables.
     probes: bool,
@@ -1605,9 +1613,14 @@ fn variables(out: &mut dyn Sink, root: &Path, request: &VarRequest, dry_run: boo
         file,
         args,
         persist,
+        unset,
         probes,
         probe,
     } = *request;
+
+    if unset {
+        return unset_variables(out, root, args, dry_run);
+    }
 
     let store = var::Store::of(persist);
 
@@ -1707,6 +1720,66 @@ fn variables(out: &mut dyn Sink, root: &Path, request: &VarRequest, dry_run: boo
     Ok(())
 }
 
+/// Take away the drop-ins that `detc var` wrote for the given keys.
+///
+/// Both stores are cleared, and not the one that `--persist` would have named,
+/// because unsetting is undoing what was typed rather than choosing a store to
+/// undo it in: a variable that was persisted and then set again lives in two
+/// files, and taking away either of them on its own leaves it set.
+///
+/// Only the drop-ins named after the key are reachable, so nothing that the
+/// admin wrote by hand and nothing that a bundle installed is ever unlinked
+/// here.  Which is also why a key can still be set once its drop-ins are gone,
+/// and why that is reported rather than left to be discovered.
+fn unset_variables(out: &mut dyn Sink, root: &Path, args: &VarArgs, dry_run: bool) -> Result<()> {
+    // Both are refused by the command line, and a call that arrives over the
+    // socket has neither, so this is what keeps the two from disagreeing
+    if args.key.is_empty() {
+        return err!("Which variables to take away is given with -k");
+    }
+
+    if !args.value.is_empty() || !args.kv.is_empty() {
+        return err!("Taking a variable away needs the key alone, and no value");
+    }
+
+    for key in &args.key {
+        for store in [var::Store::Runtime, var::Store::Persisted] {
+            let path = var::Variables::dropin_path(key, store, root);
+
+            let removed = match dry_run {
+                true => path.is_file(),
+                false => var::Variables::unset_key(key, store, root)?.is_some(),
+            };
+
+            if removed {
+                out.emit(Record::Change {
+                    action: "remove".to_string(),
+                    object: "variable".to_string(),
+                    summary: Some(path.display().to_string()),
+                    error: None,
+                })?;
+            }
+        }
+
+        // A drop-in taken away uncovers whatever was under it, so the key can
+        // still be set, and by something no drop-in of `detc var` can reach.  A
+        // dry run has removed nothing, so the question it would be asking is
+        // not the one that matters.  A namespace that cannot be collected -- a
+        // probe that fails -- is no reason to report a removal that did happen
+        // as a failure, so what cannot be worked out is left unsaid
+        if !dry_run && let Ok(Some(source)) = var::Variables::source_of(key, root) {
+            out.emit(Record::Change {
+                action: "remains".to_string(),
+                object: format!("variable {key}"),
+                summary: Some(source),
+                error: None,
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Set up the logger.  Nothing is reported by default, as the tool is expected
 /// to be used in a pipeline, and the messages go to the standard error.
 pub(crate) fn init_logger(debug: u8) {
@@ -1749,6 +1822,7 @@ pub(crate) fn dispatch(
             file,
             var,
             persist,
+            unset,
             probes,
             probe,
         } => variables(
@@ -1758,6 +1832,7 @@ pub(crate) fn dispatch(
                 file: file.as_deref(),
                 args: var,
                 persist: *persist,
+                unset: *unset,
                 probes: *probes,
                 probe: probe.as_deref(),
             },

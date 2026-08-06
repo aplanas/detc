@@ -291,6 +291,19 @@ Write what is set to
 instead, where a reboot cannot reach it, and take away the runtime drop-in that
 it replaces.
 .TP
+.B \-\-unset
+Take away the drop-ins written for the keys given with
+.BR \-k ,
+in both directories at once, instead of setting anything.  Only the drop-ins
+named after the key are reached, so a document written by hand and a document a
+bundle installed are left alone; a key that no drop-in holds is not a failure.
+Taking a drop-in away uncovers whatever was under it, so what still answers for
+the key is reported as
+.BR remains ,
+with the file it comes from or
+.B "a probe"
+for a value that the machine reports about itself.
+.TP
 .B \-\-probes
 List the probes.
 .TP
@@ -490,6 +503,8 @@ range, and the
 .I 95\-
 of the one above puts that after this, so that a variable set now answers until
 the boot that gives this one back.
+.B "detc var \-\-unset"
+takes both away, and nothing else in either directory.
 .TP
 .IR /etc/detc/allowed_signers ", " /usr/share/detc/allowed_signers
 Who may sign a bundle this machine will install, in the format of

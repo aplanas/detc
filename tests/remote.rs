@@ -188,6 +188,37 @@ fn test_a_remote_run_changes_the_system_it_reaches() -> TestResult {
         "PermitRootLogin=prohibit\n"
     );
 
+    // Taking it away crosses as well, which is the whole reason for the method:
+    // a fleet that can be told a variable and not untold it is a fleet that has
+    // to be reached by hand to undo one
+    let output = detctl(
+        root,
+        "",
+        &["var", "--unset", "-k", "ssh.conf.permit_root_login"],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "remove\tvariable\t{}\nremains\tvariable ssh.conf.permit_root_login\t{}\n",
+            root.join("etc/detc/variables/user.d/90-ssh-conf-permit_root_login.json")
+                .display(),
+            root.join("usr/share/detc/variables/system.d/10-ssh.yaml")
+                .display()
+        )
+    );
+
+    assert!(
+        !root
+            .join("etc/detc/variables/user.d")
+            .join("90-ssh-conf-permit_root_login.json")
+            .exists()
+    );
+    assert_eq!(
+        stdout(&detc(root, &["var", "-k", "ssh.conf.permit_root_login"])),
+        "no\n"
+    );
+
     Ok(())
 }
 

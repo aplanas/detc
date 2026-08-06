@@ -874,6 +874,26 @@ either store, and because a drop-in is identified by its name across every
 prefix the persisted one is the one that is read.  Writing the runtime one that
 it would mask is refused rather than left behind for nothing to look at.
 
+`--unset` takes a variable back, from both stores at once — a value that was
+persisted and then set again lives in two files, and taking away either on its
+own would leave it set:
+
+```console
+$ detc var --unset -k dns.domain
+remove   variable          /run/detc/variables/user.d/95-dns-domain.json
+remove   variable          /etc/detc/variables/user.d/90-dns-domain.json
+remains  variable dns.domain  /usr/share/detc/variables/system.d/10-core.yaml
+```
+
+Only the drop-ins named after the key are reached, so a document written by hand
+and a document a bundle installed are never unlinked.  Which is why the last
+line is there: taking a drop-in away uncovers whatever was under it rather than
+removing a variable, so `--unset` says what answers for the key afterwards — the
+file, or `a probe` for a value the machine reports about itself.  No line at all
+means nothing sets it any more.  A key that no drop-in holds is not a failure,
+so the same command can be sent to a fleet where only some of the nodes were
+ever told the variable.
+
 A value that is not a valid JSON document is taken as a plain string, so `-v
 yes` does not need to be quoted.  Only a whole list can be set: the drop-in that
 carries one element would have to carry the rest of the list to say where the

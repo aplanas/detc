@@ -167,8 +167,19 @@ A document that carries its own `NN-` prefix keeps that name in either store, so
 cannot tell its copies apart.  Writing one to `run` while `etc` holds the same name is refused
 rather than silently ignored; persist it, or take the persisted one away.
 
+`detc var --unset -k <key>` takes the drop-ins for that key away, from both stores at once — a
+value that was persisted and then set again lives in two files, and taking away either alone
+would leave it set.  Only the drop-ins named after the key are reached, so a document you shipped
+and a document written by hand are never unlinked; a document copied in under its own name is not
+reached either, and has to be removed by hand.  A key that no drop-in holds is not a failure.
+
+Because taking a drop-in away uncovers whatever was under it rather than removing a variable,
+`--unset` then says what answers for the key — the file, or `a probe` when the machine is the one
+reporting it — as a `remains` line, and says nothing when nothing sets it any more.
+
 `detc --dry-run var -k … -v …` prints the drop-in it would write, and the runtime one it would
-take away, and writes nothing.
+take away, and writes nothing; `detc --dry-run var --unset -k …` names the drop-ins it would take
+away.
 
 Those two directories are the node's, not yours.  Nothing you ship belongs in either.
 
