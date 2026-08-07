@@ -156,6 +156,24 @@ impl Templates {
         })
     }
 
+    /// The templates that a zero byte file takes out of the ladder, as pairs
+    /// of the path they would instantiate and the file that masks them.
+    ///
+    /// This is the complement of [`Self::from_system`], and it answers the one
+    /// question that resolver cannot: a masked template is not a template, so
+    /// it comes back as a name and nothing else.
+    pub fn masked(root: impl AsRef<Path>) -> Result<Vec<(String, PathBuf)>> {
+        let root = root.as_ref();
+
+        Ok(cfs::UAPICFS::with_root(TEMPLATES_NAME, root)
+            .recursive(true)
+            .masked()?
+            .into_iter()
+            .filter(|(target, _)| !target.as_os_str().is_empty())
+            .map(|(target, mask)| (root.join(target).display().to_string(), mask))
+            .collect())
+    }
+
     /// Get the resolved templates.
     pub fn templates(&self) -> &[Template] {
         &self.templates

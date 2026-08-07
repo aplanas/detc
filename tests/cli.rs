@@ -861,8 +861,9 @@ fn test_an_object_that_is_taken_away_uncovers_what_was_under_it() -> TestResult 
 
     // Now the object is gone: nothing lists it, nothing renders it, and there
     // was no `remains` line, because nothing remains.  Which is also to say
-    // that the mask cannot be addressed to be taken away again -- undoing one
-    // is unlinking the zero byte file that the run above named
+    // that `detc remove` cannot address it a second time, since the resolver
+    // reads the zero byte file as the object being absent -- `detc unmask` is
+    // the one command that reaches it
     assert_eq!(
         stdout(&detc(root, &["list", "--type", "template"]))
             .matches(name)
@@ -871,6 +872,402 @@ fn test_an_object_that_is_taken_away_uncovers_what_was_under_it() -> TestResult 
     );
     assert!(!detc(root, &["cat", name]).status.success());
     assert!(!detc(root, &["remove", name, "--mask"]).status.success());
+
+    Ok(())
+}
+
+/// A mask is put back by the name that would address the object, and what was
+/// under it answers for the name again.
+#[test]
+fn test_a_mask_is_put_back_by_the_name_that_lists_it() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    let name = "/etc/ssh/sshd_config.d/root.conf";
+    let shipped = root.join("usr/share/detc/templates.d/etc/ssh/sshd_config.d/root.conf");
+    let mask = root.join("etc/detc/templates.d/etc/ssh/sshd_config.d/root.conf");
+
+    // A template is listed by the file it instantiates, under the root, and
+    // that is the name a mask of one comes back under too
+    let listed = root.join("etc/ssh/sshd_config.d/root.conf");
+
+    let output = detc(root, &["remove", name, "--mask"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(fs::read(&mask)?, b"");
+
+    // The masked object is in no other listing, which is the whole reason
+    // `--masked` exists: the name is not reachable any other way
+    assert_eq!(stdout(&detc(root, &["list"])).matches(name).count(), 0);
+    assert_eq!(
+        stdout(&detc(root, &["list", "--masked"])),
+        format!("template\t{}\t{}\n", listed.display(), mask.display())
+    );
+
+    // A dry run names the mask it would unlink, and unlinks nothing.  It says
+    // nothing about what is under it, because that is a question about the
+    // ladder without the mask in it
+    let output = detc(root, &["--dry-run", "unmask", name]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!("unmask\ttemplate\t{}\n", mask.display())
+    );
+    assert_eq!(fs::read(&mask)?, b"");
+
+    // The real run reports the file that answers for the name once the mask is
+    // gone, the same way a removal reports what it uncovers
+    let output = detc(root, &["unmask", name]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "unmask\ttemplate\t{}\nremains\ttemplate {}\t{}\n",
+            mask.display(),
+            listed.display(),
+            shipped.display()
+        )
+    );
+    assert!(!mask.exists());
+
+    // And the object is back, rendering what it always rendered
+    assert_eq!(stdout(&detc(root, &["list", "--masked"])), "");
+    assert_eq!(stdout(&detc(root, &["cat", name])), "PermitRootLogin=no\n");
+
+    Ok(())
+}
+
+/// Every type of mask is put back by the name that `detc list --masked` prints,
+/// and by the path of the zero byte file itself.
+///
+/// This is the counterpart of the removal that wrote them, on the same two
+/// ladders: a probe and a provider are programs, so the prefix that masks one
+/// is `var/lib` and not `etc`.
+#[test]
+fn test_every_type_of_mask_is_put_back_by_the_name_that_lists_it() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    for (kind, name, source, mask) in [
+        (
+            "probe",
+            "system",
+            "usr/libexec/detc/probes/system.d/10-net",
+            "var/lib/detc/probes/system.d/10-net",
+        ),
+        (
+            "provider",
+            "pkg",
+            "usr/libexec/detc/providers.d/pkg",
+            "var/lib/detc/providers.d/pkg",
+        ),
+        (
+            "resource",
+            "pkg/nginx",
+            "usr/share/detc/resources.d/pkg/nginx.yaml",
+            "etc/detc/resources.d/pkg/nginx.yaml",
+        ),
+        (
+            "variable",
+            "system/10-ssh",
+            "usr/share/detc/variables/system.d/10-ssh.yaml",
+            "etc/detc/variables/system.d/10-ssh.yaml",
+        ),
+    ] {
+        let (source, mask) = (root.join(source), root.join(mask));
+
+        let output = detc(root, &["remove", name, "--mask"]);
+        assert!(
+            output.status.success(),
+            "{kind} {name}: {}",
+            stderr(&output)
+        );
+        assert_eq!(fs::read(&mask)?, b"", "{kind} {name}");
+
+        assert_eq!(
+            stdout(&detc(root, &["list", "--masked", "--type", kind])),
+            format!("{kind}\t{name}\t{}\n", mask.display()),
+            "{kind} {name}"
+        );
+
+        // The name that lists it, and then the mask itself, which is what a
+        // run of `detc remove --mask` printed and so what an administrator has
+        // in front of them
+        let output = detc(root, &["unmask", name]);
+        assert!(
+            output.status.success(),
+            "{kind} {name}: {}",
+            stderr(&output)
+        );
+        assert_eq!(
+            stdout(&output),
+            format!(
+                "unmask\t{kind}\t{}\nremains\t{kind} {name}\t{}\n",
+                mask.display(),
+                source.display()
+            ),
+            "{kind} {name}"
+        );
+
+        let output = detc(root, &["remove", name, "--mask"]);
+        assert!(
+            output.status.success(),
+            "{kind} {name}: {}",
+            stderr(&output)
+        );
+
+        let output = detc(root, &["unmask", &mask.to_string_lossy()]);
+        assert!(
+            output.status.success(),
+            "{kind} {name}: {}",
+            stderr(&output)
+        );
+        assert!(!mask.exists(), "{kind} {name}");
+    }
+
+    // A template is the fifth, and is left out of the table because the file it
+    // instantiates is the name, so the two columns above would be the same
+    let name = "/etc/ssh/sshd_config.d/root.conf";
+    let output = detc(root, &["remove", name, "--mask"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let output = detc(root, &["unmask", "--type", "template", name]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&detc(root, &["list", "--masked"])), "");
+
+    Ok(())
+}
+
+/// Putting a mask back does not always uncover something, and both ways of
+/// uncovering nothing are said out loud.
+#[test]
+fn test_a_mask_that_uncovers_nothing_says_so() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    // A mask written where no file was ever installed masks nothing at all.
+    // Nothing refuses it, since the resolver cannot tell that key from the one
+    // whose file went away under it
+    let name = root.join("etc/nowhere.conf");
+    let stale = root.join("etc/detc/templates.d/etc/nowhere.conf");
+    fs::create_dir_all(stale.parent().expect("the mask has a directory"))?;
+    fs::write(&stale, "")?;
+
+    let output = detc(root, &["unmask", &name.to_string_lossy()]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "unmask\ttemplate\t{}\nabsent\ttemplate {}\tthe mask covered no file\n",
+            stale.display(),
+            name.display()
+        )
+    );
+
+    // Two masks stacked: taking the top one away uncovers the one below, which
+    // is still a mask, so the object does not come back yet
+    let name = "/etc/ssh/sshd_config.d/root.conf";
+    let key = "detc/templates.d/etc/ssh/sshd_config.d/root.conf";
+    let (injected, mine) = (root.join("run").join(key), root.join("etc").join(key));
+
+    for mask in [&injected, &mine] {
+        fs::create_dir_all(mask.parent().expect("the mask has a directory"))?;
+        fs::write(mask, "")?;
+    }
+
+    let output = detc(root, &["unmask", name]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "unmask\ttemplate\t{}\nmasked\ttemplate {}\t{}\n",
+            mine.display(),
+            root.join("etc/ssh/sshd_config.d/root.conf").display(),
+            injected.display()
+        )
+    );
+    assert!(!detc(root, &["cat", name]).status.success());
+
+    // And the second one uncovers the file the distribution ships
+    let output = detc(root, &["unmask", name]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("remains\ttemplate"),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(stdout(&detc(root, &["cat", name])), "PermitRootLogin=no\n");
+
+    Ok(())
+}
+
+/// A mask that must not be unlinked, and a command that names several masks is
+/// turned down whole.
+#[test]
+fn test_a_mask_that_cannot_be_put_back() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    // A name that no mask answers for, with and without a type
+    let output = detc(root, &["unmask", "nothing/at-all"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("There is no masked template, resource, probe"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("detc list --masked"),
+        "{}",
+        stderr(&output)
+    );
+
+    let output = detc(root, &["unmask", "--type", "provider", "pkg"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("There is no masked provider pkg"),
+        "{}",
+        stderr(&output)
+    );
+
+    // What the distribution ships is not detc's to unlink, and there is no
+    // second answer to offer, because a mask cannot itself be masked
+    let shipped = root.join("usr/share/detc/templates.d/etc/nowhere.conf");
+    fs::write(&shipped, "")?;
+
+    let output = detc(root, &["unmask", &shipped.to_string_lossy()]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("the distribution installs"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("a mask cannot itself be masked"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(shipped.is_file());
+
+    // One mount point can address two probes, and then it does not say which
+    // mask was meant
+    program(
+        &root.join("usr/libexec/detc/probes/system.d/20-more"),
+        "echo '{}'\n",
+    )?;
+    for probe in ["10-net", "20-more"] {
+        let output = detc(root, &["remove", probe, "--mask"]);
+        assert!(output.status.success(), "{probe}: {}", stderr(&output));
+    }
+
+    let output = detc(root, &["unmask", "system"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("system addresses 2 masks, so it does not say which one"),
+        "{}",
+        stderr(&output)
+    );
+
+    // Named one at a time it is not ambiguous, and a command that names a good
+    // mask beside a bad name is turned down whole
+    let output = detc(root, &["unmask", "20-more", "nothing/at-all"]);
+    assert!(!output.status.success());
+    assert!(
+        root.join("var/lib/detc/probes/system.d/20-more").is_file(),
+        "the good mask was unlinked before the bad name was refused"
+    );
+
+    let output = detc(root, &["unmask", "20-more", "10-net"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&detc(root, &["list", "--masked", "--type", "probe"])),
+        ""
+    );
+
+    // The distribution's is the one mask still standing, because nothing here
+    // can take it away
+    assert_eq!(
+        stdout(&detc(root, &["list", "--masked", "--type", "template"])),
+        format!(
+            "template\t{}\t{}\n",
+            root.join("etc/nowhere.conf").display(),
+            shipped.display()
+        )
+    );
+
+    Ok(())
+}
+
+/// A mask that a bundle carries is not detc's to unlink either.
+#[test]
+fn test_a_mask_that_a_bundle_owns_is_not_unlinked() -> TestResult {
+    let tmp_built = tempfile::tempdir()?;
+    let built = tmp_built.path();
+
+    // The bundle carries a zero byte file where the distribution ships a
+    // template, which is how a bundle takes something out of the ladder
+    let tree = built.join("fleet");
+    source_tree(built, &tree)?;
+    fs::write(tree.join("templates.d/etc/ssh/sshd_config.d/root.conf"), "")?;
+
+    let file = built.join("fleet.detc");
+    let output = detc(
+        built,
+        &[
+            "bundle",
+            "create",
+            &tree.to_string_lossy(),
+            "-o",
+            &file.to_string_lossy(),
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    let output = detc(
+        root,
+        &[
+            "bundle",
+            "install",
+            file.to_str().unwrap(),
+            "--allow-unsigned",
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let name = "/etc/ssh/sshd_config.d/root.conf";
+    let owned = root.join("run/detc/templates.d/etc/ssh/sshd_config.d/root.conf");
+    assert_eq!(fs::read(&owned)?, b"");
+    assert_eq!(
+        stdout(&detc(root, &["list", "--masked", "--type", "template"])),
+        format!(
+            "template\t{}\t{}\n",
+            root.join("etc/ssh/sshd_config.d/root.conf").display(),
+            owned.display()
+        )
+    );
+
+    // Unlinking it would last until the next restore or the next boot, which is
+    // not what anybody meant by putting the object back
+    let output = detc(root, &["unmask", name]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("belongs to the bundle fleet 1"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("detc bundle remove"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(owned.is_file());
 
     Ok(())
 }

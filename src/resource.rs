@@ -261,6 +261,25 @@ impl Resources {
         Ok(Self { resources })
     }
 
+    /// The resources that a zero byte file takes out of the ladder, as pairs
+    /// of the identifier they would be declared under and the file that masks
+    /// them.
+    ///
+    /// A mask whose key says no type is passed over rather than reported: it
+    /// declares nothing, so there is no resource for it to be masking, and
+    /// [`Self::from_system`] would have refused the file it sits on anyway.
+    pub fn masked(root: impl AsRef<Path>) -> Result<Vec<(String, PathBuf)>> {
+        Ok(cfs::UAPICFS::with_root(RESOURCES_NAME, root.as_ref())
+            .recursive(true)
+            .masked()?
+            .into_iter()
+            .filter_map(|(key, mask)| {
+                let (kind, name) = split_id(&key)?;
+                Some((format!("{kind}/{name}"), mask))
+            })
+            .collect())
+    }
+
     /// The resources, ordered by type and name.
     pub fn resources(&self) -> &[Resource] {
         &self.resources

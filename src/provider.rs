@@ -497,6 +497,22 @@ impl Providers {
         Ok(Self { providers })
     }
 
+    /// The providers that a zero byte file takes out of the ladder, as pairs
+    /// of the type they would implement and the file that masks them.
+    ///
+    /// Nothing is checked for the exec bit here, unlike in
+    /// [`Self::from_system`]: a mask is a zero byte file and is never
+    /// executable, and it masks the program under it all the same.
+    pub fn masked(root: impl AsRef<Path>) -> Result<Vec<(String, PathBuf)>> {
+        Ok(cfs::UAPICFS::with_root(PROVIDERS_NAME, root.as_ref())
+            .prefixes(PROVIDER_PREFIXES)
+            .masked()?
+            .into_iter()
+            .filter(|(kind, _)| !kind.as_os_str().is_empty())
+            .map(|(kind, mask)| (kind.to_string_lossy().into_owned(), mask))
+            .collect())
+    }
+
     /// The providers, ordered by the type that they implement.
     pub fn providers(&self) -> impl Iterator<Item = &Provider> {
         self.providers.values()

@@ -82,6 +82,8 @@ Three consequences you have to design for:
   `templates.d/etc/motd` in `usr/share`.  It does not merge with it, it replaces it.
 - **An empty file masks.**  A zero-length file at the same path in a higher prefix removes
   the entry entirely.  That is how a node turns off something the distribution shipped.
+  `detc remove --mask` writes one and `detc unmask` takes it away again; while it is there
+  the entry is in no listing, so `detc list --masked` is the only place the name shows up.
 - **You are writing for the lowest prefix.**  Anything the core set ships is meant to be
   overridden — by a bundle in `run`, by a document in `etc`, by `--set` on the command line.
   Never write an asset that assumes it is the last word.

@@ -60,6 +60,14 @@ pub fn rung(root: &Path, path: &Path, prefixes: &[&str]) -> Option<(usize, PathB
         })
 }
 
+/// A file found in the ladder: where it is, and whether it is a zero byte file
+/// that takes its key out rather than contributing to it.
+#[derive(Debug)]
+struct Found {
+    path: PathBuf,
+    masked: bool,
+}
+
 /// Maximum drop-in directory depth traversed in recursive mode.  Links are
 /// followed, and a loop among them is recognised as one and left alone, so this
 /// bounds how deep a tree of real directories is read and nothing else.
@@ -128,6 +136,26 @@ impl UAPICFS {
     /// relative to `<name>.d`, which is the identity used to override and mask
     /// entries across prefixes.
     pub fn entries(&self) -> Result<Vec<(PathBuf, PathBuf)>> {
+        self.resolve(false)
+    }
+
+    /// The keys of the ladder that a zero byte file takes out, paired with the
+    /// file that does it.
+    ///
+    /// This is the complement of [`Self::entries`]: between them the two
+    /// account for every key that the ladder holds, and no key is in both.  The
+    /// main file has the empty key, exactly as it does there.
+    ///
+    /// A mask is only reported when it is the file that wins its key, so a
+    /// zero byte file in `run` that a real file in `etc` overrides masks
+    /// nothing and is not named here.
+    pub fn masked(&self) -> Result<Vec<(PathBuf, PathBuf)>> {
+        self.resolve(true)
+    }
+
+    /// Walk the ladder and answer with the file that wins every key, keeping
+    /// the keys that a zero byte file takes out or the ones it leaves.
+    fn resolve(&self, masked: bool) -> Result<Vec<(PathBuf, PathBuf)>> {
         let mut main_file = None;
         let mut dropins = BTreeMap::new();
 
@@ -136,11 +164,10 @@ impl UAPICFS {
             if let Ok(metadata) = fs::metadata(&path)
                 && metadata.is_file()
             {
-                main_file = if metadata.len() == 0 {
-                    None
-                } else {
-                    Some(path.clone())
-                };
+                main_file = Some(Found {
+                    path: path.clone(),
+                    masked: metadata.len() == 0,
+                });
             }
 
             let dropin_dir = path.with_added_extension("d");
@@ -148,28 +175,31 @@ impl UAPICFS {
         }
 
         let mut result = Vec::with_capacity(1 + dropins.len());
-        if let Some(main) = main_file {
-            result.push((PathBuf::new(), main));
-        }
+        result.extend(
+            main_file
+                .filter(|main| main.masked == masked)
+                .map(|main| (PathBuf::new(), main.path)),
+        );
         result.extend(
             dropins
                 .into_iter()
-                .filter_map(|(key, path)| Some((key, path?))),
+                .filter(|(_, found)| found.masked == masked)
+                .map(|(key, found)| (key, found.path)),
         );
         Ok(result)
     }
 
     /// Collect the regular files of `dir`, keyed by their path relative to it.
     ///
-    /// A masked entry (an empty file) is reported as `None`, so that the caller
-    /// can apply it over the entries collected from the previous prefixes.
-    /// Subdirectories are only descended into when the recursive mode is
-    /// enabled.
+    /// A masked entry (an empty file) is kept, marked as such, so that the
+    /// caller can apply it over the entries collected from the previous
+    /// prefixes and still say which file did the masking.  Subdirectories are
+    /// only descended into when the recursive mode is enabled.
     ///
     /// A directory that cannot be read is passed over rather than reported: a
     /// prefix that is not there at all is the ordinary case, and one that is
     /// unreadable says the same thing to a tool that only reads.
-    fn collect(&self, dir: &Path) -> BTreeMap<PathBuf, Option<PathBuf>> {
+    fn collect(&self, dir: &Path) -> BTreeMap<PathBuf, Found> {
         WalkDir::new(dir)
             .max_depth(if self.recursive { MAX_DEPTH } else { 1 })
             // What a link points at, so that a drop-in kept somewhere else and
@@ -180,8 +210,11 @@ impl UAPICFS {
             .filter(|entry| entry.file_type().is_file())
             .filter_map(|entry| {
                 let key = entry.path().strip_prefix(dir).ok()?.to_path_buf();
-                let masked = entry.metadata().ok()?.len() == 0;
-                Some((key, (!masked).then(|| entry.path().to_path_buf())))
+                let found = Found {
+                    path: entry.path().to_path_buf(),
+                    masked: entry.metadata().ok()?.len() == 0,
+                };
+                Some((key, found))
             })
             .collect()
     }
@@ -426,5 +459,59 @@ mod tests {
             rung(root, Path::new("/sysroot/opt/detc/x"), SEARCH_PREFIXES),
             None
         );
+    }
+
+    #[test]
+    fn test_the_keys_that_a_zero_byte_file_takes_out() -> Result<()> {
+        let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let root = tmp.path();
+
+        let write = |path: &str, content: &str| -> std::io::Result<()> {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().expect("a file has a parent"))?;
+            fs::write(&path, content)
+        };
+
+        // Masked by the prefix above it
+        write("usr/share/app.d/10-off.conf", "shipped")?;
+        write("etc/app.d/10-off.conf", "")?;
+
+        // A zero byte file that a real file above it overrides masks nothing
+        write("run/app.d/20-back.conf", "")?;
+        write("etc/app.d/20-back.conf", "restored")?;
+
+        // Nothing under it: the mask covers no file at all
+        write("etc/app.d/30-stale.conf", "")?;
+
+        // And the main file, which is masked the same way
+        write("usr/share/app", "shipped")?;
+        write("etc/app", "")?;
+
+        let cfs = UAPICFS::with_root("app", root);
+
+        // The two account for every key of the ladder, and no key is in both
+        assert_eq!(
+            cfs.masked()?,
+            vec![
+                (PathBuf::new(), root.join("etc/app")),
+                (
+                    PathBuf::from("10-off.conf"),
+                    root.join("etc/app.d/10-off.conf")
+                ),
+                (
+                    PathBuf::from("30-stale.conf"),
+                    root.join("etc/app.d/30-stale.conf")
+                ),
+            ]
+        );
+        assert_eq!(
+            cfs.entries()?,
+            vec![(
+                PathBuf::from("20-back.conf"),
+                root.join("etc/app.d/20-back.conf")
+            )]
+        );
+
+        Ok(())
     }
 }

@@ -73,6 +73,7 @@ pub(crate) const METHODS: &[Method] = &[
     method("GetBundle", "bundle", true, false),
     method("Apply", "change", true, true),
     method("Remove", "change", true, true),
+    method("Unmask", "change", true, true),
     method("SetVariables", "change", true, true),
     method("UnsetVariables", "change", true, true),
     method("MergeDocument", "change", true, true),
@@ -146,6 +147,9 @@ impl From<Var> for VarArgs {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ListParams {
     #[serde(default)]
+    masked: bool,
+
+    #[serde(default)]
     r#type: Option<Type>,
 }
 
@@ -192,6 +196,18 @@ struct RemoveObjectParams {
 
     #[serde(default)]
     purge: bool,
+
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// `Unmask`.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct UnmaskParams {
+    names: Vec<String>,
+
+    #[serde(default)]
+    r#type: Option<Type>,
 
     #[serde(default)]
     dry_run: bool,
@@ -430,9 +446,12 @@ pub(crate) fn call(command: &Commands, dry_run: bool) -> Result<(&'static Method
 
     let (method, parameters) = match command {
         Commands::List { types: true, .. } => ("ListTypes", json!({})),
-        Commands::List { r#type, .. } => (
+        Commands::List { masked, r#type, .. } => (
             "List",
-            varlink::parameters(&ListParams { r#type: *r#type })?,
+            varlink::parameters(&ListParams {
+                masked: *masked,
+                r#type: *r#type,
+            })?,
         ),
 
         Commands::Cat {
@@ -462,6 +481,15 @@ pub(crate) fn call(command: &Commands, dry_run: bool) -> Result<(&'static Method
                 r#type: *r#type,
                 mask: *mask,
                 purge: *purge,
+                dry_run,
+            })?,
+        ),
+
+        Commands::Unmask { object, r#type } => (
+            "Unmask",
+            varlink::parameters(&UnmaskParams {
+                names: object.iter().map(name).collect(),
+                r#type: *r#type,
                 dry_run,
             })?,
         ),
@@ -599,6 +627,7 @@ pub(crate) fn command(method: &Method, parameters: Option<Value>) -> Result<(Com
         "ListTypes" => (
             Commands::List {
                 types: true,
+                masked: false,
                 r#type: None,
             },
             false,
@@ -610,6 +639,7 @@ pub(crate) fn command(method: &Method, parameters: Option<Value>) -> Result<(Com
             (
                 Commands::List {
                     types: false,
+                    masked: params.masked,
                     r#type: params.r#type,
                 },
                 false,
@@ -639,6 +669,18 @@ pub(crate) fn command(method: &Method, parameters: Option<Value>) -> Result<(Com
                     r#type: params.r#type,
                     mask: params.mask,
                     purge: params.purge,
+                },
+                params.dry_run,
+            )
+        }
+
+        "Unmask" => {
+            let params: UnmaskParams = varlink::take(parameters)?;
+
+            (
+                Commands::Unmask {
+                    object: params.names.into_iter().map(PathBuf::from).collect(),
+                    r#type: params.r#type,
                 },
                 params.dry_run,
             )
@@ -989,6 +1031,7 @@ mod tests {
             "InstallBundle" => varlink::parameters(&InstallParams::default()),
             "RemoveBundle" => varlink::parameters(&RemoveParams::default()),
             "Remove" => varlink::parameters(&RemoveObjectParams::default()),
+            "Unmask" => varlink::parameters(&UnmaskParams::default()),
             method => panic!("{method} is served, and takes no parameters here"),
         }
         .expect("the parameters can be serialised")
@@ -1085,6 +1128,7 @@ mod tests {
             (
                 Commands::List {
                     types: true,
+                    masked: false,
                     r#type: None,
                 },
                 "ListTypes",
@@ -1092,6 +1136,7 @@ mod tests {
             (
                 Commands::List {
                     types: false,
+                    masked: true,
                     r#type: Some(Type::Probe),
                 },
                 "List",
@@ -1121,6 +1166,13 @@ mod tests {
                     purge: true,
                 },
                 "Remove",
+            ),
+            (
+                Commands::Unmask {
+                    object: vec![PathBuf::from("/etc/hosts")],
+                    r#type: Some(Type::Template),
+                },
+                "Unmask",
             ),
             (
                 Commands::Doc {

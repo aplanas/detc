@@ -314,6 +314,42 @@ impl Variables {
         Ok(probes)
     }
 
+    /// The probes that a zero byte file takes out of the ladder, as pairs of
+    /// the namespace mount point they would report at and the file that masks
+    /// them.
+    ///
+    /// Nothing is checked for the exec bit here, unlike in
+    /// [`Self::probe_entries`]: a mask is a zero byte file and is never
+    /// executable, and it masks the program under it all the same.
+    ///
+    /// A mount point does not say which probe is masked when several sit at
+    /// the same one, exactly as it does not for [`Self::probes`], and the file
+    /// that comes back beside it is what tells them apart.
+    pub fn masked_probes(root: impl AsRef<Path>) -> Result<Vec<(String, PathBuf)>> {
+        let root = root.as_ref();
+        let mut masked = Vec::new();
+
+        for category in PROBE_CATEGORIES {
+            let cfs = cfs::UAPICFS::with_root(&probes_name(category), root)
+                .prefixes(PROBE_PREFIXES)
+                .recursive(true);
+
+            for (key, mask) in cfs.masked()? {
+                let mut mount = vec![(*category).to_string()];
+                mount.extend(
+                    key.parent()
+                        .into_iter()
+                        .flat_map(Path::components)
+                        .map(|c| c.as_os_str().to_string_lossy().into_owned()),
+                );
+
+                masked.push((mount.join("."), mask));
+            }
+        }
+
+        Ok(masked)
+    }
+
     /// Run every probe and merge its output in the subtree of the namespace
     /// that corresponds to its mount point.
     ///
@@ -1047,6 +1083,37 @@ impl Documents {
         }
 
         Ok(Self { documents })
+    }
+
+    /// The variable documents that a zero byte file takes out of the ladder,
+    /// as pairs of the identifier they would be read under and the file that
+    /// masks them.
+    ///
+    /// Nothing is checked for a document written twice, unlike in
+    /// [`Self::from_system`]: that refusal is about two files that both answer
+    /// for a name, and a mask is a file that stops one from answering.
+    pub fn masked(root: impl AsRef<Path>) -> Result<Vec<(String, PathBuf)>> {
+        let root = root.as_ref();
+        let mut masked = Vec::new();
+
+        for name in VARIABLE_NAMES {
+            let group = name
+                .rsplit('/')
+                .next()
+                .expect("a name of a variables tree has a last component");
+
+            for (key, mask) in cfs::UAPICFS::with_root(name, root).masked()? {
+                let document = Document {
+                    group: group.to_string(),
+                    name: strip_extension(&key.to_string_lossy()),
+                    source: mask.clone(),
+                };
+
+                masked.push((document.id(), mask));
+            }
+        }
+
+        Ok(masked)
     }
 
     /// The documents, in the order in which they are merged.

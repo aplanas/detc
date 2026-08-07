@@ -679,6 +679,21 @@ variable  system/10-core                       /usr/share/detc/variables/system.
 `--type probe|template|resource|provider|variable` narrows the list down, and
 `--types` prints the types themselves.
 
+`--masked` lists the other side of the ladder: the objects a zero byte file
+takes out of it, with the file that does the masking in the last column instead
+of the file it hides.
+
+```console
+$ detc list --masked
+template  /etc/ssh/sshd_config.d/60-detc.conf  /etc/detc/templates.d/etc/ssh/sshd_config.d/60-detc.conf
+provider  unit                                 /var/lib/detc/providers.d/unit
+```
+
+Those are names no other command can see.  The resolver reads a zero byte file
+as the object being absent, so a masked object is in no listing, renders
+nothing, and cannot be addressed by `detc cat`, `detc doc` or `detc remove` —
+[`detc unmask`](#detc-unmask-object) is the one command that reaches it.
+
 The variable documents are the ones that build the namespace, in the order in
 which they are merged, and they are a different answer from the one
 [`detc var`](#detc-var) gives: there a key holds one value, whichever
@@ -803,8 +818,8 @@ mask     template  /etc/detc/templates.d/etc/ssh/sshd_config.d/60-detc.conf
 orphan   /etc/ssh/sshd_config.d/60-detc.conf  as detc wrote it
 ```
 
-A mask is an ordinary file, so undoing one is unlinking what that line names.
-It cannot be reached with `detc remove` again: a masked object is no longer an
+A mask is an ordinary file, and [`detc unmask`](#detc-unmask-object) is what
+takes it away again.  `detc remove` cannot: a masked object is no longer an
 object.
 
 The same answer covers a file that the installed bundle owns, which unlinking
@@ -865,6 +880,62 @@ $ detc --dry-run remove /etc/chrony/chrony.conf --purge
 remove   template  /etc/detc/templates.d/etc/chrony/chrony.conf
 orphan   /etc/chrony/chrony.conf  would be taken away if nothing else instantiates it and it is unchanged
 ```
+
+### `detc unmask <object>...`
+
+Put an object back that a zero byte file takes out of the ladder.  This is the
+other end of `detc remove --mask`, and the one command that addresses an object
+the resolver reads as absent.
+
+```console
+$ detc unmask /etc/ssh/sshd_config.d/60-detc.conf
+unmask   template  /etc/detc/templates.d/etc/ssh/sshd_config.d/60-detc.conf
+remains  template /etc/ssh/sshd_config.d/60-detc.conf  /usr/share/detc/templates.d/etc/ssh/sshd_config.d/60-detc.conf
+```
+
+The first line names the mask that was unlinked.  The second says what the
+ladder answers for the name now, which is the same question a removal asks from
+the other side.
+
+An object is named the way [`detc list --masked`](#detc-list) prints it — either
+column of that line will do, so the path of the zero byte file is enough, which
+is what `detc remove --mask` printed when it wrote the thing.  The type is
+guessed from the name, and `--type` says which one to look in.
+
+Not every unmask uncovers an object, and both ways of uncovering nothing are
+said out loud:
+
+```console
+$ detc unmask /etc/sysctl.d/60-detc.conf
+unmask   template  /etc/detc/templates.d/etc/sysctl.d/60-detc.conf
+masked   template /etc/sysctl.d/60-detc.conf  /run/detc/templates.d/etc/sysctl.d/60-detc.conf
+
+$ detc unmask /etc/nowhere.conf
+unmask   template  /etc/detc/templates.d/etc/nowhere.conf
+absent   template /etc/nowhere.conf  the mask covered no file
+```
+
+`masked` means a second zero byte file was under the first — an installed bundle
+can carry one of its own — and it still hides whatever is below it.  `absent`
+means the mask covered no file at all, which is what is left when the file it
+was written against went away.
+
+A mask that the distribution ships is not `detc`'s to unlink, and neither is one
+that a bundle installed.  Unlike a removal, there is no second answer to offer
+for either: a mask cannot itself be masked.
+
+```console
+$ detc unmask /usr/share/detc/templates.d/etc/hosts
+The mask /usr/share/detc/templates.d/etc/hosts is in usr/share, which the
+distribution installs and detc does not write, and a mask cannot itself be
+masked
+```
+
+Every mask is resolved and judged before any of them is touched, so a command
+naming several is never half done, and the lock is taken.  An unmask is not
+recorded in the history, for the same reason a removal is not.  `--dry-run`
+names the mask that would be unlinked and stops there: what putting the object
+back would uncover is a question about the ladder without the mask in it.
 
 ### `detc doc`
 

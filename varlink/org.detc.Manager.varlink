@@ -116,8 +116,12 @@ type Var (
 # The types of object that the system has.  Streaming.
 method ListTypes() -> (type: ?ObjectType)
 
-# The objects of the system, of one type or of all of them.  Streaming.
-method List(type: ?ObjectType) -> (object: ?Object)
+# The objects of the system, of one type or of all of them.  With `masked`, the
+# objects that a zero byte file takes out of the ladder instead, whose `source`
+# is then the file that masks them rather than the file it hides.  Those are
+# the names that no other method can see, since the resolver reads a zero byte
+# file as the object being absent.  Streaming.
+method List(masked: bool, type: ?ObjectType) -> (object: ?Object)
 
 # What a template would write in the system, the state a resource declares, or
 # the program a probe or a provider is.  `name` addresses the object the way
@@ -215,6 +219,29 @@ method Remove(
   type: ?ObjectType,
   mask: bool,
   purge: bool,
+  dry_run: bool
+) -> (change: ?Change)
+
+# Put masked objects back in the ladder, named the way `List` with `masked`
+# reports them, or by the path of the zero byte file itself.  This is the other
+# end of `Remove` with `mask`, and the only method that addresses an object the
+# resolver reads as absent.
+#
+# The `unmask` action names the file that was unlinked, and one line follows
+# saying what the ladder answers for the name now: `remains` with the file that
+# was under the mask, `masked` when a second zero byte file was under the first
+# and still hides it, or `absent` when the mask covered no file at all.
+#
+# A mask that the distribution ships is not detc's to unlink, and neither is one
+# that a bundle installed; there is no second answer to offer for either, since
+# a mask cannot itself be masked.
+#
+# With `dry_run`, name the mask that would be unlinked.  A dry run cannot say
+# what putting the object back would uncover, since that is a question about the
+# ladder without the mask in it.  Streaming.
+method Unmask(
+  names: []string,
+  type: ?ObjectType,
   dry_run: bool
 ) -> (change: ?Change)
 

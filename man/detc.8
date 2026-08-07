@@ -99,13 +99,15 @@ touching the host.
 .B \-\-dry\-run
 Say what would happen instead of doing it.  It covers everything that writes:
 .BR apply ,
+.BR remove ,
+.BR unmask ,
 the
 .B var
 invocations that set a variable, and
 .BR "bundle install" ,
-.B restore
+.B "bundle restore"
 and
-.BR remove .
+.BR "bundle remove" .
 .TP
 .BR \-d ", " \-\-debug
 Turn logging on, and repeat for more of it: error, warn, info, debug, trace.
@@ -168,6 +170,16 @@ and the file it was read from.
 .TP
 .B \-\-types
 List the types instead of the objects.
+.TP
+.B \-\-masked
+List the objects that a zero byte file takes out of the ladder instead, with
+the file that does the masking in the last column rather than the file it
+hides.
+.IP
+These are names that no other command can see: the resolver reads a zero byte
+file as the object being absent, so a masked object is in no other listing,
+renders nothing, and is reached only by
+.BR "detc unmask" .
 .TP
 .BR \-t ", " \-\-type " " \fITYPE\fR
 List only that type.
@@ -276,10 +288,11 @@ until the next restore or the next boot; that too is refused, naming the bundle.
 Masking something that is already in the administrator's prefix is refused as
 well, there being no prefix above it to write in.
 .IP
-A mask is an ordinary file, so undoing one is unlinking the file that this
-names.  It cannot be reached with
+A mask is an ordinary file, and
+.B detc unmask
+is what takes it away again.
 .B detc remove
-again, since a masked object is no longer an object.
+cannot, since a masked object is no longer an object.
 .TP
 .B \-\-purge
 Also take away the file that a template instantiated, when nothing else
@@ -302,6 +315,51 @@ file out; so there is no
 line and no verdict on an orphan.  With
 .B \-\-purge
 the file that is at stake is still named.
+.
+.SS detc unmask OBJECT...
+Put objects back that a zero byte file takes out of the ladder.
+.PP
+This is the other end of
+.BR "detc remove \-\-mask" ,
+and the one command that addresses an object the resolver reads as absent.
+Each
+.I OBJECT
+is named the way
+.B detc list \-\-masked
+prints it \(em either column of that line will do, so the path of the zero byte
+file is enough, which is what
+.B detc remove \-\-mask
+printed when it wrote the thing.
+.PP
+The
+.B unmask
+line names the mask that was unlinked, and one line follows saying what the
+ladder answers for the name now.  That is
+.B remains
+with the file that was under the mask;
+.B masked
+when a second zero byte file was under the first \(em an installed bundle can
+carry one of its own \(em and still hides what is below it; or
+.B absent
+when the mask covered no file at all, which is what is left when the file it was
+written against went away.
+.PP
+A mask that the distribution ships is not
+.BR detc "'s"
+to unlink, and neither is one that a bundle installed.  Unlike a removal there
+is no second answer to offer for either, since a mask cannot itself be masked.
+.PP
+Every mask is resolved and judged before any of them is touched, so a command
+naming several is never half done.  The lock is taken, and an unmask is not
+written to the journal, for the same reasons a removal is not.
+.TP
+.BR \-t ", " \-\-type " " \fITYPE\fR
+Which type the objects are, guessed from the name when it is left out.
+.TP
+.B \-\-dry\-run
+Global, and named here because it can say less than usual.  The mask that would
+be unlinked is named, and nothing more: what putting the object back would
+uncover is a question about the ladder without the mask in it.
 .
 .SS detc doc OBJECT
 Show what
@@ -670,6 +728,15 @@ keeps it across a reboot:
 .EX
 $ detc bundle create ./fleet \-o fleet.detc \-\-sign ~/.ssh/detc_ca
 $ detc bundle install fleet.detc \-\-persist \-\-apply
+.EE
+.PP
+Take a template that the distribution ships out of the ladder, see that it is
+gone, and put it back:
+.PP
+.EX
+$ detc remove /etc/ssh/sshd_config.d/60\-detc.conf \-\-mask
+$ detc list \-\-masked
+$ detc unmask /etc/ssh/sshd_config.d/60\-detc.conf
 .EE
 .PP
 Read what an object says about itself, and what a type of resource accepts:

@@ -114,6 +114,12 @@ fn test_a_remote_run_says_what_a_local_one_says() -> TestResult {
             "/etc/ssh/sshd_config.d/root.conf",
             "--mask",
         ],
+        // What a zero byte file takes out of the ladder is the one listing
+        // that no other call can reach, so it has to cross the wire too
+        &["list", "--masked"],
+        &["list", "--masked", "--type", "provider"],
+        // An unmask that is refused, because nothing here is masked
+        &["unmask", "/etc/ssh/sshd_config.d/root.conf"],
         // With no history — or with no journal in the build at all — the two
         // have to say so in the same words
         &["report", "--list"],
@@ -262,6 +268,37 @@ fn test_a_remote_run_changes_the_system_it_reaches() -> TestResult {
             .success()
     );
 
+    // The masked object is reachable across the wire the one way it is
+    // reachable at all, and putting it back uncovers what the mask hid
+    let mask = root.join("etc/detc/templates.d/etc/ssh/sshd_config.d/root.conf");
+    assert_eq!(
+        stdout(&detctl(root, "", &["list", "--masked"])),
+        format!(
+            "template\t{}\t{}\n",
+            root.join("etc/ssh/sshd_config.d/root.conf").display(),
+            mask.display()
+        )
+    );
+
+    let output = detctl(root, "", &["unmask", "/etc/ssh/sshd_config.d/root.conf"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "unmask\ttemplate\t{}\nremains\ttemplate {}\t{}\n",
+            mask.display(),
+            root.join("etc/ssh/sshd_config.d/root.conf").display(),
+            root.join("usr/share/detc/templates.d/etc/ssh/sshd_config.d/root.conf")
+                .display()
+        )
+    );
+    assert!(!mask.exists());
+    assert!(
+        detc(root, &["cat", "/etc/ssh/sshd_config.d/root.conf"])
+            .status
+            .success()
+    );
+
     Ok(())
 }
 
@@ -351,6 +388,22 @@ fn test_read_only_refuses_what_changes_the_system() -> TestResult {
             .is_file()
     );
     assert!(!root.join("etc/detc/templates.d").exists());
+
+    // And so is putting one back, which unlinks a file the same way
+    let mask = root.join("etc/detc/templates.d/etc/ssh/sshd_config.d/root.conf");
+    fs::create_dir_all(mask.parent().expect("the mask has a directory"))?;
+    fs::write(&mask, "")?;
+
+    let output = detctl(
+        root,
+        "--read-only",
+        &["unmask", "/etc/ssh/sshd_config.d/root.conf"],
+    );
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("read-only"), "{output:?}");
+    assert!(mask.is_file());
+
+    fs::remove_file(&mask)?;
 
     // A dry run writes nothing, so it is not what `--read-only` is about
     let here = detc(root, &["--dry-run", "apply"]);

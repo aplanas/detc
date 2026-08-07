@@ -161,6 +161,11 @@ pub(crate) enum Commands {
         #[arg(long)]
         types: bool,
 
+        /// List instead what a zero byte file takes out of the ladder, with
+        /// the file that does it
+        #[arg(long, conflicts_with = "types")]
+        masked: bool,
+
         /// Type of object to list
         #[arg(short, long, value_enum)]
         r#type: Option<Type>,
@@ -216,6 +221,18 @@ pub(crate) enum Commands {
         /// else instantiates it and it still holds what the template wrote
         #[arg(long)]
         purge: bool,
+    },
+
+    /// Put objects back that a zero byte file takes out of the ladder
+    Unmask {
+        /// Masked objects to put back, named the way `detc list --masked`
+        /// prints them
+        #[arg(required = true)]
+        object: Vec<PathBuf>,
+
+        /// Type of the objects, guessed from the name by default
+        #[arg(short, long, value_enum)]
+        r#type: Option<Type>,
     },
 
     /// Check that the objects of the system can be instantiated
@@ -601,9 +618,71 @@ fn resolve_provider(provider: &Path, root: &Path) -> Result<PathBuf> {
     )
 }
 
+/// The objects of a kind that the ladder answers with, as pairs of the name
+/// that addresses them and the file behind them.
+///
+/// This is `detc list` for one type, in the shape that lets a caller ask a
+/// question about the answer rather than print it.
+fn installed(root: &Path, kind: Type) -> Result<Vec<(String, PathBuf)>> {
+    Ok(match kind {
+        Type::Probe => var::Variables::probes(root)?,
+        Type::Template => template::Templates::from_system(root)?
+            .templates()
+            .iter()
+            .map(|template| {
+                (
+                    template.target().display().to_string(),
+                    template.source().to_path_buf(),
+                )
+            })
+            .collect(),
+        Type::Resource => resource::Resources::from_system(root)?
+            .resources()
+            .iter()
+            .map(|resource| (resource.id(), resource.source().to_path_buf()))
+            .collect(),
+        Type::Provider => provider::Providers::from_system(root)?
+            .providers()
+            .map(|provider| (provider.kind().to_string(), provider.path().to_path_buf()))
+            .collect(),
+        Type::Variable => var::Documents::from_system(root)?
+            .documents()
+            .iter()
+            .map(|document| (document.id(), document.source().to_path_buf()))
+            .collect(),
+    })
+}
+
+/// The objects of a kind that a zero byte file takes out of the ladder, as
+/// pairs of the name that would address them and the file that masks them.
+///
+/// This is the complement of [`installed`], and every one of these is a name
+/// that no other command of `detc` can see: the resolver reads the zero byte
+/// file as the object being absent, so there is nothing left to list, to
+/// instantiate or to take away.
+fn masked(root: &Path, kind: Type) -> Result<Vec<(String, PathBuf)>> {
+    match kind {
+        Type::Probe => var::Variables::masked_probes(root),
+        Type::Template => template::Templates::masked(root),
+        Type::Resource => resource::Resources::masked(root),
+        Type::Provider => provider::Providers::masked(root),
+        Type::Variable => var::Documents::masked(root),
+    }
+}
+
 /// List the objects of the system, one per line, as the type of the object, the
 /// name that addresses it, and where it comes from.
-fn list(out: &mut dyn Sink, root: &Path, types: bool, kind: Option<Type>) -> Result<()> {
+///
+/// With `masked`, the objects that a zero byte file takes out of the ladder
+/// instead, and in the last column the file that does it rather than the file
+/// it hides.
+fn list(
+    out: &mut dyn Sink,
+    root: &Path,
+    types: bool,
+    masked: bool,
+    kind: Option<Type>,
+) -> Result<()> {
     if types {
         for kind in Type::value_variants() {
             out.emit(Record::Type(*kind))?;
@@ -611,57 +690,22 @@ fn list(out: &mut dyn Sink, root: &Path, types: bool, kind: Option<Type>) -> Res
         return Ok(());
     }
 
-    let object = |r#type: Type, name: String, source: String| Record::Object {
-        r#type,
-        name,
-        source,
-    };
-
-    let asked = |t: Type| kind.is_none() || kind == Some(t);
-
-    if asked(Type::Probe) {
-        for (mount, path) in var::Variables::probes(root)? {
-            out.emit(object(Type::Probe, mount, path.display().to_string()))?;
+    for r#type in Type::value_variants() {
+        if kind.is_some_and(|asked| asked != *r#type) {
+            continue;
         }
-    }
 
-    if asked(Type::Template) {
-        for template in template::Templates::from_system(root)?.templates() {
-            out.emit(object(
-                Type::Template,
-                template.target().display().to_string(),
-                template.source().display().to_string(),
-            ))?;
-        }
-    }
+        let objects = match masked {
+            true => self::masked(root, *r#type)?,
+            false => installed(root, *r#type)?,
+        };
 
-    if asked(Type::Resource) {
-        for resource in resource::Resources::from_system(root)?.resources() {
-            out.emit(object(
-                Type::Resource,
-                resource.id().to_string(),
-                resource.source().display().to_string(),
-            ))?;
-        }
-    }
-
-    if asked(Type::Provider) {
-        for provider in provider::Providers::from_system(root)?.providers() {
-            out.emit(object(
-                Type::Provider,
-                provider.kind().to_string(),
-                provider.path().display().to_string(),
-            ))?;
-        }
-    }
-
-    if asked(Type::Variable) {
-        for document in var::Documents::from_system(root)?.documents() {
-            out.emit(object(
-                Type::Variable,
-                document.id(),
-                document.source().display().to_string(),
-            ))?;
+        for (name, source) in objects {
+            out.emit(Record::Object {
+                r#type: *r#type,
+                name,
+                source: source.display().to_string(),
+            })?;
         }
     }
 
@@ -1268,6 +1312,204 @@ fn orphaned(out: &mut dyn Sink, root: &Path, removal: &Removal, purge: bool) -> 
 
         _ => Ok(()),
     }
+}
+
+/// What putting one masked object back is going to do.
+struct Unmasking {
+    /// The name that `detc list --masked` prints for it, and not the one that
+    /// was typed: a mask can be addressed by the file that writes it, and what
+    /// is reported should be the object that comes back.
+    name: String,
+    kind: Type,
+    /// The zero byte file to unlink.
+    mask: PathBuf,
+    /// The path of the mask below its prefix, which is the identity of the key
+    /// across the whole ladder, and so what says which file is under it.
+    rest: PathBuf,
+}
+
+/// Whether `name` addresses a masked object.
+///
+/// A mask has no object behind it to ask, so the rule that `Templates::get`,
+/// [`get_probe`] and [`get_provider`] each apply to what they resolved is
+/// gathered here: the name that would address the object, or the file itself,
+/// given absolute or relative to the root.
+fn addresses(root: &Path, name: &Path, listed: &str, mask: &Path) -> bool {
+    let rooted = root.join(name.strip_prefix("/").unwrap_or(name));
+
+    Path::new(listed) == name
+        || Path::new(listed) == rooted
+        || mask.ends_with(name)
+        || mask == rooted
+}
+
+/// Work out what putting `name` back would do, and refuse here if it is
+/// something that must not be done.
+///
+/// As with [`plan_removal`], everything that can be decided without touching
+/// the system is decided before anything is touched.
+fn plan_unmask(root: &Path, name: &Path, kind: Option<Type>) -> Result<Unmasking> {
+    let mut found = Vec::new();
+
+    for candidate in Type::value_variants() {
+        if kind.is_some_and(|asked| asked != *candidate) {
+            continue;
+        }
+
+        for (listed, mask) in masked(root, *candidate)? {
+            if addresses(root, name, &listed, &mask) {
+                found.push(Unmasking {
+                    name: listed,
+                    kind: *candidate,
+                    mask,
+                    rest: PathBuf::new(),
+                });
+            }
+        }
+    }
+
+    let mut unmasking = match found.len() {
+        1 => found.remove(0),
+        0 => {
+            return match kind {
+                Some(kind) => err!(
+                    "There is no masked {kind} {}, use `detc list --masked --type {kind}`",
+                    name.display()
+                ),
+                None => err!(
+                    "There is no masked template, resource, probe, provider or variable document for {}, use `detc list --masked`",
+                    name.display()
+                ),
+            };
+        }
+        several => {
+            return err!(
+                "{} addresses {several} masks, so it does not say which one: {}",
+                name.display(),
+                found
+                    .iter()
+                    .map(|found| found.mask.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    };
+
+    let ladder = ladder(unmasking.kind);
+    let Some((rung, rest)) = cfs::rung(root, &unmasking.mask, ladder) else {
+        return err!(
+            "The mask {} is not in any of the prefixes that detc searches",
+            unmasking.mask.display()
+        );
+    };
+    unmasking.rest = rest;
+
+    // The bottom of the ladder is the distribution's, and detc neither wrote
+    // this mask nor can take it away.  Nor is there another answer to offer:
+    // a mask is already the way to hide something, so there is nothing to
+    // stack on top of it
+    if rung == 0 {
+        return err!(
+            "The mask {} is in {}, which the distribution installs and detc does not write, and a mask cannot itself be masked",
+            unmasking.mask.display(),
+            ladder[0]
+        );
+    }
+
+    if let Ok(relative) = unmasking.mask.strip_prefix(root)
+        && let Some(what) = bundle::owner(root, relative)?
+    {
+        return err!(
+            "The mask {} belongs to the bundle {} {}, and unlinking it would last only until the next restore or the next boot: take the whole bundle away with `detc bundle remove`",
+            unmasking.mask.display(),
+            what.name,
+            what.version
+        );
+    }
+
+    Ok(unmasking)
+}
+
+/// Put masked objects back in the ladder, and say what answers for them now.
+///
+/// This is the other end of `detc remove --mask`, and the one command that can
+/// address an object the resolver reads as absent.  Nothing is journalled: a
+/// mask is a file, and unlinking it is undoing something that was done to the
+/// ladder rather than applying anything to the system.
+fn unmask(
+    out: &mut dyn Sink,
+    root: &Path,
+    names: &[PathBuf],
+    kind: Option<Type>,
+    dry_run: bool,
+) -> Result<()> {
+    let unmaskings = names
+        .iter()
+        .map(|name| plan_unmask(root, name, kind))
+        .collect::<Result<Vec<_>>>()?;
+
+    let _lock = (!dry_run).then(|| lock::Lock::acquire(root)).transpose()?;
+
+    for unmasking in &unmaskings {
+        put_back(out, root, unmasking, dry_run)?;
+    }
+
+    Ok(())
+}
+
+/// Unlink one mask, and report what the ladder answers with once it is gone.
+fn put_back(out: &mut dyn Sink, root: &Path, unmasking: &Unmasking, dry_run: bool) -> Result<()> {
+    let Unmasking {
+        name,
+        kind,
+        mask,
+        rest,
+    } = unmasking;
+
+    if !dry_run {
+        fs::remove_file(mask).map_err(|e| format!("Cannot remove {}: {e}", mask.display()))?;
+    }
+
+    out.emit(Record::Change {
+        action: "unmask".to_string(),
+        object: kind.to_string(),
+        summary: Some(mask.display().to_string()),
+        error: None,
+    })?;
+
+    // A dry run has not moved the mask, so nothing under it can be seen yet,
+    // exactly as a dry run of a removal cannot say what it would uncover
+    if dry_run {
+        return Ok(());
+    }
+
+    // The file that answers for a key sits at the same path below its prefix,
+    // whichever prefix that is, so the entry the resolver came back with is the
+    // one whose file ends there.  Asking by name would do for every type but a
+    // probe, where one mount point can address several
+    let at_key = |entries: Vec<(String, PathBuf)>| {
+        entries
+            .into_iter()
+            .find(|(_, path)| path.ends_with(rest))
+            .map(|(_, path)| path)
+    };
+
+    let (action, summary) = match at_key(installed(root, *kind)?) {
+        Some(path) => ("remains", path.display().to_string()),
+        // A bundle can carry a mask of its own, and a second one under the
+        // first is still a mask
+        None => match at_key(masked(root, *kind)?) {
+            Some(path) => ("masked", path.display().to_string()),
+            None => ("absent", "the mask covered no file".to_string()),
+        },
+    };
+
+    out.emit(Record::Change {
+        action: action.to_string(),
+        object: format!("{kind} {name}"),
+        summary: Some(summary),
+        error: None,
+    })
 }
 
 /// Show what an object of the system holds: the content that a template would
@@ -2372,7 +2614,11 @@ pub(crate) fn dispatch(
     dry_run: bool,
 ) -> Result<()> {
     match command {
-        Commands::List { types, r#type } => list(out, root, *types, *r#type),
+        Commands::List {
+            types,
+            masked,
+            r#type,
+        } => list(out, root, *types, *masked, *r#type),
         Commands::Cat {
             object,
             r#type,
@@ -2385,6 +2631,7 @@ pub(crate) fn dispatch(
             mask,
             purge,
         } => remove(out, root, object, *r#type, *mask, *purge, dry_run),
+        Commands::Unmask { object, r#type } => unmask(out, root, object, *r#type, dry_run),
         Commands::Check { file, r#type, var } => check(out, root, file.as_deref(), *r#type, var),
         Commands::Var {
             file,
