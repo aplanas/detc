@@ -49,7 +49,7 @@ pub const PROVIDERS_NAME: &str = "detc/providers";
 /// A provider is code that runs as root, so it lives with the probes and not
 /// with the data: content that arrives from outside the system must not be able
 /// to replace a provider that the administrator installed.
-const PROVIDER_PREFIXES: &[&str] = &["usr/libexec", "run/lib", "var/lib"];
+pub const PROVIDER_PREFIXES: &[&str] = &["usr/libexec", "run/lib", "var/lib"];
 
 /// Order of a provider that does not declare one, and the order at which the
 /// templates are written.

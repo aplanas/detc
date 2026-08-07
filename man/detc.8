@@ -213,6 +213,96 @@ reading.
 The status is non\-zero if anything failed, which is what makes this the
 command to put in a pipeline.
 .
+.SS detc remove OBJECT...
+Take objects away, and say what that uncovers.
+.PP
+Each
+.I OBJECT
+is addressed the way
+.B detc cat
+addresses it, and what is unlinked is the file that the ladder resolved \(em
+never a path that was typed.  One object is one file in every type, so a removal
+is always an unlink and never a document rewritten with a piece left out.
+.PP
+Taking a file out of a ladder is not deleting an object, it is uncovering
+whatever was under it.  A copy in a lower prefix answers for the name from then
+on, and is reported as
+.BR remains ,
+with the file it comes from.  Nothing is said when the name no longer addresses
+anything, because then the object really has gone.
+.PP
+Two of the types leave something in the system when they go, and it is reported
+as
+.BR orphan :
+a template leaves the configuration file it wrote, which goes on configuring the
+machine with nothing left to say where it came from, and a provider leaves every
+resource of its type, which nothing can apply any more.  For a template the line
+says whether the file is still
+.B as detc wrote it
+or has
+.B changed since detc wrote it
+\(em and, when the template can no longer be instantiated, that the two cannot
+be told apart.  A file that was never written is not reported.
+.PP
+Every object is resolved and judged before any of them is touched, so a command
+naming several is never half done.
+.PP
+The lock is taken, since a run that is halfway through instantiating an object
+must not have it unlinked underneath it.  A removal is not written to the
+journal: it changes what the system would do, not what it is, and the next
+.B detc apply
+records the difference.
+.TP
+.BR \-t ", " \-\-type " " \fITYPE\fR
+Which type the objects are, guessed from the name when it is left out.  Unlike
+.BR "detc cat" ,
+a type reaches only what the ladder installed: a file that is merely on the
+machine is not an object to take away.
+.TP
+.B \-\-mask
+Write the zero byte file in the administrator's prefix instead of unlinking
+anything, which the resolver reads as absent.
+.IP
+This is the only way to be rid of what the distribution ships \(em unlinking
+that is refused, because
+.B detc
+does not write
+.I usr/share
+or
+.I usr/libexec
+and the next upgrade would put the file back anyway.  It is also the answer for
+a file that the installed bundle owns, which unlinking would only take away
+until the next restore or the next boot; that too is refused, naming the bundle.
+Masking something that is already in the administrator's prefix is refused as
+well, there being no prefix above it to write in.
+.IP
+A mask is an ordinary file, so undoing one is unlinking the file that this
+names.  It cannot be reached with
+.B detc remove
+again, since a masked object is no longer an object.
+.TP
+.B \-\-purge
+Also take away the file that a template instantiated, when nothing else
+instantiates it and it still holds exactly what the template wrote; the line is
+then
+.B purge
+rather than
+.BR orphan .
+A file that was edited, or one whose template no longer renders and so cannot be
+compared, is named and left where it is \(em deleting somebody's work on a guess
+is the one mistake a removal must not make.  It is refused for every other type,
+which write nothing into the system to take away.
+.TP
+.B \-\-dry\-run
+Global, and named here because it can say less than usual.  What would be
+unlinked or masked is named, but what that would uncover is a question about the
+ladder without the file in it, and the only honest way to ask it is to take the
+file out; so there is no
+.B remains
+line and no verdict on an orphan.  With
+.B \-\-purge
+the file that is at stake is still named.
+.
 .SS detc doc OBJECT
 Show what
 .I OBJECT

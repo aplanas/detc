@@ -48,6 +48,13 @@ Match the extension the consumer expects, and check that it *has* one:
 `templates/etc/sudoers.d/60-detc` has no `.conf`, because sudo silently ignores a drop-in whose
 name contains a dot.
 
+Removal is the other end of the same argument.  When your template is taken out of the ladder
+and nothing else instantiates the path, `detc remove` reports the file it wrote as an `orphan`,
+still configuring the node with nothing left to say where it came from, and `--purge` offers to
+take it away.  A drop-in is a file your template owns outright, so deleting it is going back to
+how the node was; the whole file is the node's, and deleting it is taking away its
+configuration.  Write the drop-in and the node can be rid of you cleanly.
+
 ### Write no line for a variable nobody set
 
 An installed template on a node that has configured nothing must change nothing.  So every

@@ -767,6 +767,105 @@ counted: the object it waited on already is.
 A run that changes something is recorded in the history, see `detc report`.  A
 dry run is not: it changed nothing.
 
+### `detc remove <object>...`
+
+Take objects away, and say what that uncovers.  Objects are addressed the way
+`detc cat` addresses them, and what is unlinked is the file that the ladder
+resolved — never a path that was typed.
+
+Taking a file out of a ladder is not deleting an object, it is uncovering
+whatever was under it.  That is the half a plain `rm` cannot report, and the
+reason the command exists:
+
+```console
+$ detc remove /etc/ssh/sshd_config.d/60-detc.conf
+remove   template  /etc/detc/templates.d/etc/ssh/sshd_config.d/60-detc.conf
+remains  template /etc/ssh/sshd_config.d/60-detc.conf  /usr/share/detc/templates.d/etc/ssh/sshd_config.d/60-detc.conf
+```
+
+The administrator who deleted their own copy has not stopped the template, they
+have gone back to the distribution's.  When nothing is left, nothing is said.
+
+What the distribution ships is not `detc`'s to unlink — it does not write
+`/usr/share` or `/usr/libexec`, and the next upgrade would put the file back.
+`--mask` writes the zero byte file in the administrator's prefix that the
+resolver reads as absent, which is the way to be rid of one for good:
+
+```console
+$ detc remove /etc/ssh/sshd_config.d/60-detc.conf
+The template /etc/ssh/sshd_config.d/60-detc.conf is
+/usr/share/detc/templates.d/etc/ssh/sshd_config.d/60-detc.conf, which the
+distribution installs and detc does not write.  Take it out of the ladder with
+--mask, which writes the zero byte file in etc that the resolver reads as absent
+
+$ detc remove /etc/ssh/sshd_config.d/60-detc.conf --mask
+mask     template  /etc/detc/templates.d/etc/ssh/sshd_config.d/60-detc.conf
+orphan   /etc/ssh/sshd_config.d/60-detc.conf  as detc wrote it
+```
+
+A mask is an ordinary file, so undoing one is unlinking what that line names.
+It cannot be reached with `detc remove` again: a masked object is no longer an
+object.
+
+The same answer covers a file that the installed bundle owns, which unlinking
+would take away only until the next restore or the next boot; that is refused,
+naming the bundle and pointing at `detc bundle remove`.
+
+#### What an object leaves behind
+
+Two of the types leave something in the system when they go, and the `orphan`
+line reports it.  A template leaves the configuration file it wrote, which goes
+on configuring the machine with nothing left to say where it came from — and
+the line says whether anybody has touched it since.  A provider leaves every
+resource of its type, which nothing can apply any more:
+
+```console
+$ detc remove pkg --type provider --mask
+mask     provider  /var/lib/detc/providers.d/pkg
+orphan   resource pkg/chrony  of a type that no provider implements
+orphan   resource pkg/nginx   of a type that no provider implements
+```
+
+`--purge` also takes the configuration file away, and only where `detc` can
+still see its own hand in it:
+
+```console
+$ detc remove /etc/chrony/chrony.conf --purge
+remove   template  /etc/detc/templates.d/etc/chrony/chrony.conf
+purge    /etc/chrony/chrony.conf  as detc wrote it
+```
+
+A file that was edited since, or one whose template no longer renders and so
+cannot be compared, is named and left where it is.  Deleting somebody's work on
+a guess is the one mistake a removal must not make:
+
+```console
+$ detc remove /etc/chrony/chrony.conf --purge
+remove   template  /etc/detc/templates.d/etc/chrony/chrony.conf
+orphan   /etc/chrony/chrony.conf  changed since detc wrote it, so it was left alone
+```
+
+`--purge` is refused for every other type: nothing of a probe, a provider, a
+resource or a variable document is written into the system to take away.
+
+Every object is resolved and judged before any of them is touched, so a command
+naming several is never half done.  The lock is taken, since a run halfway
+through instantiating an object must not have it unlinked underneath it.  A
+removal is not recorded in the history: it changes what the system *would* do,
+not what it is, and the next `detc apply` records the difference.
+
+`--dry-run` can say less than usual here.  What would be unlinked or masked is
+named, but what that would uncover is a question about the ladder without the
+file in it, and the only honest way to ask it is to take the file out — so
+there is no `remains` line and no verdict on an orphan.  With `--purge` the
+file that is at stake is still named:
+
+```console
+$ detc --dry-run remove /etc/chrony/chrony.conf --purge
+remove   template  /etc/detc/templates.d/etc/chrony/chrony.conf
+orphan   /etc/chrony/chrony.conf  would be taken away if nothing else instantiates it and it is unchanged
+```
+
 ### `detc doc`
 
 Show what an object says about itself.  The documentation is the block of

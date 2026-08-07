@@ -72,6 +72,7 @@ pub(crate) const METHODS: &[Method] = &[
     method("VerifyBundle", "check", true, false),
     method("GetBundle", "bundle", true, false),
     method("Apply", "change", true, true),
+    method("Remove", "change", true, true),
     method("SetVariables", "change", true, true),
     method("UnsetVariables", "change", true, true),
     method("MergeDocument", "change", true, true),
@@ -176,6 +177,24 @@ struct CatParams {
 
     #[serde(default)]
     var: Var,
+}
+
+/// `Remove`.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct RemoveObjectParams {
+    names: Vec<String>,
+
+    #[serde(default)]
+    r#type: Option<Type>,
+
+    #[serde(default)]
+    mask: bool,
+
+    #[serde(default)]
+    purge: bool,
+
+    #[serde(default)]
+    dry_run: bool,
 }
 
 /// `Check`.
@@ -431,6 +450,22 @@ pub(crate) fn call(command: &Commands, dry_run: bool) -> Result<(&'static Method
             })?,
         ),
 
+        Commands::Remove {
+            object,
+            r#type,
+            mask,
+            purge,
+        } => (
+            "Remove",
+            varlink::parameters(&RemoveObjectParams {
+                names: object.iter().map(name).collect(),
+                r#type: *r#type,
+                mask: *mask,
+                purge: *purge,
+                dry_run,
+            })?,
+        ),
+
         Commands::Check { file, r#type, var } => (
             "Check",
             varlink::parameters(&CheckParams {
@@ -592,6 +627,20 @@ pub(crate) fn command(method: &Method, parameters: Option<Value>) -> Result<(Com
                     var: params.var.into(),
                 },
                 false,
+            )
+        }
+
+        "Remove" => {
+            let params: RemoveObjectParams = varlink::take(parameters)?;
+
+            (
+                Commands::Remove {
+                    object: params.names.into_iter().map(PathBuf::from).collect(),
+                    r#type: params.r#type,
+                    mask: params.mask,
+                    purge: params.purge,
+                },
+                params.dry_run,
             )
         }
 
@@ -939,6 +988,7 @@ mod tests {
             "GetBundle" => Ok(json!({})),
             "InstallBundle" => varlink::parameters(&InstallParams::default()),
             "RemoveBundle" => varlink::parameters(&RemoveParams::default()),
+            "Remove" => varlink::parameters(&RemoveObjectParams::default()),
             method => panic!("{method} is served, and takes no parameters here"),
         }
         .expect("the parameters can be serialised")
@@ -1062,6 +1112,15 @@ mod tests {
                     var: var(&[], &[], &[]),
                 },
                 "Check",
+            ),
+            (
+                Commands::Remove {
+                    object: vec![PathBuf::from("/etc/hosts")],
+                    r#type: Some(Type::Template),
+                    mask: false,
+                    purge: true,
+                },
+                "Remove",
             ),
             (
                 Commands::Doc {

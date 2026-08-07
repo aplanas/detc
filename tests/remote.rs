@@ -104,6 +104,16 @@ fn test_a_remote_run_says_what_a_local_one_says() -> TestResult {
         &["var", "--probes"],
         &["var", "--probe", "10-net"],
         &["--dry-run", "apply"],
+        // A removal that is refused, and one that is only named: neither
+        // changes the system, and both have to be refused and named in the
+        // same words at either end
+        &["remove", "/etc/ssh/sshd_config.d/root.conf"],
+        &[
+            "--dry-run",
+            "remove",
+            "/etc/ssh/sshd_config.d/root.conf",
+            "--mask",
+        ],
         // With no history — or with no journal in the build at all — the two
         // have to say so in the same words
         &["report", "--list"],
@@ -219,6 +229,39 @@ fn test_a_remote_run_changes_the_system_it_reaches() -> TestResult {
         "no\n"
     );
 
+    // And so does taking an object away.  The template is the distribution's,
+    // so it is masked rather than unlinked, and the file it wrote holds the
+    // value from before the unset -- which is not what the template says now,
+    // so `--purge` names it and leaves it exactly where it is
+    let target = root.join("etc/ssh/sshd_config.d/root.conf");
+    let output = detctl(
+        root,
+        "",
+        &[
+            "remove",
+            "/etc/ssh/sshd_config.d/root.conf",
+            "--mask",
+            "--purge",
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "mask\ttemplate\t{}\norphan\t{}\tchanged since detc wrote it, so it was left alone\n",
+            root.join("etc/detc/templates.d/etc/ssh/sshd_config.d/root.conf")
+                .display(),
+            target.display()
+        )
+    );
+
+    assert_eq!(fs::read_to_string(&target)?, "PermitRootLogin=prohibit\n");
+    assert!(
+        !detc(root, &["cat", "/etc/ssh/sshd_config.d/root.conf"])
+            .status
+            .success()
+    );
+
     Ok(())
 }
 
@@ -293,6 +336,21 @@ fn test_read_only_refuses_what_changes_the_system() -> TestResult {
     assert!(!output.status.success());
     assert!(stderr(&output).contains("read-only"), "{output:?}");
     assert!(!root.join("etc/ssh/sshd_config.d/root.conf").exists());
+
+    // Taking an object away is a change like any other, and the one that a
+    // client reaching a machine it only reads must not be able to make
+    let output = detctl(
+        root,
+        "--read-only",
+        &["remove", "/etc/ssh/sshd_config.d/root.conf", "--mask"],
+    );
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("read-only"), "{output:?}");
+    assert!(
+        root.join("usr/share/detc/templates.d/etc/ssh/sshd_config.d/root.conf")
+            .is_file()
+    );
+    assert!(!root.join("etc/detc/templates.d").exists());
 
     // A dry run writes nothing, so it is not what `--read-only` is about
     let here = detc(root, &["--dry-run", "apply"]);

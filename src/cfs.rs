@@ -36,6 +36,30 @@ pub struct UAPICFS {
 /// highest priority.
 pub const SEARCH_PREFIXES: &[&str] = &["usr/share", "run", "etc"];
 
+/// The rung of a search ladder that a file sits on, and the rest of its path.
+///
+/// `path` is under `root`, and `prefixes` is a ladder like [`SEARCH_PREFIXES`],
+/// from the lowest priority to the highest.  What comes back is the index of
+/// the prefix that holds the file, and everything of the path below it.
+///
+/// That remainder is the whole point: it is the same in every prefix of the
+/// ladder, so it is what turns a file in one prefix into the name of the file
+/// that would shadow it in another.  The highest prefix that holds the path
+/// wins, so a ladder whose prefixes nest answers with the more specific one.
+///
+/// Nothing is read, so this answers for a file that is not there.
+pub fn rung(root: &Path, path: &Path, prefixes: &[&str]) -> Option<(usize, PathBuf)> {
+    let relative = path.strip_prefix(root).ok()?;
+
+    prefixes
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, prefix)| {
+            Some((index, relative.strip_prefix(prefix).ok()?.to_path_buf()))
+        })
+}
+
 /// Maximum drop-in directory depth traversed in recursive mode.  Links are
 /// followed, and a loop among them is recognised as one and left alone, so this
 /// bounds how deep a tree of real directories is read and nothing else.
@@ -335,5 +359,72 @@ mod tests {
         assert!(resolved_files[0].ends_with("usr/share/probes.d/20-snapper"));
 
         Ok(())
+    }
+
+    #[test]
+    fn test_the_rung_of_a_file_and_the_rest_of_its_path() {
+        let root = Path::new("/sysroot");
+
+        // The rung is the index in the ladder, and the rest is what is the same
+        // in every prefix of it, which is what names the file that would shadow
+        // this one somewhere else
+        assert_eq!(
+            rung(
+                root,
+                Path::new("/sysroot/usr/share/detc/templates.d/etc/hostname"),
+                SEARCH_PREFIXES
+            ),
+            Some((0, PathBuf::from("detc/templates.d/etc/hostname")))
+        );
+        assert_eq!(
+            rung(
+                root,
+                Path::new("/sysroot/etc/detc/templates.d/etc/hostname"),
+                SEARCH_PREFIXES
+            ),
+            Some((2, PathBuf::from("detc/templates.d/etc/hostname")))
+        );
+
+        // A ladder of its own, for the programs
+        assert_eq!(
+            rung(
+                root,
+                Path::new("/sysroot/var/lib/detc/providers.d/pkg"),
+                &["usr/libexec", "run/lib", "var/lib"]
+            ),
+            Some((2, PathBuf::from("detc/providers.d/pkg")))
+        );
+
+        // The highest prefix that holds the path wins, so a ladder whose
+        // prefixes nest answers with the more specific one rather than with
+        // `lib/detc/x` under `run`
+        assert_eq!(
+            rung(
+                root,
+                Path::new("/sysroot/run/lib/detc/x"),
+                &["run", "run/lib"]
+            ),
+            Some((1, PathBuf::from("detc/x")))
+        );
+
+        // Nothing is read, so a file that is not there is answered for
+        assert_eq!(
+            rung(
+                root,
+                Path::new("/sysroot/etc/detc/nothing"),
+                SEARCH_PREFIXES
+            ),
+            Some((2, PathBuf::from("detc/nothing")))
+        );
+
+        // A file outside the root, and one inside it but on no rung
+        assert_eq!(
+            rung(root, Path::new("/elsewhere/etc/detc/x"), SEARCH_PREFIXES),
+            None
+        );
+        assert_eq!(
+            rung(root, Path::new("/sysroot/opt/detc/x"), SEARCH_PREFIXES),
+            None
+        );
     }
 }

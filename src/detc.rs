@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use detc::{
-    Result, apply, bundle, doc, err, journal, last, lock, provider, resource, template, var,
+    Result, apply, bundle, cfs, doc, err, journal, last, lock, provider, resource, template, var,
 };
 
 use crate::record::{Commit, Record, Sink, TextSink};
@@ -195,6 +195,27 @@ pub(crate) enum Commands {
 
         #[command(flatten)]
         var: VarArgs,
+    },
+
+    /// Take objects away, and say what that uncovers
+    Remove {
+        /// Objects to take away, named the way `detc list` prints them
+        #[arg(required = true)]
+        object: Vec<PathBuf>,
+
+        /// Type of the objects, guessed from the name by default
+        #[arg(short, long, value_enum)]
+        r#type: Option<Type>,
+
+        /// Write a zero byte file in the administrator's prefix instead, which
+        /// is the only way to take away what the distribution ships
+        #[arg(long)]
+        mask: bool,
+
+        /// Also take away the file that a template instantiated, when nothing
+        /// else instantiates it and it still holds what the template wrote
+        #[arg(long)]
+        purge: bool,
     },
 
     /// Check that the objects of the system can be instantiated
@@ -734,6 +755,35 @@ enum Object {
     Variable(var::Document),
 }
 
+impl Object {
+    /// The type that `--type` would have named to reach it.
+    fn kind(&self) -> Type {
+        match self {
+            Object::Template(_) => Type::Template,
+            Object::Resource(_) => Type::Resource,
+            Object::Probe(_) => Type::Probe,
+            Object::Provider(_) => Type::Provider,
+            Object::Variable(_) => Type::Variable,
+        }
+    }
+
+    /// The file that holds it, as the ladder resolved it.
+    ///
+    /// One object is one file in every type: a resource is addressed by where
+    /// it sits in the tree, and a variable document by the whole of it, so
+    /// there is no type whose object is a part of a file.  Which is what lets
+    /// an object be taken away by unlinking, and never by rewriting a document
+    /// with a piece of it left out.
+    fn source(&self) -> &Path {
+        match self {
+            Object::Template(template) => template.source(),
+            Object::Resource(resource) => resource.source(),
+            Object::Probe(path) | Object::Provider(path) => path,
+            Object::Variable(document) => document.source(),
+        }
+    }
+}
+
 /// Resolve the object that `name` addresses, of the type that was named or of
 /// whichever type has it.
 fn resolve_object(root: &Path, name: &Path, kind: Option<Type>) -> Result<Object> {
@@ -802,6 +852,422 @@ fn guess_object(root: &Path, name: &Path) -> Result<Object> {
     err!(
         "There is no template, resource, probe, provider or variable document for {id}; `detc list` shows the objects of the system, and --type says which of them to look in"
     )
+}
+
+/// The object of the system that `name` addresses, of the type that was named,
+/// when the system has one.
+///
+/// Unlike [`resolve_typed_object`], a file that is merely on the machine is not
+/// one.  Naming a type is how a probe is *tried* before it is shipped, and
+/// something that was never installed is not something to take away, so a
+/// command that unlinks resolves through this and reaches only what the ladder
+/// put there.
+fn installed_object(root: &Path, name: &Path, kind: Type) -> Result<Option<Object>> {
+    let id = name.to_string_lossy();
+
+    Ok(match kind {
+        Type::Probe => get_probe(name, root)?.map(Object::Probe),
+        Type::Provider => get_provider(name, root)?.map(Object::Provider),
+
+        Type::Template => template::Templates::from_system(root)?
+            .get(name)
+            .cloned()
+            .map(Object::Template),
+
+        Type::Resource => resource::Resources::from_system(root)?
+            .get(&id)
+            .cloned()
+            .map(Object::Resource),
+
+        Type::Variable => var::Documents::from_system(root)?
+            .get(&id)
+            .cloned()
+            .map(Object::Variable),
+    })
+}
+
+/// The search ladder of a type of object, from the lowest priority to the
+/// highest.
+///
+/// The three rungs mean the same thing in both ladders — what the distribution
+/// ships, what was injected into the system, and what the administrator
+/// installed — and only the directories differ, because a probe and a provider
+/// are programs and are not searched for where the data is.
+fn ladder(kind: Type) -> &'static [&'static str] {
+    match kind {
+        Type::Probe => var::PROBE_PREFIXES,
+        Type::Provider => provider::PROVIDER_PREFIXES,
+        Type::Template | Type::Resource | Type::Variable => cfs::SEARCH_PREFIXES,
+    }
+}
+
+/// What an object leaves in the system once nothing answers for it any more.
+///
+/// Only two types leave anything behind.  A template leaves the file it wrote,
+/// which detc will now never touch again; a provider leaves the resources of
+/// its type, which nothing can apply.  A probe, a variable document and a
+/// resource leave nothing: what they contribute exists only while they are read.
+///
+/// This is worked out before the file is taken away, because afterwards it
+/// cannot be — an unlinked template renders nothing, and an unlinked provider
+/// no longer says which type it implemented.
+enum Leaves {
+    /// Nothing that detc knows how to follow.
+    Nothing,
+    /// The file the template instantiates, holding what the template would
+    /// write there — and nothing when the template cannot be instantiated at
+    /// all, which is the ordinary way for one to end up being taken away.
+    Target(Option<String>),
+    /// The type of resource that the provider implements.
+    Type(String),
+}
+
+/// What taking one object away is going to do.
+struct Removal {
+    /// The name that addressed it, kept as it was typed so that what is
+    /// reported is something that can be asked about again.
+    name: String,
+    /// The object itself, which holds the file that the ladder resolved and,
+    /// for a template, the file it instantiates.
+    object: Object,
+    /// The zero byte file to write instead of unlinking the source, when the
+    /// object is being taken out of the ladder rather than removed.
+    mask: Option<PathBuf>,
+    leaves: Leaves,
+}
+
+impl Removal {
+    fn kind(&self) -> Type {
+        self.object.kind()
+    }
+
+    fn source(&self) -> &Path {
+        self.object.source()
+    }
+}
+
+/// Work out what taking `name` away would do, and refuse here if it is
+/// something that must not be done.
+///
+/// Everything that can be decided without touching the system is decided
+/// before anything is touched, which is what lets a command naming several
+/// objects be turned down whole instead of half done.
+fn plan_removal(
+    root: &Path,
+    name: &Path,
+    kind: Option<Type>,
+    mask: bool,
+    purge: bool,
+) -> Result<Removal> {
+    let object = match kind {
+        Some(kind) => match installed_object(root, name, kind)? {
+            Some(object) => object,
+            None => {
+                return err!(
+                    "There is no {kind} {}, use `detc list --type {kind}`",
+                    name.display()
+                );
+            }
+        },
+        None => guess_object(root, name)?,
+    };
+
+    let kind = object.kind();
+    let source = object.source().to_path_buf();
+
+    if purge && kind != Type::Template {
+        return err!(
+            "--purge takes away the file that a template instantiates, and {} is a {kind}: nothing of a {kind} is written by detc, so there is nothing of it to take away",
+            name.display()
+        );
+    }
+
+    let ladder = ladder(kind);
+    let admin = ladder.last().expect("a ladder is not empty");
+
+    let Some((rung, rest)) = cfs::rung(root, &source, ladder) else {
+        return err!(
+            "The {kind} {} is {}, which is not in any of the prefixes that detc searches",
+            name.display(),
+            source.display()
+        );
+    };
+
+    // The three rungs of the ladder are the three answers.  What the
+    // distribution ships cannot be unlinked, because detc does not write in
+    // that prefix and an upgrade would put it back anyway; what the
+    // administrator installed is the top, so there is nothing above it to write
+    // a mask in; and what was injected is the one rung that both answers reach
+    match (rung, mask) {
+        (0, false) => {
+            return err!(
+                "The {kind} {} is {}, which the distribution installs and detc does not write.  Take it out of the ladder with --mask, which writes the zero byte file in {admin} that the resolver reads as absent",
+                name.display(),
+                source.display()
+            );
+        }
+        (rung, true) if rung == ladder.len() - 1 => {
+            return err!(
+                "The {kind} {} is already in {admin}, and there is no prefix above it to mask it from: take it away without --mask",
+                name.display()
+            );
+        }
+        _ => (),
+    }
+
+    // Masking is the answer for a file that a bundle owns, so this is asked of
+    // a removal alone.  Unlinking one would last until the next restore or the
+    // next reboot, which is not what anybody meant by removing it
+    if !mask
+        && let Ok(relative) = source.strip_prefix(root)
+        && let Some(what) = bundle::owner(root, relative)?
+    {
+        return err!(
+            "The {kind} {} belongs to the bundle {} {}, and unlinking it would last only until the next restore or the next boot: take it out of the ladder with --mask, or take the whole bundle away with `detc bundle remove`",
+            name.display(),
+            what.name,
+            what.version
+        );
+    }
+
+    // The type a provider implements is read off it while it is still
+    // installed, because it is what names the resources it leaves behind and
+    // the file that says it is about to be taken away
+    let leaves = match &object {
+        Object::Template(_) => Leaves::Target(None),
+        Object::Provider(path) => provider::Providers::from_system(root)?
+            .providers()
+            .find(|provider| provider.path() == path)
+            .map_or(Leaves::Nothing, |provider| {
+                Leaves::Type(provider.kind().to_string())
+            }),
+        _ => Leaves::Nothing,
+    };
+
+    Ok(Removal {
+        name: name.display().to_string(),
+        mask: mask.then(|| root.join(admin).join(&rest)),
+        object,
+        leaves,
+    })
+}
+
+/// Fill in what the templates among the removals write into the system.
+///
+/// The namespace is built once, and only when a template is going away: it runs
+/// every probe that the system has installed, which is not something a command
+/// taking a resource away should be paying for.
+///
+/// A template that cannot be instantiated is not a failure here.  It is the
+/// ordinary way for one to end up being taken away — the variables it reads are
+/// gone, or were never there — and refusing to remove it would leave the
+/// administrator with an object they cannot get rid of.  What is lost is only
+/// the comparison, and the report says so rather than guessing.
+fn instantiated(root: &Path, removals: &mut [Removal]) -> Result<()> {
+    if !removals
+        .iter()
+        .any(|removal| removal.kind() == Type::Template)
+    {
+        return Ok(());
+    }
+
+    let var = var::Variables::from_system(root)?;
+
+    for removal in removals {
+        if let Object::Template(template) = &removal.object {
+            removal.leaves = Leaves::Target(template.render(var.value()).ok());
+        }
+    }
+
+    Ok(())
+}
+
+/// Take objects away, and say what that uncovers.
+///
+/// The file that is reached is the one the ladder resolved and never a path
+/// that somebody typed, so there is nothing here to point at the rest of the
+/// system.
+///
+/// Taking a file out of a ladder is not deleting an object, it is uncovering
+/// whatever was under it, which is why this reports as much as it does: an
+/// object with a copy in a lower prefix has not gone anywhere.
+fn remove(
+    out: &mut dyn Sink,
+    root: &Path,
+    names: &[PathBuf],
+    kind: Option<Type>,
+    mask: bool,
+    purge: bool,
+    dry_run: bool,
+) -> Result<()> {
+    let mut removals = names
+        .iter()
+        .map(|name| plan_removal(root, name, kind, mask, purge))
+        .collect::<Result<Vec<_>>>()?;
+
+    instantiated(root, &mut removals)?;
+
+    // A run reads the objects it was told about and then instantiates them, and
+    // this takes one out from under it.  `detc var` writes without the lock
+    // because a document that a run has already merged is still merged; a
+    // template that is gone half way through a run is a plan that cannot be
+    // finished
+    let _lock = (!dry_run).then(|| lock::Lock::acquire(root)).transpose()?;
+
+    for removal in &removals {
+        take_away(out, root, removal, purge, dry_run)?;
+    }
+
+    Ok(())
+}
+
+/// Take one object away, and report what the system says afterwards.
+fn take_away(
+    out: &mut dyn Sink,
+    root: &Path,
+    removal: &Removal,
+    purge: bool,
+    dry_run: bool,
+) -> Result<()> {
+    let Removal { name, mask, .. } = removal;
+    let (kind, source) = (removal.kind(), removal.source());
+
+    let (action, path) = match mask {
+        Some(path) => ("mask", path.as_path()),
+        None => ("remove", source),
+    };
+
+    if !dry_run {
+        match mask {
+            // Written whole and over the top of whatever is there, so that
+            // masking something that is already masked is not a failure
+            Some(path) => apply::write_atomically(path, &[], Some(0o644))?,
+            None => fs::remove_file(source)
+                .map_err(|e| format!("Cannot remove {}: {e}", source.display()))?,
+        }
+    }
+
+    out.emit(Record::Change {
+        action: action.to_string(),
+        object: kind.to_string(),
+        summary: Some(path.display().to_string()),
+        error: None,
+    })?;
+
+    // A dry run has taken nothing away, so what the system says afterwards is
+    // not something it can be asked: whether a copy in a lower prefix answers
+    // for the name is a question about the ladder without this file in it, and
+    // the only honest way to ask it is to take the file out
+    if dry_run {
+        // Which leaves a run that was going to delete a file in the system
+        // saying nothing about it, and that will not do.  The file is named,
+        // and so is the reason the answer is a maybe
+        if let (Object::Template(template), true) = (&removal.object, purge)
+            && template.target().exists()
+        {
+            return out.emit(Record::Change {
+                action: "orphan".to_string(),
+                object: template.target().display().to_string(),
+                summary: Some(
+                    "would be taken away if nothing else instantiates it and it is unchanged"
+                        .to_string(),
+                ),
+                error: None,
+            });
+        }
+
+        return Ok(());
+    }
+
+    // A copy in a lower prefix answers for the name now, so the object has not
+    // gone anywhere and nothing it holds up has been let go of
+    if let Some(what) = installed_object(root, Path::new(name), kind)? {
+        return out.emit(Record::Change {
+            action: "remains".to_string(),
+            object: format!("{kind} {name}"),
+            summary: Some(what.source().display().to_string()),
+            error: None,
+        });
+    }
+
+    orphaned(out, root, removal, purge)
+}
+
+/// Report what an object that nothing answers for any more has left behind.
+///
+/// This is the half of a removal that a plain `rm` cannot do at all: the file a
+/// template wrote stays in the system, doing whatever it configures, with
+/// nothing left to say where it came from.  Naming it is not a complaint, it is
+/// the list of what the administrator now owns by hand — or, with `purge`, the
+/// list of what went with the template that wrote it.
+fn orphaned(out: &mut dyn Sink, root: &Path, removal: &Removal, purge: bool) -> Result<()> {
+    let mut report = |action: &str, what: String, why: String| {
+        out.emit(Record::Change {
+            action: action.to_string(),
+            object: what,
+            summary: Some(why),
+            error: None,
+        })
+    };
+
+    match (&removal.object, &removal.leaves) {
+        (Object::Template(template), Leaves::Target(wrote)) => {
+            let target = template.target();
+
+            // A target that is not there is nothing to say anything about: the
+            // template was never applied, or somebody has been here already
+            let Ok(found) = fs::read_to_string(target) else {
+                return Ok(());
+            };
+
+            // The file is taken away only where detc can still see its own hand
+            // in it.  Anything else is somebody's work — an edit, a file that
+            // was there before detc was, or a template that no longer renders
+            // and so cannot be compared — and deleting one of those on a guess
+            // is the single mistake a removal must not make
+            let mine = wrote.as_deref() == Some(found.as_str());
+
+            let why = match wrote {
+                _ if mine => "as detc wrote it",
+                Some(_) => "changed since detc wrote it",
+                // Saying which of the two it is would be a guess, and whether
+                // anybody has touched an orphan is the one thing worth knowing
+                None => "of a template that could not be instantiated to compare it",
+            };
+
+            if purge && mine {
+                fs::remove_file(target)
+                    .map_err(|e| format!("Cannot remove {}: {e}", target.display()))?;
+
+                return report("purge", target.display().to_string(), why.to_string());
+            }
+
+            // Asking for a purge and not getting one is worth a word: the file
+            // is still there, and the reason it is decides what to do next
+            let why = match purge {
+                true => format!("{why}, so it was left alone"),
+                false => why.to_string(),
+            };
+
+            report("orphan", target.display().to_string(), why)
+        }
+
+        (Object::Provider(_), Leaves::Type(kind)) => {
+            for resource in resource::Resources::from_system(root)?.resources() {
+                if resource.kind() == kind {
+                    report(
+                        "orphan",
+                        format!("resource {}", resource.id()),
+                        "of a type that no provider implements".to_string(),
+                    )?;
+                }
+            }
+
+            Ok(())
+        }
+
+        _ => Ok(()),
+    }
 }
 
 /// Show what an object of the system holds: the content that a template would
@@ -1913,6 +2379,12 @@ pub(crate) fn dispatch(
             raw,
             var,
         } => cat(out, root, object, *r#type, *raw, var),
+        Commands::Remove {
+            object,
+            r#type,
+            mask,
+            purge,
+        } => remove(out, root, object, *r#type, *mask, *purge, dry_run),
         Commands::Check { file, r#type, var } => check(out, root, file.as_deref(), *r#type, var),
         Commands::Var {
             file,

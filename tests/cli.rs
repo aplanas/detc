@@ -790,6 +790,482 @@ fn test_the_map_of_files_belongs_to_the_run() -> TestResult {
     Ok(())
 }
 
+/// Taking an object away is unlinking the file that the ladder resolved, which
+/// uncovers whatever was under it instead of removing the object.
+///
+/// That is the half of this a plain `rm` cannot report, and the reason the
+/// command exists: the administrator who deletes their own copy of a template
+/// has not stopped the template, they have gone back to the distribution's.
+#[test]
+fn test_an_object_that_is_taken_away_uncovers_what_was_under_it() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    let name = "/etc/ssh/sshd_config.d/root.conf";
+    let shipped = root.join("usr/share/detc/templates.d/etc/ssh/sshd_config.d/root.conf");
+    let mine = root.join("etc/detc/templates.d/etc/ssh/sshd_config.d/root.conf");
+
+    // The administrator's copy of a template that the distribution ships too
+    fs::create_dir_all(mine.parent().expect("the template has a directory"))?;
+    fs::write(&mine, "PermitRootLogin=yes\n")?;
+    assert_eq!(stdout(&detc(root, &["cat", name])), "PermitRootLogin=yes\n");
+
+    // A dry run names the file it would unlink, and unlinks nothing
+    let output = detc(root, &["--dry-run", "remove", name]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!("remove\ttemplate\t{}\n", mine.display())
+    );
+    assert!(mine.is_file());
+
+    // The real run reports the file that answers for the name afterwards
+    let output = detc(root, &["remove", name]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "remove\ttemplate\t{}\nremains\ttemplate {name}\t{}\n",
+            mine.display(),
+            shipped.display()
+        )
+    );
+    assert!(!mine.exists());
+
+    // And the template is still there, rendering what it always rendered
+    assert_eq!(stdout(&detc(root, &["cat", name])), "PermitRootLogin=no\n");
+
+    // What is left is the distribution's.  detc does not write that prefix, and
+    // an upgrade would put the file back, so unlinking it is not on offer
+    let output = detc(root, &["remove", name]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("the distribution installs"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(stderr(&output).contains("--mask"), "{}", stderr(&output));
+    assert!(shipped.is_file());
+
+    // Masking writes the zero byte file that the resolver reads as absent,
+    // which takes the object out of the ladder without touching what is under it
+    let output = detc(root, &["remove", name, "--mask"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!("mask\ttemplate\t{}\n", mine.display())
+    );
+    assert_eq!(fs::read(&mine)?, b"");
+    assert!(shipped.is_file());
+
+    // Now the object is gone: nothing lists it, nothing renders it, and there
+    // was no `remains` line, because nothing remains.  Which is also to say
+    // that the mask cannot be addressed to be taken away again -- undoing one
+    // is unlinking the zero byte file that the run above named
+    assert_eq!(
+        stdout(&detc(root, &["list", "--type", "template"]))
+            .matches(name)
+            .count(),
+        0
+    );
+    assert!(!detc(root, &["cat", name]).status.success());
+    assert!(!detc(root, &["remove", name, "--mask"]).status.success());
+
+    Ok(())
+}
+
+/// Every type of object is taken away by the name that `detc list` prints, and
+/// on the ladder that its own type is searched on.
+///
+/// A probe and a provider are programs and are searched for under `libexec`,
+/// so the prefix that masks one is `var/lib` and not `etc`.  The three rungs
+/// mean the same thing in both ladders, which is what lets one command answer
+/// for all five types.
+#[test]
+fn test_every_type_of_object_is_taken_away_by_the_name_that_lists_it() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    for (kind, name, source, mask) in [
+        (
+            "probe",
+            "system",
+            "usr/libexec/detc/probes/system.d/10-net",
+            "var/lib/detc/probes/system.d/10-net",
+        ),
+        (
+            "provider",
+            "pkg",
+            "usr/libexec/detc/providers.d/pkg",
+            "var/lib/detc/providers.d/pkg",
+        ),
+        (
+            "resource",
+            "pkg/nginx",
+            "usr/share/detc/resources.d/pkg/nginx.yaml",
+            "etc/detc/resources.d/pkg/nginx.yaml",
+        ),
+        (
+            "variable",
+            "system/10-ssh",
+            "usr/share/detc/variables/system.d/10-ssh.yaml",
+            "etc/detc/variables/system.d/10-ssh.yaml",
+        ),
+        (
+            "template",
+            "/etc/chrony/chrony.conf",
+            "usr/share/detc/templates.d/etc/chrony/chrony.conf",
+            "etc/detc/templates.d/etc/chrony/chrony.conf",
+        ),
+    ] {
+        // Each of them is the distribution's, so each of them is masked and
+        // none of them is unlinked
+        let output = detc(root, &["remove", name, "--type", kind, "--mask"]);
+        assert!(
+            output.status.success(),
+            "{kind} {name}: {}",
+            stderr(&output)
+        );
+        // The first line is the removal itself.  Whatever the object leaves
+        // behind follows it, and is its own test
+        assert_eq!(
+            stdout(&output).lines().next(),
+            Some(format!("mask\t{kind}\t{}", root.join(mask).display()).as_str()),
+            "{kind} {name}"
+        );
+
+        assert_eq!(fs::read(root.join(mask))?, b"", "{kind} {name}");
+        assert!(root.join(source).is_file(), "{kind} {name}");
+
+        // And the mask is read as absent, so the object is no longer one
+        let listing = stdout(&detc(root, &["list", "--type", kind]));
+        assert!(!listing.contains(source), "{kind} {name}: {listing}");
+    }
+
+    Ok(())
+}
+
+/// A probe is addressed by its mount point, which several files can share, and
+/// then the name does not say which of them to take away.
+#[test]
+fn test_a_name_that_addresses_more_than_one_probe_is_refused() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    // A second probe on the mount that `fixture` already has one on
+    program(
+        &root.join("usr/libexec/detc/probes/system.d/20-disk"),
+        "echo '{\"disk\": {\"root\": \"/dev/sda1\"}}'\n",
+    )?;
+
+    let output = detc(root, &["remove", "system", "--type", "probe", "--mask"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("addresses 2 probes"),
+        "{}",
+        stderr(&output)
+    );
+
+    // The file name tells them apart, and taking the injected one away
+    // uncovers the one the distribution ships under the same name
+    let injected = root.join("run/lib/detc/probes/system.d/20-disk");
+    program(
+        &injected,
+        "echo '{\"disk\": {\"root\": \"/dev/nvme0n1p1\"}}'\n",
+    )?;
+
+    let output = detc(root, &["remove", "20-disk", "--type", "probe"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "remove\tprobe\t{}\nremains\tprobe 20-disk\t{}\n",
+            injected.display(),
+            root.join("usr/libexec/detc/probes/system.d/20-disk")
+                .display()
+        )
+    );
+
+    Ok(())
+}
+
+/// A removal is refused whole: every object is resolved and judged before any
+/// of them is touched, so a command naming several is never half done.
+#[test]
+fn test_a_removal_is_refused_whole() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    // The administrator's copies, so that the first name of each run below is
+    // one that could have been taken away
+    let template = root.join("etc/detc/templates.d/etc/chrony/chrony.conf");
+    fs::create_dir_all(template.parent().expect("the template has a directory"))?;
+    fs::write(&template, "server ntp.example iburst\n")?;
+
+    let resource = root.join("etc/detc/resources.d/pkg/nginx.yaml");
+    fs::create_dir_all(resource.parent().expect("the resource has a directory"))?;
+    fs::write(&resource, "installed: false\n")?;
+
+    for arguments in [
+        // A name that addresses nothing
+        vec!["remove", "/etc/chrony/chrony.conf", "/etc/nowhere"],
+        // A type that the name is not of
+        vec!["remove", "/etc/chrony/chrony.conf", "--type", "resource"],
+        // The distribution's, which is refused without --mask
+        vec![
+            "remove",
+            "/etc/chrony/chrony.conf",
+            "/etc/ssh/sshd_config.d/root.conf",
+        ],
+        // Already the administrator's, so there is nothing above to mask from
+        vec!["remove", "/etc/chrony/chrony.conf", "--mask"],
+        // --purge is the file that a template instantiates, and a resource
+        // instantiates nothing that detc writes
+        vec!["remove", "pkg/nginx", "--purge"],
+    ] {
+        let output = detc(root, &arguments);
+        assert!(!output.status.success(), "{arguments:?} {output:?}");
+
+        // Nothing of the run happened, including the part of it that could have
+        assert_eq!(
+            fs::read_to_string(&template)?,
+            "server ntp.example iburst\n",
+            "{arguments:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(&resource)?,
+            "installed: false\n",
+            "{arguments:?}"
+        );
+    }
+
+    // And a run whose names are all good takes all of them away
+    let output = detc(root, &["remove", "/etc/chrony/chrony.conf", "pkg/nginx"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!template.exists() && !resource.exists());
+
+    Ok(())
+}
+
+/// A template that goes away leaves the file it wrote in the system, and the
+/// removal says so and says whether anybody has touched it since.
+///
+/// This is what a removal is for.  The file keeps configuring whatever it
+/// configures, with nothing left to say where it came from, and an
+/// administrator who is not told about it finds out from the behaviour of the
+/// machine.
+#[test]
+fn test_a_template_that_goes_away_names_the_file_it_leaves() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    let name = "/etc/ssh/sshd_config.d/root.conf";
+    let target = root.join("etc/ssh/sshd_config.d/root.conf");
+    let mine = root.join("etc/detc/templates.d/etc/ssh/sshd_config.d/root.conf");
+
+    fs::create_dir_all(target.parent().expect("the target has a directory"))?;
+    assert!(detc(root, &["apply", name]).status.success());
+    assert_eq!(fs::read_to_string(&target)?, "PermitRootLogin=no\n");
+
+    // While another template still instantiates the file, there is no orphan:
+    // the object has not gone anywhere, and `remains` says which file is it now
+    fs::create_dir_all(mine.parent().expect("the template has a directory"))?;
+    fs::write(&mine, "PermitRootLogin=yes\n")?;
+    let output = detc(root, &["remove", name]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains("remains\t"), "{output:?}");
+    assert!(!stdout(&output).contains("orphan\t"), "{output:?}");
+    assert!(target.is_file());
+
+    // With the last one gone the file is on its own, and it is still exactly
+    // what detc put there
+    let output = detc(root, &["remove", name, "--mask"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "mask\ttemplate\t{}\norphan\t{}\tas detc wrote it\n",
+            mine.display(),
+            target.display()
+        )
+    );
+
+    // And it is left where it is: taking the template away is not a licence to
+    // delete what the machine is running on
+    assert_eq!(fs::read_to_string(&target)?, "PermitRootLogin=no\n");
+
+    Ok(())
+}
+
+/// The other three things the file a template left can be, each of which stops
+/// `--purge` from taking it away.
+#[test]
+fn test_what_a_template_leaves_is_only_deleted_when_detc_wrote_it() -> TestResult {
+    // Somebody edited it since
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    let name = "/etc/ssh/sshd_config.d/root.conf";
+    let target = root.join("etc/ssh/sshd_config.d/root.conf");
+    fs::create_dir_all(target.parent().expect("the target has a directory"))?;
+    assert!(detc(root, &["apply", name]).status.success());
+    fs::write(&target, "PermitRootLogin=prohibit-password\n")?;
+
+    let output = detc(root, &["remove", name, "--mask", "--purge"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains(&format!(
+            "orphan\t{}\tchanged since detc wrote it, so it was left alone\n",
+            target.display()
+        )),
+        "{output:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(&target)?,
+        "PermitRootLogin=prohibit-password\n"
+    );
+
+    // The template no longer renders, so there is nothing to compare it with.
+    // Which of the two it is would be a guess, and a guess is not something to
+    // delete a file on
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    let name = "/etc/chrony/chrony.conf";
+    let target = root.join("etc/chrony/chrony.conf");
+    fs::create_dir_all(target.parent().expect("the target has a directory"))?;
+    fs::write(&target, "server pool.ntp.org iburst\n")?;
+
+    // `fixture` ships this one reading a variable the namespace does not have
+    assert!(!detc(root, &["check", name]).status.success());
+
+    let output = detc(root, &["remove", name, "--mask", "--purge"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("could not be instantiated to compare it, so it was left alone"),
+        "{output:?}"
+    );
+    assert!(target.is_file());
+
+    // And a template that was never applied leaves nothing to talk about
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    let output = detc(
+        root,
+        &["remove", "/etc/chrony/chrony.conf", "--mask", "--purge"],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!stdout(&output).contains("orphan"), "{output:?}");
+    assert!(!stdout(&output).contains("purge"), "{output:?}");
+
+    Ok(())
+}
+
+/// `--purge` takes the file away when detc can still see its own hand in it,
+/// and a dry run says that is what it would try.
+#[test]
+fn test_purge_takes_away_the_file_the_template_wrote() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    let name = "/etc/ssh/sshd_config.d/root.conf";
+    let target = root.join("etc/ssh/sshd_config.d/root.conf");
+    let shipped = root.join("usr/share/detc/templates.d/etc/ssh/sshd_config.d/root.conf");
+    let mask = root.join("etc/detc/templates.d/etc/ssh/sshd_config.d/root.conf");
+
+    fs::create_dir_all(target.parent().expect("the target has a directory"))?;
+    assert!(detc(root, &["apply", name]).status.success());
+    assert!(target.is_file());
+
+    // A dry run cannot say whether the file would go, because whether anything
+    // else instantiates it is a question about the ladder without the template
+    // in it.  What it can do is name the file rather than leave it out
+    let output = detc(root, &["--dry-run", "remove", name, "--mask", "--purge"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "mask\ttemplate\t{}\norphan\t{}\twould be taken away if nothing else instantiates it and it is unchanged\n",
+            mask.display(),
+            target.display()
+        )
+    );
+    assert!(target.is_file() && !mask.exists());
+
+    // And the real run takes it away, leaving the template that wrote it in
+    // place, because it is the distribution's and was only masked
+    let output = detc(root, &["remove", name, "--mask", "--purge"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "mask\ttemplate\t{}\npurge\t{}\tas detc wrote it\n",
+            mask.display(),
+            target.display()
+        )
+    );
+    assert!(!target.exists());
+    assert!(shipped.is_file());
+
+    Ok(())
+}
+
+/// A provider that goes away leaves every resource of its type unappliable, and
+/// the removal lists them.
+#[test]
+fn test_a_provider_that_goes_away_names_the_resources_it_orphans() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    // A second copy of the provider, so that the first removal uncovers it and
+    // orphans nothing
+    let injected = root.join("run/lib/detc/providers.d/pkg");
+    fs::create_dir_all(injected.parent().expect("the provider has a directory"))?;
+    fs::copy(root.join("usr/libexec/detc/providers.d/pkg"), &injected)?;
+    fs::set_permissions(&injected, fs::Permissions::from_mode(0o755))?;
+
+    let output = detc(root, &["remove", "pkg", "--type", "provider"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("remains\tprovider pkg"),
+        "{output:?}"
+    );
+    assert!(!stdout(&output).contains("orphan"), "{output:?}");
+
+    // With the last one gone, nothing can apply the resources of that type, and
+    // only of that type: the `unit` resources are somebody else's
+    let output = detc(root, &["remove", "pkg", "--type", "provider", "--mask"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "mask\tprovider\t{}\norphan\tresource pkg/nginx\tof a type that no provider implements\n",
+            root.join("var/lib/detc/providers.d/pkg").display()
+        )
+    );
+
+    // Which is exactly what a check of the system says afterwards
+    let output = detc(root, &["check", "--type", "resource"]);
+    assert!(!output.status.success());
+    assert!(
+        stdout(&output).contains("pkg/nginx") || stderr(&output).contains("pkg/nginx"),
+        "{output:?}"
+    );
+
+    Ok(())
+}
+
 #[test]
 fn test_schema_shows_the_provider_contract() -> TestResult {
     let tmp_root = tempfile::tempdir()?;
@@ -2353,6 +2829,66 @@ fn test_the_variables_of_the_administrator_are_not_a_bundle_to_carry() -> TestRe
             .is_file()
     );
     assert_eq!(stdout(&detc(root, &["var", "-k", "dns.domain"])), "mine\n");
+
+    Ok(())
+}
+
+/// A file that a bundle installed is not detc's to unlink, because unlinking
+/// it would last only until the next restore or the next boot.
+#[test]
+fn test_an_object_that_a_bundle_owns_is_not_unlinked() -> TestResult {
+    let tmp_built = tempfile::tempdir()?;
+    let file = bundle(tmp_built.path())?;
+
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    complete(root)?;
+
+    let output = detc(
+        root,
+        &[
+            "bundle",
+            "install",
+            file.to_str().unwrap(),
+            "--allow-unsigned",
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    // The bundle's copy is what the ladder resolves, since it installs into
+    // `run` and the distribution's is in `usr/share`
+    let name = "/etc/ssh/sshd_config.d/root.conf";
+    let owned = root.join("run/detc/templates.d/etc/ssh/sshd_config.d/root.conf");
+    assert!(owned.is_file());
+
+    let output = detc(root, &["remove", name]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("belongs to the bundle fleet 1"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("detc bundle remove"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(owned.is_file());
+
+    // Masking is the answer that lasts, because it writes in a prefix above the
+    // one the bundle installs into and the next restore does not undo it
+    let output = detc(root, &["remove", name, "--mask"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "mask\ttemplate\t{}\n",
+            root.join("etc/detc/templates.d/etc/ssh/sshd_config.d/root.conf")
+                .display()
+        )
+    );
+    assert!(owned.is_file());
+    assert!(!detc(root, &["cat", name]).status.success());
 
     Ok(())
 }

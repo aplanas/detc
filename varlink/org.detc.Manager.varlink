@@ -188,6 +188,36 @@ method Apply(
   var: Var
 ) -> (change: ?Change)
 
+# Take objects away, named the way `List` reports them.  What is unlinked is
+# the file that the ladder resolved, so taking one away uncovers whatever was
+# under it: the `remains` action reports the file that answers for the name
+# afterwards, and nothing is said when the name no longer addresses anything.
+# A file that the distribution ships is not detc's to unlink, and neither is one
+# that a bundle installed; `mask` writes the zero byte file in the
+# administrator's prefix that the resolver reads as absent, which is what
+# reaches both.
+#
+# An object that nothing answers for any more can leave something behind, and
+# the `orphan` action reports it: for a template the file it instantiated, which
+# keeps configuring the machine with nothing left to say where it came from, and
+# for a provider every resource of its type, which nothing can now apply.  The
+# summary of a template's orphan says whether the file is still as detc wrote
+# it.  `purge` takes that file away as well, and only where it is: a file that
+# was edited, or one whose template no longer renders and so cannot be compared,
+# is named and left alone.  It is refused for every type but template.
+#
+# With `dry_run`, name what would be taken away.  A dry run cannot say what a
+# removal would uncover, since that is a question about the ladder without the
+# file in it, so it reports no `remains` and no verdict on an orphan -- with
+# `purge` it still names the file that is at stake.  Streaming.
+method Remove(
+  names: []string,
+  type: ?ObjectType,
+  mask: bool,
+  purge: bool,
+  dry_run: bool
+) -> (change: ?Change)
+
 # Write the variables as drop-ins of the namespace.  They last until the next
 # boot, unless `persist` keeps them, which also takes away the drop-in that the
 # same variable had until then.  With `dry_run`, name the drop-ins that would
