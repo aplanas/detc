@@ -1846,7 +1846,7 @@ fn test_an_orphan_that_was_edited_is_left_alone_and_can_be_forgotten() -> TestRe
     let output = detc(root, &["orphans", "--forget", "/etc/nothing"]);
     assert!(!output.status.success());
     assert!(
-        stderr(&output).contains("Nothing that detc wrote is recorded at"),
+        stderr(&output).contains("Nothing that detc left in the system is recorded as"),
         "{}",
         stderr(&output)
     );
@@ -1884,10 +1884,149 @@ fn test_an_orphan_that_was_edited_is_left_alone_and_can_be_forgotten() -> TestRe
     Ok(())
 }
 
-/// A bundle that was kept and is not installed carries templates that are not
-/// in the ladder, so every file they wrote would read as left behind by
-/// nothing.  The question is refused rather than answered wrongly, which is the
-/// whole reason `apply` is not what deletes these.
+/// A resource can leave the ladder the same way a template can, and what it did
+/// to the system stays done.  It is reported, it survives `--purge`, and
+/// `--forget` is the only thing that stops the report — because the inverse of a
+/// resource is a declaration of absence, which belongs to the type and not to
+/// detc.
+#[test]
+fn test_a_resource_whose_declaration_is_gone_is_reported_and_never_undone() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+    complete(root)?;
+
+    let state = root.join("var/lib/units/nginx");
+    let source = "usr/share/detc/resources.d/unit/nginx";
+
+    let output = detc(root, &["apply"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(state.is_file());
+
+    // What the ladder still declares is not left behind, and forgetting it
+    // would only make this look as though it had worked
+    assert_eq!(stdout(&detc(root, &["orphans"])), "");
+
+    let output = detc(root, &["orphans", "--forget", "unit/nginx"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("unit/nginx is declared by a resource that the system still has"),
+        "{}",
+        stderr(&output)
+    );
+
+    fs::remove_file(root.join(source))?;
+
+    let line = format!(
+        "orphan\tunit/nginx\tof resource {source}, which is no longer in the system, as detc applied it"
+    );
+
+    let output = detc(root, &["orphans"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), format!("{line}\n"));
+
+    // A run that looked at everything says it, and sends whoever reads it to
+    // the half that can do something -- which for a resource is forgetting it
+    let output = detc(root, &["apply"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains(&format!("{line}; `detc orphans --forget` stops the report")),
+        "{}",
+        stdout(&output)
+    );
+
+    // Asking for a purge does not get one, and says so
+    let output = detc(root, &["orphans", "--purge"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), format!("{line}, so it was left alone\n"));
+    assert_eq!(fs::read_to_string(&state)?, "true");
+
+    // The unit is the administrator's from here, and is still enabled
+    let output = detc(root, &["orphans", "--forget", "unit/nginx"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "forget\tunit/nginx\tdetc stops answering for it\n"
+    );
+
+    assert_eq!(stdout(&detc(root, &["orphans"])), "");
+    let applied = stdout(&detc(root, &["apply"]));
+    assert!(!applied.contains("orphan"), "{applied}");
+    assert_eq!(fs::read_to_string(&state)?, "true");
+
+    Ok(())
+}
+
+/// What a resource left behind is a question for the provider of its type, so
+/// the report says which of the three answers came back: the state is still the
+/// one detc asserted, it is not, or nobody could be asked at all.  A resource
+/// the system no longer has is not reported and not kept.
+#[test]
+fn test_an_orphan_resource_says_what_the_provider_answered() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+    complete(root)?;
+
+    let state = root.join("var/lib/units/nginx");
+    let provider = root.join("usr/libexec/detc/providers.d/unit");
+    let source = "usr/share/detc/resources.d/unit/nginx";
+
+    assert!(detc(root, &["apply"]).status.success());
+    fs::remove_file(root.join(source))?;
+
+    // Somebody turned the unit off after detc enabled it, which is exactly the
+    // work that must not be undone on a guess
+    fs::write(&state, "false")?;
+
+    let output = detc(root, &["orphans", "--purge"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "orphan\tunit/nginx\tof resource {source}, which is no longer in the system, changed since detc applied it, so it was left alone\n"
+        )
+    );
+
+    // The provider went with the declaration -- a package upgrade takes both --
+    // and there is nothing left that knows how to look
+    let kept = fs::read(&provider)?;
+    fs::remove_file(&provider)?;
+
+    let output = detc(root, &["orphans"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "orphan\tunit/nginx\tof resource {source}, which is no longer in the system, and no provider answers for unit, so what became of it cannot be asked\n"
+        )
+    );
+
+    fs::write(&provider, kept)?;
+    fs::set_permissions(&provider, fs::Permissions::from_mode(0o755))?;
+
+    // And once the system does not have it at all, the record is the last thing
+    // left of it, which is worth neither reporting nor keeping
+    fs::remove_file(&state)?;
+
+    let output = detc(root, &["orphans"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+
+    let output = detc(root, &["apply"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!stdout(&output).contains("orphan"), "{}", stdout(&output));
+
+    let record = fs::read_to_string(root.join("var/lib/detc/written.yaml"))?;
+    assert!(!record.contains("unit/nginx"), "{record}");
+
+    Ok(())
+}
+
+/// A bundle that was kept and is not installed carries objects that are not in
+/// the ladder, so everything they left in the system would read as left behind
+/// by nothing.  The question is refused rather than answered wrongly, which is
+/// the whole reason `apply` is not what deletes these.
 #[test]
 fn test_orphans_are_not_answered_while_a_bundle_has_not_come_back() -> TestResult {
     let tmp_built = tempfile::tempdir()?;
@@ -1921,7 +2060,7 @@ fn test_orphans_are_not_answered_while_a_bundle_has_not_come_back() -> TestResul
     assert!(!output.status.success());
     assert!(
         stderr(&output).contains(
-            "The bundle fleet is kept and not installed, so the templates it carries are not in the ladder"
+            "The bundle fleet is kept and not installed, so the objects it carries are not in the ladder"
         ),
         "{}",
         stderr(&output)

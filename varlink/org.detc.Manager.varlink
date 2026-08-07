@@ -240,31 +240,39 @@ method Remove(
   dry_run: bool
 ) -> (change: ?Change)
 
-# The configuration files that no template writes any more, and what to do
-# about them.
+# What detc left in the system that nothing declares any more, and what to do
+# about it.
 #
-# A template can leave the ladder without anybody removing it -- a bundle taken
+# An object can leave the ladder without anybody removing it -- a bundle taken
 # away, a new version of one that no longer carries it, a package upgrade, a
-# file masked by hand -- and the file it instantiated stays in the system,
-# configuring the machine, with nothing left to say where it came from.  The
-# ladder has no memory of what it used to hold, so these are found in the record
-# that every `Apply` keeps of what it wrote: the path of each configuration
-# file, the digest of what was put in it, and the template that put it there.
+# file masked by hand -- and what it did to the machine stays done: the file it
+# instantiated is still configuring the machine, the package it installed still
+# installed.  The ladder has no memory of what it used to hold, so these are
+# found in the record that every `Apply` keeps: the path of each configuration
+# file with the digest of what was put in it and the template that put it there,
+# and each resource with the state that was asserted of it and the declaration
+# that asked for it.
 #
-# The `orphan` action names one, and its summary says which template wrote it
-# and whether the file is still those bytes.  `Apply` reports the same lines and
-# takes nothing away, which is the whole reason this method is separate: a
-# ladder that is short because a file system is not mounted, or because a bundle
-# has not come back, reads exactly like a template that was withdrawn, and
-# `Apply` is what runs unattended at every boot.
+# The `orphan` action names one.  For a file, the summary says which template
+# wrote it and whether it is still those bytes; for a resource, which declaration
+# asked for it and what its provider says of it now -- as detc applied it,
+# changed since, or nothing, when no provider is left to answer.  A file is named
+# by its path and a resource by `type/name`.  `Apply` reports the same lines and
+# touches nothing, which is the whole reason this method is separate: a ladder
+# that is short because a file system is not mounted, or because a bundle has not
+# come back, reads exactly like an object that was withdrawn, and `Apply` is what
+# runs unattended at every boot.
 #
 # With `purge`, the files that still hold what detc wrote are taken away and
-# reported with the `purge` action; one that was edited since is named and left
-# alone, and is the administrator's to keep or delete.  `forget` stops the
-# record answering for the given files without touching them, which is how an
-# edited one stops being reported; a path that no record holds, or that a
-# template of the system still writes, is refused.  The two cannot be asked for
-# together.
+# reported with the `purge` action.  A file that was edited since is named and
+# left alone, and so is every resource: the inverse of writing a file is
+# unlinking it, but the inverse of a resource is a declaration of absence, and
+# which property spells absence belongs to the type and not to detc.
+#
+# `forget` stops the record answering for the given objects without touching
+# them, which is how what cannot be purged stops being reported; a name that no
+# record holds, or that the ladder still declares, is refused.  The two cannot be
+# asked for together.
 #
 # A purge is recorded in the journal, being the one thing here that changes the
 # system, and `Report` names it under the `orphans` command.

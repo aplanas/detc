@@ -83,6 +83,12 @@ while the package stays installed.  `--purge` is refused for a resource for exac
 reason — it takes away a file that `detc` wrote, and no such file exists here.  The sequence
 is declare absent, `detc apply`, then remove the declaration once the system says so.
 
+The same holds when nobody removed anything and the declaration simply left the ladder, which
+a package upgrade or a withdrawn bundle does.  `detc orphans` then names the resource, asks
+your `inspect` what became of what `detc` asserted, and leaves it exactly as it is; `--purge`
+says so and moves on.  Reporting it well is the most that can be done from the outside, which
+is why the rule above is a rule.
+
 The consequence for a provider is that `inspect` has to report the absent case rather than
 failing on it, and `apply` has to be able to reach it.  `providers/pkg` says why it reports a
 missing package as `installed: false` and not as an absent resource; `providers/path` says the

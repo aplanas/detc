@@ -513,7 +513,7 @@ pub(crate) fn call(command: &Commands, dry_run: bool) -> Result<(&'static Method
             "Orphans",
             varlink::parameters(&OrphansParams {
                 purge: *purge,
-                forget: forget.iter().map(name).collect(),
+                forget: forget.clone(),
                 dry_run,
             })?,
         ),
@@ -713,7 +713,7 @@ pub(crate) fn command(method: &Method, parameters: Option<Value>) -> Result<(Com
             (
                 Commands::Orphans {
                     purge: params.purge,
-                    forget: params.forget.into_iter().map(PathBuf::from).collect(),
+                    forget: params.forget,
                 },
                 params.dry_run,
             )

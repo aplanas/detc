@@ -165,16 +165,17 @@ each change is reported as it is made.  Objects that could not be applied are
 reported and the run ends with a non\-zero status; the ones that succeeded are
 still applied and still recorded.
 .PP
-What the run puts in each configuration file is written down in
+What the run puts in each configuration file, and what it asserts of each
+resource, is written down in
 .IR /var/lib/detc/written.yaml ,
-so that a file whose template later leaves the ladder can still be recognised.
-A run that looked at the whole system \(em no
+so that an object which later leaves the ladder can still be recognised by what
+it left in the system.  A run that looked at the whole system \(em no
 .I FILE
 and no
 .B \-t
-\(em names those files at the end, as
+\(em names those at the end, as
 .BR orphan ,
-and takes none of them away:
+and touches none of them:
 .B detc orphans
 below is the half that acts, and says why the two are apart.  An orphan is not a
 failure and does not change the status.
@@ -195,7 +196,8 @@ missing everything one carries it would otherwise be an empty report, which
 reads as nothing to change.  The first line says which it is.  No orphan is
 named then either, for the same reason
 .B detc orphans
-refuses while a bundle is out: every file the bundle wrote would be one.
+refuses while a bundle is out: everything the bundle left in the system would be
+one.
 .PP
 .RS
 .EX
@@ -400,64 +402,101 @@ line and no verdict on an orphan.  With
 the file that is at stake is still named.
 .
 .SS detc orphans
-Show the configuration files that no template writes any more.
+Show what detc left in the system that nothing declares any more.
 .PP
 .B detc remove \-\-purge
-covers the removal somebody asked for.  This covers the one nobody did: a
-template can leave the ladder on its own \(em a bundle taken away, a new version
+covers the removal somebody asked for.  This covers the one nobody did: an
+object can leave the ladder on its own \(em a bundle taken away, a new version
 of one that no longer carries it, a package upgrade, a file masked by hand \(em
-and the file it instantiated stays where it is, configuring the machine, with
-nothing left to say where it came from.
+and what it did to the machine stays done.  The file it instantiated is still
+configuring the machine; the package it installed is still installed, the unit
+still enabled.  Nothing is left to say where either came from.
 .PP
-Nothing in a ladder remembers what it used to hold, and a file cannot be
-recognised by rendering a template that is gone; so every
+Nothing in a ladder remembers what it used to hold, a file cannot be recognised
+by rendering a template that is gone, and a resource cannot be asked about
+without the state that was asserted of it; so every
 .B detc apply
-writes down what it put where, in
+writes down what it put where and what it asserted, in
 .IR /var/lib/detc/written.yaml ,
 and this reads that back against the ladder.  A record that holds nothing \(em
 the first boot of a version that keeps one \(em reports nothing, until something
 has been applied.
 .PP
+A file is named by its path and a resource by
+.IR type / name ,
+which is what each of them is addressed by below.
+.PP
 .B detc apply
-prints the same files at the end of a run and takes none of them away.  That
+prints the same list at the end of a run and touches none of it.  That
 separation is the reason this command exists:
 .B apply
 is what runs unattended at every boot, and a ladder that is short because
 .I /usr
-is not mounted, or because a bundle has not come back, reads exactly like a
-template that was withdrawn.  Naming an orphan that is not one costs a line;
+is not mounted, or because a bundle has not come back, reads exactly like an
+object that was withdrawn.  Naming an orphan that is not one costs a line;
 deleting
 .I /etc/resolv.conf
 on the strength of a mount that was late costs the machine.
 .PP
+A resource is reported and never undone, and that is not caution.  The inverse
+of writing a file is unlinking it, and detc knows how; the inverse of a resource
+is a declaration of absence, and which property spells absence belongs to the
+type and not to the engine \(em
+.I installed:\ false
+for a package,
+.I ensure:\ absent
+for a path \(em which is the same ground
+.B detc remove \-\-purge
+is refused for a resource on.  Some of them have no inverse at all: a reboot
+that happened, a migration that ran.
+.PP
+What the report can do is say what became of it, by asking the provider of its
+type with the state that was recorded \(em the same
+.B inspect
+that
+.B \-\-dry\-run
+runs, and free of side effects by contract.  So a line reads
+.IR "as detc applied it" ,
+.IR "changed since detc applied it" ,
+or
+.I no provider answers for
+the type, when there is nothing left that knows how to look.  A resource the
+provider reports as absent is not reported at all, and its record is dropped:
+there is nothing left of it to answer for.
+.PP
 The command is refused outright while a bundle is kept and not installed, naming
-it: the templates it carries are not in the ladder, so everything they wrote
-would read as an orphan.  Other commands only get a note on the standard error;
-this one would be answering wrongly rather than incompletely.
+it: the objects it carries are not in the ladder, so everything they left in the
+system would read as an orphan.  Other commands only get a note on the standard
+error; this one would be answering wrongly rather than incompletely.
 .TP
 .B \-\-purge
-Take away the ones that still hold what detc wrote; the line is then
+Take away the files that still hold what detc wrote; the line is then
 .B purge
 rather than
 .BR orphan .
 A file that was edited since is named and left where it is, the same way
 .B detc remove \-\-purge
-leaves one.  It is committed to the history as a single commit, under the
+leaves one, and so is every resource, for the reason above.  It is committed to
+the history as a single commit, under the
 .B orphans
 command, which
 .B detc report
 names; a run that only reports records nothing and takes no lock.
 .TP
-.BR \-\-forget " " \fIFILE\fR
-Stop the record answering for a file instead, without touching it, which is how
-one that was edited becomes the administrator's own rather than a line at every
-run.  The line is
+.BR \-\-forget " " \fIOBJECT\fR
+Stop the record answering for an object instead, without touching it, which is
+how a file that was edited, or a resource that cannot be undone at all, becomes
+the administrator's own rather than a line at every run.
+.I OBJECT
+is the path or the
+.IR type / name
+that the report printed.  The line is
 .BR forget .
 .IP
-A path that no record holds is refused, and so is one that a template of the
-system still writes: the next run would record it again, and forgetting it would
-only look as though it had worked.  Every path is checked before any of them is
-forgotten.  This cannot be asked for together with
+A name that no record holds is refused, and so is one that the ladder still
+declares: the next run would record it again, and forgetting it would only look
+as though it had worked.  Every name is checked before any of them is forgotten.
+This cannot be asked for together with
 .BR \-\-purge .
 .TP
 .B \-\-dry\-run
@@ -863,14 +902,19 @@ What the last run did, which is what
 reads when there is no journal.
 .TP
 .I /var/lib/detc/written.yaml
-Every configuration file a run instantiated, the digest of what was put in it,
-and the template that put it there.  It is what
+Every configuration file a run instantiated, with the digest of what was put in
+it and the template that put it there, and every resource a run asserted, with
+the state it asserted and the declaration that asked for it.  A file is a digest
+because the question is only whether it is still detc's; a resource is kept
+whole because asking whether it still holds means asking its provider, and a
+provider is asked with the state it was given.  It is what
 .B detc orphans
 reads, and it is kept here and not under
 .I /run
 because what it describes is: a reboot takes the ladder away and leaves
 .I /etc/motd
-exactly where it was.  Readable by its owner alone.
+exactly where it was.  Readable by its owner alone, which is also where a
+password hash reaches it.
 .TP
 .I /var/lib/detc/run.lock
 The lock named by

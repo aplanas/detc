@@ -324,6 +324,22 @@ pub struct Instantiated<'a> {
     pub content: &'a str,
 }
 
+/// The resource that a change asserts, for the same record.
+///
+/// The state travels whole rather than as a fingerprint of one, because asking
+/// whether it still holds means asking the provider, and a provider is asked
+/// with the state it was given: `{"name":…,"desired":{…}}`.  A record that kept
+/// only a digest could tell that something had changed and never what it was
+/// supposed to be.
+pub struct Applied<'a> {
+    /// How a declaration names the resource, `type/name`.
+    pub id: &'a str,
+    /// The declaration that asks for it, as the ladder resolved it.
+    pub source: &'a Path,
+    /// The state it asks for, expanded and read through the schema of the type.
+    pub desired: &'a Map<String, Value>,
+}
+
 /// One object of the system, and what has to happen to it.
 #[derive(Debug)]
 pub struct Change {
@@ -453,10 +469,10 @@ impl Change {
     /// The configuration file that the change instantiates, and what goes in
     /// it.
     ///
-    /// `None` for a resource, which writes nothing that is detc's to recognise
-    /// later, and for an object that could not be worked out: a template that
-    /// stopped rendering for one run has not stopped writing the file it wrote
-    /// in the previous one, and there is nothing here to say about it.
+    /// `None` for a resource, whose counterpart is [`Change::applied`], and for
+    /// an object that could not be worked out: a template that stopped
+    /// rendering for one run has not stopped writing the file it wrote in the
+    /// previous one, and there is nothing here to say about it.
     pub fn instantiated(&self) -> Option<Instantiated<'_>> {
         match &self.target {
             Target::Template {
@@ -470,6 +486,26 @@ impl Change {
                 content,
             }),
             Target::Resource { .. } | Target::Broken { .. } => None,
+        }
+    }
+
+    /// The resource that the change asserts, and the state it asserts of it.
+    ///
+    /// The other half of [`Change::instantiated`], and the same idea: what the
+    /// run put into the system, in the terms that can be asked about again
+    /// afterwards.  For a file that is a digest, and for a resource it is the
+    /// desired state itself, because the only thing that can answer "is this
+    /// still so" is the provider, and what a provider is asked is a state.
+    pub fn applied(&self) -> Option<Applied<'_>> {
+        match &self.target {
+            Target::Resource {
+                resource, desired, ..
+            } => Some(Applied {
+                id: &self.id,
+                source: resource.source(),
+                desired,
+            }),
+            Target::Template { .. } | Target::Broken { .. } => None,
         }
     }
 
@@ -857,7 +893,12 @@ impl Plan {
 /// resource does not mention is not managed by it, and both sides are read
 /// through the schema first, so that a provider written in shell reporting
 /// `"true"` matches a declaration that says `true`.
-fn difference(
+///
+/// The [record](crate::written) of what detc did asks the same question of a
+/// resource that nothing declares any more, and has to ask it in the same
+/// words: a state that reads as applied here and as somebody else's work there
+/// would be worse than either answer.
+pub(crate) fn difference(
     schema: &provider::Schema,
     desired: &Map<String, Value>,
     current: Option<&Value>,

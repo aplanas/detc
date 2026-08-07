@@ -5,7 +5,7 @@
 //! different from `/` with `--root`, so that a system can be inspected, or
 //! prepared, from outside.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -224,17 +224,19 @@ pub(crate) enum Commands {
         purge: bool,
     },
 
-    /// Show the configuration files that no template writes any more
+    /// Show what detc left in the system that nothing declares any more
     Orphans {
-        /// Take away the ones that still hold what detc wrote.  A file that
-        /// was edited since is named and left alone
+        /// Take away the configuration files that still hold what detc wrote.
+        /// A file that was edited since, and every resource, is named and left
+        /// alone
         #[arg(long)]
         purge: bool,
 
-        /// Stop answering for these files instead, without touching them,
-        /// which is how a file that was edited becomes the administrator's
-        #[arg(long, value_name = "FILE", conflicts_with = "purge")]
-        forget: Vec<PathBuf>,
+        /// Stop answering for these instead, without touching them, which is
+        /// how what was left behind becomes the administrator's.  Named the way
+        /// the report prints them: a path, or `type/name` for a resource
+        #[arg(long, value_name = "OBJECT", conflicts_with = "purge")]
+        forget: Vec<String>,
     },
 
     /// Put objects back that a zero byte file takes out of the ladder
@@ -1477,17 +1479,57 @@ fn orphaned(
     }
 }
 
-/// Every configuration file that the ladder declares, named the way the record
-/// of what detc wrote names it.
+/// The whole ladder, for the one question that only a run which read all of it
+/// may ask: is there anything detc left that nothing declares any more?
+///
+/// The providers travel with it because answering it for a resource means
+/// asking the provider of its type whether what detc asserted still holds.
+struct Ladder {
+    declared: written::Declared,
+    providers: provider::Providers,
+}
+
+impl Ladder {
+    /// Read what the system declares now, named the way the record of what detc
+    /// did names it.
+    fn read(root: &Path) -> Result<Self> {
+        let templates = template::Templates::from_system(root)?;
+        let resources = resource::Resources::from_system(root)?;
+
+        Ok(Self {
+            declared: declared(root, &templates, &resources),
+            providers: provider::Providers::from_system(root)?,
+        })
+    }
+
+    /// Everything detc left behind that the ladder no longer accounts for.
+    fn orphans(&self, root: &Path, written: &written::Written) -> Vec<written::Orphan> {
+        written.orphans(root, &self.declared, &self.providers)
+    }
+}
+
+/// Every object that the ladder declares, named the way the record of what detc
+/// did names it.
 ///
 /// It is the whole ladder and never the objects that a run was asked about:
-/// only a run that looked at everything can say that a file is not declared.
-fn declared(root: &Path, templates: &template::Templates) -> BTreeSet<String> {
-    templates
-        .templates()
-        .iter()
-        .map(|template| apply::files_key(root, template.target()))
-        .collect()
+/// only a run that looked at everything can say that something is not declared.
+fn declared(
+    root: &Path,
+    templates: &template::Templates,
+    resources: &resource::Resources,
+) -> written::Declared {
+    written::Declared {
+        files: templates
+            .templates()
+            .iter()
+            .map(|template| apply::files_key(root, template.target()))
+            .collect(),
+        resources: resources
+            .resources()
+            .iter()
+            .map(|resource| resource.id())
+            .collect(),
+    }
 }
 
 /// How the record of what detc wrote names a file that somebody typed.
@@ -1501,26 +1543,32 @@ fn key_of(root: &Path, path: &Path) -> String {
         .to_string()
 }
 
-/// The configuration files that no template writes any more.
+/// What detc left in the system that nothing declares any more.
 ///
 /// This is the other half of [`orphaned`].  A removal names what the object it
-/// took away leaves behind; this names what was left behind by a template that
+/// took away leaves behind; this names what was left behind by an object that
 /// nobody removed at all — a bundle that was taken away, a new version of one
 /// that no longer carries it, a package upgrade, a file masked by hand.  The
 /// ladder has no memory of what it used to hold, so nothing else in detc can
-/// see those, which is what the [record](written) of what detc wrote is for.
+/// see those, which is what the [record](written) of what detc did is for.
 ///
 /// A run of `apply` finds them and says so, and this is the deliberate half
 /// that acts on them.  The two are separate on purpose: `apply` runs unattended
 /// at every boot, and a ladder that is short because `/usr` is not mounted, or
-/// because a bundle did not come back, reads exactly like a template that was
+/// because a bundle did not come back, reads exactly like an object that was
 /// withdrawn.  Reporting an orphan that is not one costs a line, and deleting
 /// `resolv.conf` on the strength of a mount that is late costs the machine.
+///
+/// Acting is a file and never a resource, and that is not caution.  The inverse
+/// of writing a file is unlinking it, and detc knows how; the inverse of a
+/// resource is a declaration of absence, and which property spells absence
+/// belongs to the type and not to the engine — the same reason `detc remove
+/// --purge` is refused for one.
 fn orphans(
     out: &mut dyn Sink,
     root: &Path,
     purge: bool,
-    forget: &[PathBuf],
+    forget: &[String],
     dry_run: bool,
 ) -> Result<()> {
     // The same reason, from the one direction detc can do something about: the
@@ -1537,20 +1585,20 @@ fn orphans(
         };
 
         return err!(
-            "The {subject} {} {are} kept and not installed, so the templates {carry} are not in the ladder and every file they wrote would read as an orphan; `detc bundle restore` puts {} back first",
+            "The {subject} {} {are} kept and not installed, so the objects {carry} are not in the ladder and everything they left in the system would read as an orphan; `detc bundle restore` puts {} back first",
             outstanding.join(", "),
             if outstanding.len() == 1 { "it" } else { "them" }
         );
     }
 
     let mut written = written::Written::read(root)?;
-    let declared = declared(root, &template::Templates::from_system(root)?);
+    let ladder = Ladder::read(root)?;
 
     if !forget.is_empty() {
-        return release(out, root, written, &declared, forget, dry_run);
+        return release(out, root, written, &ladder, forget, dry_run);
     }
 
-    let orphans = written.orphans(root, &declared);
+    let orphans = ladder.orphans(root, &written);
     let writes = purge && !dry_run;
 
     // The namespace is built only when the journal is going to be given
@@ -1558,10 +1606,7 @@ fn orphans(
     // installed: a run that only reports is not one that should pay for that.
     // It is built before anything is deleted, because what a probe answers
     // afterwards is not the system the purge happened in
-    let recording = writes
-        && orphans
-            .iter()
-            .any(|orphan| orphan.state == written::State::AsWritten);
+    let recording = writes && orphans.iter().any(|orphan| orphan.purgeable().is_some());
     let var = recording
         .then(|| var::Variables::from_system(root))
         .transpose()?;
@@ -1575,49 +1620,53 @@ fn orphans(
     let mut forgotten = false;
 
     for orphan in &orphans {
-        let file = orphan.path.display().to_string();
+        let object = orphan.object();
 
-        match orphan.state {
-            // Somebody has been here already.  The record is the last thing
-            // left of the file, and it is worth neither reporting nor keeping
-            written::State::Gone => {
-                if writes {
-                    written.forget(&orphan.key);
-                    forgotten = true;
-                }
+        // Somebody has been here already, or the system never had it.  The
+        // record is the last thing left of it, and it is worth neither
+        // reporting nor keeping
+        if orphan.state() == written::State::Gone {
+            if writes {
+                written.forget(orphan.key());
+                forgotten = true;
             }
 
+            continue;
+        }
+
+        match orphan.purgeable() {
             // The file is at stake and the run is a rehearsal, so it is named
             // rather than counted: a dry run that says nothing about a file it
             // was going to delete is the one that must not happen
-            written::State::AsWritten if purge && dry_run => {
+            Some(_) if purge && dry_run => {
                 out.emit(Record::Change {
                     action: "orphan".to_string(),
-                    object: file,
+                    object,
                     summary: Some(format!("would be taken away, {}", orphan.why())),
                     error: None,
                 })?;
             }
 
-            written::State::AsWritten if purge => {
-                fs::remove_file(&orphan.path).map_err(|e| format!("Cannot remove {file}: {e}"))?;
-                written.forget(&orphan.key);
+            Some(path) if purge => {
+                fs::remove_file(path).map_err(|e| format!("Cannot remove {object}: {e}"))?;
+                written.forget(orphan.key());
 
                 let record = Record::Change {
                     action: "purge".to_string(),
-                    object: file,
-                    summary: Some(orphan.why().to_string()),
+                    object,
+                    summary: Some(orphan.why()),
                     error: None,
                 };
 
                 lines.push(record.line());
-                purged.push(orphan.path.clone());
+                purged.push(path.to_path_buf());
                 out.emit(record)?;
             }
 
-            // Which leaves the file that was edited, and the whole list when
-            // nothing was asked for.  Asking for a purge and not getting one is
-            // worth a word, the same one a removal says it with
+            // Which leaves the file that was edited, every resource, and the
+            // whole list when nothing was asked for.  Asking for a purge and
+            // not getting one is worth a word, the same one a removal says it
+            // with
             _ => {
                 let why = match purge {
                     true => format!("{}, so it was left alone", orphan.summary()),
@@ -1626,7 +1675,7 @@ fn orphans(
 
                 out.emit(Record::Change {
                     action: "orphan".to_string(),
-                    object: file,
+                    object,
                     summary: Some(why),
                     error: None,
                 })?;
@@ -1648,61 +1697,67 @@ fn orphans(
     Ok(())
 }
 
-/// Take down what the run put in the system, and drop what is not in it any
-/// more.
+/// Take down what the run put in the system, drop what is not in it any more,
+/// and answer with what it left behind that nothing declares.
 ///
-/// `templates` is the whole ladder for a run that looked at all of it, and
-/// nothing for a run that was given one object.  An entry is dropped only when
-/// the file it names is neither declared nor in the system, and a run that did
-/// not look at everything cannot say the first half of that.
+/// `ladder` is the whole of it for a run that looked at all of it, and nothing
+/// for a run that was given one object.  An entry is dropped only when what it
+/// names is neither declared nor in the system, and a run that did not look at
+/// everything cannot say the first half of that — nor say anything at all about
+/// orphans, which is why it answers with none.
 fn keep_what_was_written(
     root: &Path,
     plan: &apply::Plan,
-    templates: Option<&template::Templates>,
-) -> Result<()> {
+    ladder: Option<&Ladder>,
+) -> Result<Vec<written::Orphan>> {
     let mut written = written::Written::read(root)?;
 
     written.record(root, plan);
 
-    if let Some(templates) = templates {
-        let gone: Vec<String> = written
-            .orphans(root, &declared(root, templates))
-            .iter()
-            .filter(|orphan| orphan.state == written::State::Gone)
-            .map(|orphan| orphan.key.clone())
-            .collect();
+    let Some(ladder) = ladder else {
+        written.write(root)?;
+        return Ok(Vec::new());
+    };
 
-        for key in gone {
-            written.forget(&key);
+    // Asked once, and both used and answered with: what a provider reports is
+    // the system as it is at this moment, and asking it twice would be paying
+    // twice for two answers that have to agree anyway
+    let orphans = ladder.orphans(root, &written);
+
+    for orphan in &orphans {
+        if orphan.state() == written::State::Gone {
+            written.forget(orphan.key());
         }
     }
 
-    written.write(root)
+    written.write(root)?;
+
+    Ok(orphans)
 }
 
-/// Name the configuration files that no template writes any more, for a run
-/// that was not asked about them.
+/// Name what detc left in the system that nothing declares any more, for a run
+/// that was not asked about it.
 ///
 /// A run of `apply` reports them and takes none of them away; [`orphans`] is
 /// the half that acts, and each line says which way this one goes.  They are
 /// not failures — the system is not wrong, it is holding something that nothing
 /// declares — so the exit status of the run says nothing about them.
-fn report_orphans(out: &mut dyn Sink, root: &Path, declared: &BTreeSet<String>) -> Result<()> {
-    for orphan in written::Written::read(root)?.orphans(root, declared) {
-        // A file that is not there any more is not something the run has to
+fn report_orphans(out: &mut dyn Sink, orphans: &[written::Orphan]) -> Result<()> {
+    for orphan in orphans {
+        // What is not in the system any more is not something the run has to
         // tell anybody about
-        if orphan.state == written::State::Gone {
+        if orphan.state() == written::State::Gone {
             continue;
         }
 
-        let next = match orphan.state {
-            written::State::AsWritten => "`detc orphans --purge` takes it away",
-            _ => "`detc orphans --forget` stops the report",
+        let next = match orphan.purgeable() {
+            Some(_) => "`detc orphans --purge` takes it away",
+            None => "`detc orphans --forget` stops the report",
         };
 
         out.emit(Record::Change {
             action: "orphan".to_string(),
-            object: orphan.path.display().to_string(),
+            object: orphan.object(),
             summary: Some(format!("{}; {next}", orphan.summary())),
             error: None,
         })?;
@@ -1711,53 +1766,67 @@ fn report_orphans(out: &mut dyn Sink, root: &Path, declared: &BTreeSet<String>) 
     Ok(())
 }
 
-/// Stop answering for files that were left behind, without touching them.
+/// Stop answering for what was left behind, without touching it.
 ///
-/// A file that was edited since detc wrote it is never deleted, so without this
-/// there would be no way to stop being told about it but to delete it by hand.
-/// It is the administrator's from here, which is what it already was.
+/// A file that was edited since detc wrote it is never deleted, and a resource
+/// is never undone at all, so without this there would be no way to stop being
+/// told about either one.  It is the administrator's from here, which for both
+/// of them is what it already was.
 ///
-/// A path that the ladder still declares is refused rather than forgotten: the
-/// next run writes the file and records it again, so the only thing forgetting
-/// it would do is make this look as though it had worked.
+/// An object that the ladder still declares is refused rather than forgotten:
+/// the next run does it again and records it again, so the only thing
+/// forgetting it would do is make this look as though it had worked.
 fn release(
     out: &mut dyn Sink,
     root: &Path,
     mut written: written::Written,
-    declared: &BTreeSet<String>,
-    forget: &[PathBuf],
+    ladder: &Ladder,
+    forget: &[String],
     dry_run: bool,
 ) -> Result<()> {
-    // Every path is checked before any of them is dropped, so that a list with
+    // Every name is checked before any of them is dropped, so that a list with
     // a typo in it leaves the record as it was rather than half rewritten
-    let mut keys = Vec::new();
+    let mut names = Vec::new();
 
-    for path in forget {
-        let key = key_of(root, path);
-        let file = root.join(&key);
+    for name in forget {
+        // What the report printed is what can be pasted back, and the two
+        // columns cannot be read for one another: a resource is `type/name`,
+        // and a file is a path, which the record holds under no such name
+        if written.holds_resource(name) {
+            if ladder.declared.resources.contains(name) {
+                return err!(
+                    "{name} is declared by a resource that the system still has, so it is not an orphan and there is nothing to forget"
+                );
+            }
 
-        if written.template_of(&key).is_none() {
-            return err!("Nothing that detc wrote is recorded at {}", file.display());
+            names.push((name.clone(), name.clone()));
+            continue;
         }
 
-        if declared.contains(&key) {
+        let key = key_of(root, Path::new(name));
+        let file = root.join(&key).display().to_string();
+
+        if written.template_of(&key).is_none() {
+            return err!("Nothing that detc left in the system is recorded as {file}");
+        }
+
+        if ladder.declared.files.contains(&key) {
             return err!(
-                "{} is written by a template that the system still has, so it is not an orphan and there is nothing to forget",
-                file.display()
+                "{file} is written by a template that the system still has, so it is not an orphan and there is nothing to forget"
             );
         }
 
-        keys.push((key, file));
+        names.push((key, file));
     }
 
-    for (key, file) in &keys {
+    for (key, object) in &names {
         if !dry_run {
             written.forget(key);
         }
 
         out.emit(Record::Change {
             action: "forget".to_string(),
-            object: file.display().to_string(),
+            object: object.clone(),
             summary: Some("detc stops answering for it".to_string()),
             error: None,
         })?;
@@ -2671,18 +2740,31 @@ fn apply_system(
     let full = file.is_none() && kind.is_none();
 
     // And neither can a run that is measuring a system a bundle has not come
-    // back to: the templates it carries are not in the ladder, so what they
-    // wrote would read as left behind by nothing.  A run that put the bundles
-    // back has already made this false
+    // back to: the objects it carries are not in the ladder, so what they left
+    // in the system would read as left behind by nothing.  A run that put the
+    // bundles back has already made this false
     let complete = full && !bundle::needs_restore(root);
+
+    // The ladder is gathered once, and only for the run that is allowed to ask
+    // it anything.  It carries the providers, because what a resource left
+    // behind is a question only the provider of its type can answer
+    let ladder = complete
+        .then(|| -> Result<Ladder> {
+            Ok(Ladder {
+                declared: declared(root, &templates, &resources),
+                providers: provider::Providers::from_system(root)?,
+            })
+        })
+        .transpose()?;
 
     if dry_run {
         for change in plan.changes() {
             out.emit(change_record(change.action().planned(), change))?;
         }
 
-        if complete {
-            report_orphans(out, root, &declared(root, &templates))?;
+        if let Some(ladder) = &ladder {
+            let written = written::Written::read(root)?;
+            report_orphans(out, &ladder.orphans(root, &written))?;
         }
 
         return Ok(());
@@ -2763,19 +2845,21 @@ fn apply_system(
         warn!("Cannot write what the run did: {e}");
     }
 
-    // What detc wrote, so that a template leaving the ladder later does not
-    // take with it the only way of recognising the file it wrote.  This one is
-    // read back, by the run that reports the orphans and by `detc orphans`, but
-    // it still fails no run: a record that could not be kept leaves a file
-    // unaccounted for, and a run that refused to converge over it would leave
-    // the whole system that way
-    if let Err(e) = keep_what_was_written(root, &plan, complete.then_some(&templates)) {
-        warn!("Cannot record what the run wrote: {e}");
-    }
+    // What detc asserted, so that an object leaving the ladder later does not
+    // take with it the only way of recognising what it left in the system.
+    // This one is read back, by the run that reports the orphans and by `detc
+    // orphans`, but it still fails no run: a record that could not be kept
+    // leaves an object unaccounted for, and a run that refused to converge over
+    // it would leave the whole system that way
+    let orphans = match keep_what_was_written(root, &plan, ladder.as_ref()) {
+        Ok(orphans) => orphans,
+        Err(e) => {
+            warn!("Cannot record what the run did: {e}");
+            Vec::new()
+        }
+    };
 
-    if complete {
-        report_orphans(out, root, &declared(root, &templates))?;
-    }
+    report_orphans(out, &orphans)?;
 
     if failed > 0 {
         return err!("{failed} object(s) could not be applied");

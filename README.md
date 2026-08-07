@@ -782,14 +782,17 @@ counted: the object it waited on already is.
 A run that changes something is recorded in the history, see `detc report`.  A
 dry run is not: it changed nothing.
 
-A run that looked at the whole system also names the configuration files that no
-template writes any more, and takes none of them away — see
-[`detc orphans`](#detc-orphans), which is the half that acts:
+A run that looked at the whole system also names what detc left in it that
+nothing declares any more — the configuration file no template writes, the
+resource no declaration asks for — and touches none of it.  See
+[`detc orphans`](#detc-orphans), which is the half that acts, and says why the
+two answers are not the same:
 
 ```console
 $ detc apply
 ok       template  /etc/ssh/sshd_config.d/60-detc.conf
 orphan   /etc/chrony/chrony.conf  of template usr/share/detc/templates.d/etc/chrony/chrony.conf, which is no longer in the system, as detc wrote it; `detc orphans --purge` takes it away
+orphan   unit/nginx  of resource usr/share/detc/resources.d/unit/nginx, which is no longer in the system, as detc applied it; `detc orphans --forget` stops the report
 ```
 
 An orphan is not a failure and does not change the exit status: the system is
@@ -952,31 +955,40 @@ orphan   /etc/chrony/chrony.conf  would be taken away if nothing else instantiat
 
 ### `detc orphans`
 
-The configuration files that no template writes any more.
+What detc left in the system that nothing declares any more.
 
 `detc remove --purge` covers the removal somebody asked for.  This covers the
-one nobody did: a template can leave the ladder on its own — a bundle taken
-away, a new version of one that no longer carries it, a package upgrade, a file
-masked by hand — and the file it instantiated stays in the system, configuring
-the machine, with nothing left to say where it came from.
+one nobody did: an object can leave the ladder on its own — a bundle taken away,
+a new version of one that no longer carries it, a package upgrade, a file masked
+by hand — and what it did to the machine stays done.  The configuration file it
+instantiated is still configuring the machine; the package it installed is still
+installed, the unit still enabled.  Nothing is left to say where either came
+from.
 
-Nothing in a ladder remembers what it used to hold, and a file cannot be
-recognised by rendering a template that is gone.  So the answer is written down
-while it still can be: every `detc apply` records what it put where, in
-[`/var/lib/detc/written.yaml`](#varlibdetcwrittenyaml), and this reads it back
-against the ladder.
+Nothing in a ladder remembers what it used to hold, a file cannot be recognised
+by rendering a template that is gone, and a resource cannot be asked about
+without the state that was asserted of it.  So the answer is written down while
+it still can be: every `detc apply` records what it put where and what it
+asserted, in [`/var/lib/detc/written.yaml`](#varlibdetcwrittenyaml), and this
+reads it back against the ladder.
 
 ```console
 $ detc orphans
 orphan   /etc/chrony/chrony.conf  of template usr/share/detc/templates.d/etc/chrony/chrony.conf, which is no longer in the system, as detc wrote it
+orphan   unit/nginx  of resource usr/share/detc/resources.d/unit/nginx, which is no longer in the system, as detc applied it
 ```
 
-`detc apply` prints the same files at the end of a run and takes none of them
-away.  That separation is the whole reason this command exists: `apply` is what
-runs unattended at every boot, and a ladder that is short because `/usr` is not
-mounted, or because a bundle has not come back, reads exactly like a template
-that was withdrawn.  Naming an orphan that is not one costs a line; deleting
+A file is named by its path and a resource by `type/name`, which is what each of
+them is addressed by below.
+
+`detc apply` prints the same list at the end of a run and touches none of it.
+That separation is the whole reason this command exists: `apply` is what runs
+unattended at every boot, and a ladder that is short because `/usr` is not
+mounted, or because a bundle has not come back, reads exactly like an object that
+was withdrawn.  Naming an orphan that is not one costs a line; deleting
 `/etc/resolv.conf` on the strength of a mount that was late costs the machine.
+
+#### Files, which can be taken away
 
 `--purge` takes away the ones that still hold what detc wrote:
 
@@ -993,35 +1005,69 @@ $ detc orphans --purge
 orphan   /etc/chrony/chrony.conf  of template usr/share/detc/templates.d/etc/chrony/chrony.conf, which is no longer in the system, changed since detc wrote it, so it was left alone
 ```
 
-Which would otherwise be reported at every run for good.  `--forget` stops the
-record answering for a file, without touching it — it was the administrator's
-already, and this is how they say so:
+#### Resources, which cannot
+
+A resource is reported and never undone, and that is not caution.  The inverse
+of writing a file is unlinking it, and detc knows how.  The inverse of a
+resource is a declaration of absence, and which property spells absence belongs
+to the type and not to the engine: `installed: false` for a package,
+`ensure: absent` for a path, `present: false` for a user.  detc holds no word
+for it, which is the same reason `detc remove --purge` is refused for a
+resource.  Some of them have no inverse at all — a reboot that happened, a
+migration that ran.
+
+So `--purge` says so and moves on:
+
+```console
+$ detc orphans --purge
+orphan   unit/nginx  of resource usr/share/detc/resources.d/unit/nginx, which is no longer in the system, as detc applied it, so it was left alone
+```
+
+What the report can do is say what became of it, by asking the provider of its
+type with the state that was recorded — the same `inspect` that `--dry-run`
+runs, and free of side effects by contract:
+
+```console
+orphan   unit/nginx  ... as detc applied it              # still what detc asserted
+orphan   unit/nginx  ... changed since detc applied it   # somebody moved it since
+orphan   unit/nginx  ... and no provider answers for unit, so what became of it cannot be asked
+```
+
+A resource the provider reports as absent is not reported at all, and its record
+is dropped: there is nothing left of it to answer for.
+
+#### Forgetting
+
+An orphan that cannot be purged would otherwise be reported at every run for
+good.  `--forget` stops the record answering for an object, without touching it
+— it was the administrator's already, and this is how they say so:
 
 ```console
 $ detc orphans --forget /etc/chrony/chrony.conf
 forget   /etc/chrony/chrony.conf  detc stops answering for it
+$ detc orphans --forget unit/nginx
+forget   unit/nginx  detc stops answering for it
 ```
 
-A path that no record holds is refused, and so is one that a template of the
-system still writes: the next run would record it again, and forgetting it would
-only look as though it had worked.  `--forget` and `--purge` cannot be asked for
-together.
+A name that no record holds is refused, and so is one that the ladder still
+declares: the next run would record it again, and forgetting it would only look
+as though it had worked.  `--forget` and `--purge` cannot be asked for together.
 
 A purge is committed to the history the same way `detc remove --purge` is, under
 the `orphans` command; a run that only reports records nothing.  `--dry-run`
 names what would be taken away or forgotten and writes nothing.
 
 The command is refused outright while a bundle is [kept and not
-installed](#transient-by-default): the templates it carries are not in the
-ladder, so everything they wrote is about to be called an orphan.  Other
+installed](#transient-by-default): the objects it carries are not in the ladder,
+so everything they left in the system is about to be called an orphan.  Other
 commands get a note on the standard error; this one would be answering wrongly
 rather than incompletely.
 
 ```console
 $ detc orphans
-The bundle fleet is kept and not installed, so the templates it carries are not
-in the ladder and every file they wrote would read as an orphan; `detc bundle
-restore` puts it back first
+The bundle fleet is kept and not installed, so the objects it carries are not in
+the ladder and everything they left in the system would read as an orphan; `detc
+bundle restore` puts it back first
 ```
 
 ### `detc unmask <object>...`
@@ -1372,31 +1418,50 @@ is what somebody looking at a machine afterwards reads.
 #### `/var/lib/detc/written.yaml`
 
 The other document beside the journal, and the one thing detc keeps that *is*
-read back.  Every run of `detc apply` takes down the configuration files it
-instantiated, what it put in each, and which template put it there:
+read back.  Every run of `detc apply` takes down what it did to the machine: the
+configuration files it instantiated, what it put in each and which template put
+it there, and the resources it asserted, with the state it asserted and which
+declaration asked for it.
 
 ```yaml
 # /var/lib/detc/written.yaml
-etc/chrony/chrony.conf:
-  digest: sha256:1f0c9a3e…
-  template: usr/share/detc/templates.d/etc/chrony/chrony.conf
-etc/ssh/sshd_config.d/60-detc.conf:
-  digest: sha256:8b41d7c2…
-  template: usr/share/detc/templates.d/etc/ssh/sshd_config.d/60-detc.conf
+files:
+  etc/chrony/chrony.conf:
+    digest: sha256:1f0c9a3e…
+    template: usr/share/detc/templates.d/etc/chrony/chrony.conf
+  etc/ssh/sshd_config.d/60-detc.conf:
+    digest: sha256:8b41d7c2…
+    template: usr/share/detc/templates.d/etc/ssh/sshd_config.d/60-detc.conf
+resources:
+  unit/nginx:
+    desired:
+      enabled: true
+    source: usr/share/detc/resources.d/unit/nginx
 ```
 
-It is what [`detc orphans`](#detc-orphans) reads: a template that leaves the
-ladder takes with it the only other way of recognising the file it wrote, so the
-answer has to be written down before it does.  A digest and not the content —
-the question is whether the file is still detc's, and a copy of the machine's
-own configuration on disk would answer nothing more.
+It is what [`detc orphans`](#detc-orphans) reads: an object that leaves the
+ladder takes with it the only other way of recognising what it left behind, so
+the answer has to be written down before it does.
+
+A file is kept as a digest and not as content — the question is whether the file
+is still detc's, and a copy of the machine's own configuration on disk would
+answer nothing more.  A resource is kept whole, because asking whether it still
+holds means asking its provider, and a provider is asked with the state it was
+given.  A fingerprint could say that something had changed and never what it was
+supposed to be.  That is also why the mode matters: this is where a password
+hash reaches the record.
 
 It is kept in `/var` and not in `/run` because what it describes is: a reboot
-takes the ladder away and leaves `/etc/chrony/chrony.conf` exactly where it was.
-Mode `0600`, for the same reason `last.yaml` is.
+takes the ladder away and leaves `/etc/chrony/chrony.conf` exactly where it was,
+and nginx exactly as enabled.  Mode `0600`, for the same reason `last.yaml` is.
+
+A change that found the system already as the declaration asks is recorded like
+any other — detc asserted it, and cannot tell an assertion it had to work for
+from one it merely agreed with.  Which is one more reason why what this record
+supports for a resource is a report and not a purge.
 
 Only a run that looked at the whole system drops anything from it; a `--type`
-run or one given a single file updates what it touched and nothing else, since
+run or one given a single object updates what it touched and nothing else, since
 it cannot say that the rest of the machine is gone.  A system that upgrades into
 a version that keeps this holds an empty record, and reports no orphans until it
 has applied something.
