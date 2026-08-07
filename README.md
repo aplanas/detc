@@ -966,7 +966,7 @@ prefix mask the one that does not apply, or reads `system.pkg.manager` and
       …
 ```
 
-The object is addressed the way [`detc cat`](#detc-cat) addresses it, so a
+The object is addressed the way [`detc cat`](#detc-cat-object) addresses it, so a
 template, a resource, a probe, a provider and a variable document all answer.
 Nothing is written down in a catalogue that `detc` keeps: whoever changes a file
 changes what it says, and a bundle brings the documentation of what it carries
