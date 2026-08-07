@@ -215,7 +215,7 @@ $detc --root "$stage" cat etc/foo.conf           # what a template actually writ
 $detc --root "$stage" cat --raw etc/foo.conf     # the template before rendering
 $detc --root "$stage" check                      # everything parses and validates
 $detc --root "$stage" --dry-run apply            # what a run would change
-$detc --root "$stage" doc -t unit                # a provider's schema, for a person
+$detc --root "$stage" doc -t provider unit       # a provider's schema, for a person
 $detc --root "$stage" schema -t unit             # and as the provider wrote it
 ```
 

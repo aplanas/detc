@@ -49,7 +49,7 @@ and `_requires`.
 The state is then checked against the provider's schema (`Schema::validate`,
 `src/provider.rs`), which
 
-- **rejects a property the schema does not declare** — `detc doc -t <type>` lists the ones it
+- **rejects a property the schema does not declare** — `detc doc -t provider <type>` lists the ones it
   accepts;
 - **fills in defaults** for the properties you left out that have one;
 - **coerces every value** to the declared type, so `"true"` and `true` are the same state;
@@ -64,6 +64,29 @@ and a node that turned it off meant it.
 
 A declaration that renders to nothing is an empty desired state, not an error, so a resource
 can be made a no-op with a conditional.
+
+## Absence is a state, not an operation
+
+**A type that can put something in the system must be able to declare it gone**, as a property
+of the desired state like any other: `installed: false` for `pkg`, `present: false` for `user`
+and `group`, `ensure: absent` for `path`, `enabled: false` for `unit`.  Every core provider
+does this, and a new one is expected to.
+
+It matters because there is no imperative way to undo a resource.  Taking the declaration away
+is *unmanaging* it, not reversing it: `detc remove pkg/nginx` unlinks the file and says
+
+```
+orphan   resource pkg/nginx  nothing manages what it declared any more
+```
+
+while the package stays installed.  `--purge` is refused for a resource for exactly this
+reason — it takes away a file that `detc` wrote, and no such file exists here.  The sequence
+is declare absent, `detc apply`, then remove the declaration once the system says so.
+
+The consequence for a provider is that `inspect` has to report the absent case rather than
+failing on it, and `apply` has to be able to reach it.  `providers/pkg` says why it reports a
+missing package as `installed: false` and not as an absent resource; `providers/path` says the
+same of `ensure: absent`.  [`providers.md`](providers.md) is where the verbs are.
 
 ## `_order`
 
@@ -285,7 +308,7 @@ make install DESTDIR="$stage" PREFIX=/usr
 detc=./target/release/detc
 
 $detc --root "$stage" list -t resource        # is the type/name what you meant?
-$detc --root "$stage" doc -t unit             # what the provider accepts
+$detc --root "$stage" doc -t provider unit    # what the provider accepts
 $detc --root "$stage" check -t resource       # expands, parses, validates
 $detc --root "$stage" --dry-run apply -t resource
 ```

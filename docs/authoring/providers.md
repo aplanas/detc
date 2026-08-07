@@ -104,7 +104,7 @@ it wrote.  The core set reads as the argument for its own sequence:
 Pick yours by naming what must already be true before a resource of this type can converge, and
 say so in the header.
 
-The descriptions are what `detc doc -t <type>` shows a person.  Write them for that output —
+The descriptions are what `detc doc -t provider <type>` shows a person.  Write them for that output —
 they are the only documentation a resource author gets.
 
 ### Why it coerces, and what that buys you
@@ -320,7 +320,7 @@ detc=./target/release/detc
 
 $detc --root "$stage" list -t provider        # found, and named as the type
 $detc --root "$stage" schema -t unit          # the document as you wrote it
-$detc --root "$stage" doc -t unit             # how it reads to a person
+$detc --root "$stage" doc -t provider unit    # how it reads to a person
 $detc --root "$stage" check -t provider       # the schema parses
 ```
 

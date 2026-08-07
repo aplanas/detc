@@ -1442,8 +1442,8 @@ fn test_a_removal_is_refused_whole() -> TestResult {
         ],
         // Already the administrator's, so there is nothing above to mask from
         vec!["remove", "/etc/chrony/chrony.conf", "--mask"],
-        // --purge is the file that a template instantiates, and a resource
-        // instantiates nothing that detc writes
+        // --purge is the file that a template instantiates, and what a
+        // resource asked for is not taken out by an order
         vec!["remove", "pkg/nginx", "--purge"],
     ] {
         let output = detc(root, &arguments);
@@ -1723,6 +1723,63 @@ fn test_the_history_holds_the_file_that_a_purge_took_away() -> TestResult {
     // the run that reconciled the system and not of the one that undid it
     let last = fs::read_to_string(root.join("var/lib/detc/last.yaml"))?;
     assert!(last.contains("command: apply\n"), "{last}");
+
+    Ok(())
+}
+
+/// A resource that goes away leaves whatever its provider did about it in the
+/// system, and the removal says that nothing manages it any more.
+#[test]
+fn test_a_resource_that_goes_away_says_nothing_manages_it_now() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    // --purge is refused, and for the reason that is true of a resource: the
+    // package is in the system, and taking it out is a state to declare
+    let output = detc(root, &["remove", "pkg/nginx", "--purge"]);
+    assert!(!output.status.success());
+    let refusal = stderr(&output);
+    assert!(refusal.contains("a state to declare"), "{refusal}");
+    assert!(
+        refusal.contains("`detc doc --type provider pkg`"),
+        "{refusal}"
+    );
+
+    // While the three types that really do write nothing keep the other reason
+    let output = detc(root, &["remove", "10-net", "--type", "probe", "--purge"]);
+    assert!(!output.status.success());
+    let refusal = stderr(&output);
+    assert!(
+        refusal.contains("nothing of a probe is written by detc"),
+        "{refusal}"
+    );
+
+    // The administrator's copy, so that the first removal uncovers the one the
+    // distribution ships and lets go of nothing
+    let admin = root.join("etc/detc/resources.d/pkg/nginx.yaml");
+    fs::create_dir_all(admin.parent().expect("the resource has a directory"))?;
+    fs::write(&admin, "installed: true\n")?;
+
+    let output = detc(root, &["remove", "pkg/nginx"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("remains\tresource pkg/nginx"),
+        "{output:?}"
+    );
+    assert!(!stdout(&output).contains("orphan"), "{output:?}");
+
+    // With the last one out of the ladder, the package the declaration asked
+    // for is still installed and nothing says anything about it any more
+    let output = detc(root, &["remove", "pkg/nginx", "--mask"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "mask\tresource\t{}\norphan\tresource pkg/nginx\tnothing manages what it declared any more\n",
+            admin.display()
+        )
+    );
 
     Ok(())
 }

@@ -963,10 +963,12 @@ fn ladder(kind: Type) -> &'static [&'static str] {
 
 /// What an object leaves in the system once nothing answers for it any more.
 ///
-/// Only two types leave anything behind.  A template leaves the file it wrote,
+/// Three types leave something behind.  A template leaves the file it wrote,
 /// which detc will now never touch again; a provider leaves the resources of
-/// its type, which nothing can apply.  A probe, a variable document and a
-/// resource leave nothing: what they contribute exists only while they are read.
+/// its type, which nothing can apply; and a resource leaves whatever its
+/// provider did about it, which is a package that is installed or a unit that
+/// is enabled, and which nothing manages now.  A probe and a variable document
+/// leave nothing: what they contribute exists only while they are read.
 ///
 /// This is worked out before the file is taken away, because afterwards it
 /// cannot be — an unlinked template renders nothing, and an unlinked provider
@@ -980,6 +982,10 @@ enum Leaves {
     Target(Option<String>),
     /// The type of resource that the provider implements.
     Type(String),
+    /// Whatever the provider did about the declaration, which is not read
+    /// here: finding out would mean building the namespace and inspecting,
+    /// and the resource says which declaration went away without any of it.
+    State,
 }
 
 /// What taking one object away is going to do.
@@ -1037,6 +1043,19 @@ fn plan_removal(
 
     let kind = object.kind();
     let source = object.source().to_path_buf();
+
+    // A resource is refused too, but not for the same reason, and giving the
+    // other one would be untrue: what a declaration asked for is in the system
+    // long after the declaration is gone.  What there is not is an imperative
+    // way to take it out again — absence is a state that a declaration asks
+    // for, the same as any other, and reaching it is what `detc apply` is
+    if purge && let Object::Resource(resource) = &object {
+        return err!(
+            "--purge takes away the file that a template instantiates, and {} is a resource: what it asked for is in the system, and taking that out is a state to declare rather than an order to give.  Declare the resource absent, `detc apply` it, and take the declaration away once the system says so — `detc doc --type provider {}` says which property of this type spells absent",
+            name.display(),
+            resource.kind()
+        );
+    }
 
     if purge && kind != Type::Template {
         return err!(
@@ -1098,6 +1117,7 @@ fn plan_removal(
     // the file that says it is about to be taken away
     let leaves = match &object {
         Object::Template(_) => Leaves::Target(None),
+        Object::Resource(_) => Leaves::State,
         Object::Provider(path) => provider::Providers::from_system(root)?
             .providers()
             .find(|provider| provider.path() == path)
@@ -1366,6 +1386,23 @@ fn orphaned(
             };
 
             report("orphan", target.display().to_string(), why)?;
+
+            Ok(None)
+        }
+
+        // What the provider did about the declaration is still done, and this
+        // says so without claiming to know what it was.  Asking would mean
+        // expanding the declaration against a namespace and inspecting, which
+        // is a probe run and a provider call to tell somebody something they
+        // are about to be told anyway; and a resource that was never applied
+        // would be reported the same way, because unmanaged is what it is
+        // either way
+        (Object::Resource(resource), Leaves::State) => {
+            report(
+                "orphan",
+                format!("resource {}", resource.id()),
+                "nothing manages what it declared any more".to_string(),
+            )?;
 
             Ok(None)
         }

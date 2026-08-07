@@ -243,18 +243,28 @@ on, and is reported as
 with the file it comes from.  Nothing is said when the name no longer addresses
 anything, because then the object really has gone.
 .PP
-Two of the types leave something in the system when they go, and it is reported
-as
+Three of the types leave something in the system when they go, and it is
+reported as
 .BR orphan :
 a template leaves the configuration file it wrote, which goes on configuring the
-machine with nothing left to say where it came from, and a provider leaves every
-resource of its type, which nothing can apply any more.  For a template the line
+machine with nothing left to say where it came from; a provider leaves every
+resource of its type, which nothing can apply any more; and a resource leaves
+whatever its provider did about it, which is a package that is installed or a
+unit that is enabled, and which nothing manages now.  For a template the line
 says whether the file is still
 .B as detc wrote it
 or has
 .B changed since detc wrote it
 \(em and, when the template can no longer be instantiated, that the two cannot
 be told apart.  A file that was never written is not reported.
+.PP
+For a resource the line says only that
+.BR "nothing manages what it declared any more" ,
+and not what the state now is.  Finding that out means building the namespace
+and inspecting, which is a run of every probe on the machine; and unmanaged is
+the fact either way, whether the declaration was ever applied or not.  A probe
+and a variable document leave nothing: what they contribute exists only while
+they are read.
 .PP
 Every object is resolved and judged before any of them is touched, so a command
 naming several is never half done.
@@ -303,8 +313,24 @@ rather than
 .BR orphan .
 A file that was edited, or one whose template no longer renders and so cannot be
 compared, is named and left where it is \(em deleting somebody's work on a guess
-is the one mistake a removal must not make.  It is refused for every other type,
-which write nothing into the system to take away.
+is the one mistake a removal must not make.
+.IP
+It is refused for every other type, and for two reasons.  A probe, a provider
+and a variable document write nothing into the system, so there is nothing of
+one to take away.  A resource does leave something, but absence is a state a
+declaration asks for like any other, and reaching it is what
+.B detc apply
+does: declare the resource absent, apply that, and take the declaration away
+once the system says so.  Which property spells absent belongs to the type \(em
+.I installed: false
+for
+.BR pkg ,
+.I ensure: absent
+for
+.B path
+\(em and the schema that
+.B detc doc \-\-type provider \fITYPE\fR
+prints is where it says so.
 .IP
 A purge is the one thing a removal does that reaches the history, since it is
 the one thing that changes the system rather than what the system would do.  It

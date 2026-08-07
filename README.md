@@ -828,7 +828,7 @@ naming the bundle and pointing at `detc bundle remove`.
 
 #### What an object leaves behind
 
-Two of the types leave something in the system when they go, and the `orphan`
+Three of the types leave something in the system when they go, and the `orphan`
 line reports it.  A template leaves the configuration file it wrote, which goes
 on configuring the machine with nothing left to say where it came from — and
 the line says whether anybody has touched it since.  A provider leaves every
@@ -840,6 +840,22 @@ mask     provider  /var/lib/detc/providers.d/pkg
 orphan   resource pkg/chrony  of a type that no provider implements
 orphan   resource pkg/nginx   of a type that no provider implements
 ```
+
+A resource leaves whatever its provider did about it — the package that is
+installed, the unit that is enabled — and taking the declaration away neither
+undoes that nor claims to:
+
+```console
+$ detc remove pkg/nginx --mask
+mask     resource  /etc/detc/resources.d/pkg/nginx.yaml
+orphan   resource pkg/nginx  nothing manages what it declared any more
+```
+
+What the line does not say is what the state actually is, and that is
+deliberate: finding out means building the namespace and asking the provider,
+which is a run of every probe on the machine to tell somebody something they
+are about to be told anyway.  Unmanaged is the fact, and it holds whether the
+declaration was ever applied or not.
 
 `--purge` also takes the configuration file away, and only where `detc` can
 still see its own hand in it:
@@ -860,8 +876,26 @@ remove   template  /etc/detc/templates.d/etc/chrony/chrony.conf
 orphan   /etc/chrony/chrony.conf  changed since detc wrote it, so it was left alone
 ```
 
-`--purge` is refused for every other type: nothing of a probe, a provider, a
-resource or a variable document is written into the system to take away.
+`--purge` is refused for every other type, and for two different reasons.
+Nothing of a probe, a provider or a variable document is written into the
+system, so there is nothing of one to take away.  A resource is the other case:
+what it asked for is in the system, but absence is a state a declaration asks
+for like any other, and reaching it is what `detc apply` does.  So the way to
+be rid of what a resource put there is to declare it gone, apply that, and take
+the declaration away once the system says so:
+
+```console
+$ detc remove pkg/nginx --purge
+--purge takes away the file that a template instantiates, and pkg/nginx is a
+resource: what it asked for is in the system, and taking that out is a state to
+declare rather than an order to give.  Declare the resource absent, `detc apply`
+it, and take the declaration away once the system says so — `detc doc --type
+provider pkg` says which property of this type spells absent
+```
+
+Which property that is belongs to the type: `installed: false` for `pkg`,
+`present: false` for `user`, `ensure: absent` for `path`.  The schema
+[`detc doc`](#detc-doc) prints is where each one says so.
 
 `--purge` is what reaches the history.  A removal on its own is not recorded:
 it changes what the system *would* do, not what it is, and the next `detc apply`

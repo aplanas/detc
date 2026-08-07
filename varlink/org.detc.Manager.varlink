@@ -205,12 +205,20 @@ method Apply(
 #
 # An object that nothing answers for any more can leave something behind, and
 # the `orphan` action reports it: for a template the file it instantiated, which
-# keeps configuring the machine with nothing left to say where it came from, and
-# for a provider every resource of its type, which nothing can now apply.  The
+# keeps configuring the machine with nothing left to say where it came from; for
+# a provider every resource of its type, which nothing can now apply; and for a
+# resource whatever its provider did about it, which nothing manages now.  The
 # summary of a template's orphan says whether the file is still as detc wrote
-# it.  `purge` takes that file away as well, and only where it is: a file that
-# was edited, or one whose template no longer renders and so cannot be compared,
-# is named and left alone.  It is refused for every type but template.
+# it; a resource's says only that it is unmanaged, reading the real state being
+# a run of every probe on the machine.  `purge` takes a template's file away as
+# well, and only where it is: a file that was edited, or one whose template no
+# longer renders and so cannot be compared, is named and left alone.
+#
+# `purge` is refused for every type but template, and for two reasons.  A probe,
+# a provider and a variable document write nothing into the system.  A resource
+# does leave something, but absence is a state a declaration asks for like any
+# other, and reaching it is what `Apply` is: declare the resource absent, apply
+# that, and take the declaration away once the system says so.
 #
 # A purge is the one part of a removal that the journal holds, being the one
 # part that changes the system rather than what the system would do.  It is a
