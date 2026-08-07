@@ -21,6 +21,13 @@
 //! There is no time in it.  The run is the one the file was written by, so the
 //! modification time of the file is the time of the run, and a date that this
 //! had to format itself would only be a worse one.
+//!
+//! Only a run that applied something writes it, and `detc remove` is not one of
+//! them even when it purges: what a removal did was printed as it happened, and
+//! rewriting this to hold that one line would take away the report of the last
+//! run that reconciled the system, which is what somebody looking at the
+//! machine came here for.  The [journal](crate::journal) is where a purge is
+//! recorded, because it holds a history rather than the latest thing.
 
 use std::path::{Path, PathBuf};
 

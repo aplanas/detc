@@ -1116,23 +1116,26 @@ fn plan_removal(
     })
 }
 
-/// Fill in what the templates among the removals write into the system.
+/// Fill in what the templates among the removals write into the system, and
+/// hand back the namespace they were instantiated against.
 ///
 /// The namespace is built once, and only when a template is going away: it runs
 /// every probe that the system has installed, which is not something a command
-/// taking a resource away should be paying for.
+/// taking a resource away should be paying for.  It is given back rather than
+/// dropped because the journal wants it too, and a purge is only ever of a
+/// template, so it is always the run that has already paid for it.
 ///
 /// A template that cannot be instantiated is not a failure here.  It is the
 /// ordinary way for one to end up being taken away — the variables it reads are
 /// gone, or were never there — and refusing to remove it would leave the
 /// administrator with an object they cannot get rid of.  What is lost is only
 /// the comparison, and the report says so rather than guessing.
-fn instantiated(root: &Path, removals: &mut [Removal]) -> Result<()> {
+fn instantiated(root: &Path, removals: &mut [Removal]) -> Result<Option<var::Variables>> {
     if !removals
         .iter()
         .any(|removal| removal.kind() == Type::Template)
     {
-        return Ok(());
+        return Ok(None);
     }
 
     let var = var::Variables::from_system(root)?;
@@ -1143,7 +1146,7 @@ fn instantiated(root: &Path, removals: &mut [Removal]) -> Result<()> {
         }
     }
 
-    Ok(())
+    Ok(Some(var))
 }
 
 /// Take objects away, and say what that uncovers.
@@ -1155,6 +1158,12 @@ fn instantiated(root: &Path, removals: &mut [Removal]) -> Result<()> {
 /// Taking a file out of a ladder is not deleting an object, it is uncovering
 /// whatever was under it, which is why this reports as much as it does: an
 /// object with a copy in a lower prefix has not gone anywhere.
+///
+/// Only a purge reaches the journal, and only because it is the one thing here
+/// that deletes a configuration file: see [`journal::Journal::purged`].  The
+/// dump of the last run is left alone entirely — it is the report of a run that
+/// applied something, and a removal overwriting it would take that away in
+/// exchange for a line that has just been printed.
 fn remove(
     out: &mut dyn Sink,
     root: &Path,
@@ -1169,7 +1178,7 @@ fn remove(
         .map(|name| plan_removal(root, name, kind, mask, purge))
         .collect::<Result<Vec<_>>>()?;
 
-    instantiated(root, &mut removals)?;
+    let var = instantiated(root, &mut removals)?;
 
     // A run reads the objects it was told about and then instantiates them, and
     // this takes one out from under it.  `detc var` writes without the lock
@@ -1178,21 +1187,39 @@ fn remove(
     // finished
     let _lock = (!dry_run).then(|| lock::Lock::acquire(root)).transpose()?;
 
+    let mut purged = Vec::new();
+    let mut lines = Vec::new();
+
     for removal in &removals {
-        take_away(out, root, removal, purge, dry_run)?;
+        if let Some((target, line)) = take_away(out, root, removal, purge, dry_run)? {
+            purged.push(target);
+            lines.push(line);
+        }
+    }
+
+    // The namespace is there whenever a template was, and a purge is only ever
+    // of a template, so there is nothing to build here that has not been built
+    if let (false, Some(var)) = (purged.is_empty(), &var)
+        && let Some(journal) = journal::Journal::start(root, var, "remove")
+        && let Err(e) = journal.purged(&purged, &lines)
+    {
+        warn!("Cannot record the purge: {e}");
     }
 
     Ok(())
 }
 
 /// Take one object away, and report what the system says afterwards.
+///
+/// Answers with the configuration file that a purge deleted and the line that
+/// said so, which is the only part of a removal that the journal holds.
 fn take_away(
     out: &mut dyn Sink,
     root: &Path,
     removal: &Removal,
     purge: bool,
     dry_run: bool,
-) -> Result<()> {
+) -> Result<Option<(PathBuf, String)>> {
     let Removal {
         name, mask, rest, ..
     } = removal;
@@ -1231,7 +1258,7 @@ fn take_away(
         if let (Object::Template(template), true) = (&removal.object, purge)
             && template.target().exists()
         {
-            return out.emit(Record::Change {
+            out.emit(Record::Change {
                 action: "orphan".to_string(),
                 object: template.target().display().to_string(),
                 summary: Some(
@@ -1239,10 +1266,10 @@ fn take_away(
                         .to_string(),
                 ),
                 error: None,
-            });
+            })?;
         }
 
-        return Ok(());
+        return Ok(None);
     }
 
     // A copy in a lower prefix answers for the key now, so the object has not
@@ -1251,12 +1278,14 @@ fn take_away(
     // what is left -- a mount point can carry several probes -- but the file
     // that answers is named beside it
     if let Some(path) = at_key(installed(root, kind)?, rest) {
-        return out.emit(Record::Change {
+        out.emit(Record::Change {
             action: "remains".to_string(),
             object: format!("{kind} {name}"),
             summary: Some(path.display().to_string()),
             error: None,
-        });
+        })?;
+
+        return Ok(None);
     }
 
     orphaned(out, root, removal, purge)
@@ -1269,7 +1298,16 @@ fn take_away(
 /// nothing left to say where it came from.  Naming it is not a complaint, it is
 /// the list of what the administrator now owns by hand — or, with `purge`, the
 /// list of what went with the template that wrote it.
-fn orphaned(out: &mut dyn Sink, root: &Path, removal: &Removal, purge: bool) -> Result<()> {
+///
+/// Answers with the file that was purged and the line that said so, for the
+/// journal, which holds what a run deleted and nothing that it merely stopped
+/// answering for.
+fn orphaned(
+    out: &mut dyn Sink,
+    root: &Path,
+    removal: &Removal,
+    purge: bool,
+) -> Result<Option<(PathBuf, String)>> {
     let mut report = |action: &str, what: String, why: String| {
         out.emit(Record::Change {
             action: action.to_string(),
@@ -1286,7 +1324,7 @@ fn orphaned(out: &mut dyn Sink, root: &Path, removal: &Removal, purge: bool) -> 
             // A target that is not there is nothing to say anything about: the
             // template was never applied, or somebody has been here already
             let Ok(found) = fs::read_to_string(target) else {
-                return Ok(());
+                return Ok(None);
             };
 
             // The file is taken away only where detc can still see its own hand
@@ -1308,7 +1346,16 @@ fn orphaned(out: &mut dyn Sink, root: &Path, removal: &Removal, purge: bool) -> 
                 fs::remove_file(target)
                     .map_err(|e| format!("Cannot remove {}: {e}", target.display()))?;
 
-                return report("purge", target.display().to_string(), why.to_string());
+                let record = Record::Change {
+                    action: "purge".to_string(),
+                    object: target.display().to_string(),
+                    summary: Some(why.to_string()),
+                    error: None,
+                };
+                let line = record.line();
+                out.emit(record)?;
+
+                return Ok(Some((target.to_path_buf(), line)));
             }
 
             // Asking for a purge and not getting one is worth a word: the file
@@ -1318,7 +1365,9 @@ fn orphaned(out: &mut dyn Sink, root: &Path, removal: &Removal, purge: bool) -> 
                 false => why.to_string(),
             };
 
-            report("orphan", target.display().to_string(), why)
+            report("orphan", target.display().to_string(), why)?;
+
+            Ok(None)
         }
 
         (Object::Provider(_), Leaves::Type(kind)) => {
@@ -1332,10 +1381,10 @@ fn orphaned(out: &mut dyn Sink, root: &Path, removal: &Removal, purge: bool) -> 
                 }
             }
 
-            Ok(())
+            Ok(None)
         }
 
-        _ => Ok(()),
+        _ => Ok(None),
     }
 }
 

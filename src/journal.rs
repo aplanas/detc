@@ -119,6 +119,10 @@ const COMMAND: &str = "Detc-Command";
 const FOUND: &str = "found";
 const APPLIED: &str = "applied";
 
+/// The command that reconciles the system with what it is declared to be, and
+/// so the only one whose commits have a divergence behind them to explain.
+const APPLY: &str = "apply";
+
 /// The top level entries that hold what the system was told to be, and what
 /// each of them is called when a run has to be explained.
 const INPUTS: &[(&str, &str)] = &[
@@ -405,7 +409,7 @@ impl Journal {
             id: outcome.run,
             time: outcome.time.clone(),
             command: outcome.command.clone(),
-            cause: self.cause(found)?,
+            cause: self.cause(found, outcome)?,
             found: found.map(recorded),
             applied: applied.map(recorded),
             summary: outcome.summary.clone(),
@@ -420,7 +424,15 @@ impl Journal {
     /// the whole answer.  A run with nothing in front of it did not change any
     /// input, and the only thing left that can have changed the system is the
     /// machine describing itself differently than it did before.
-    fn cause(&self, found: Option<&Commit>) -> Result<String> {
+    ///
+    /// Which holds only of a run that was reconciling the system with what it
+    /// is declared to be.  A command that changes the system because it was
+    /// told to is its own reason, and there was never a divergence to explain.
+    fn cause(&self, found: Option<&Commit>, outcome: &Commit) -> Result<String> {
+        if outcome.command != APPLY {
+            return Ok(format!("`detc {}` was asked for it", outcome.command));
+        }
+
         let Some(found) = found else {
             return Ok("a probe reported something new".to_string());
         };
@@ -508,6 +520,41 @@ impl Journal {
         Ok(())
     }
 
+    /// Record the configuration files that a run deleted from the system, along
+    /// with the templates that wrote them.
+    ///
+    /// This is what `detc remove --purge` leaves behind, and the only thing a
+    /// removal has to say here.  Taking an object out of the ladder changes
+    /// what the system is configured by and not what it is configured as, so
+    /// nothing is recorded for it: the file in `/etc` is still the file the
+    /// journal holds, and the run that instantiates the object again is the one
+    /// with something to say.  A purge is the other case, and the only place
+    /// where `detc` deletes a configuration file outright.
+    ///
+    /// There is one commit rather than the pair that [`Self::record`] writes.
+    /// A purge has no before and after to compare — the file is gone — so what
+    /// there is to record is the system with one thing fewer in it, which is
+    /// the [applied](Phase::Applied) phase and nothing in front of it.
+    ///
+    /// The tip is edited rather than a tree built from nothing: a removal was
+    /// given the objects it took away and has not looked at any of the others.
+    pub fn purged(&self, targets: &[PathBuf], lines: &[String]) -> Result<()> {
+        let entries = vec![(VARIABLES.to_string(), self.variables.as_bytes().to_vec())];
+        let gone: Vec<String> = targets
+            .iter()
+            .flat_map(|target| paths(&self.root, TEMPLATE, &target.to_string_lossy()))
+            .collect();
+
+        let message = self.message_of(Phase::Applied, &format!("{} purged", targets.len()), lines);
+
+        match self.commit(&message, self.tip_tree()?, &entries, &gone)? {
+            Some(commit) => debug!("Recorded the purge as {commit}"),
+            None => debug!("The journal holds nothing about what was purged"),
+        }
+
+        Ok(())
+    }
+
     /// What the journal already holds about an object, so that a run that could
     /// not work it out leaves its history alone instead of erasing it.
     fn carried(&self, tip_tree: gix::ObjectId, change: &Change) -> Vec<Entry> {
@@ -533,7 +580,12 @@ impl Journal {
     /// run for the objects that are not already the way they are declared, and
     /// the trailers that address the run.
     fn message(&self, phase: Phase, plan: &Plan, lines: &[String]) -> String {
-        let mut message = format!("{}: {}\n", self.command, tally(phase, plan));
+        self.message_of(phase, &tally(phase, plan), lines)
+    }
+
+    /// The message of a commit whose summary is already worked out.
+    fn message_of(&self, phase: Phase, summary: &str, lines: &[String]) -> String {
+        let mut message = format!("{}: {summary}\n", self.command);
 
         if !lines.is_empty() {
             message.push('\n');

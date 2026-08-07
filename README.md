@@ -863,11 +863,33 @@ orphan   /etc/chrony/chrony.conf  changed since detc wrote it, so it was left al
 `--purge` is refused for every other type: nothing of a probe, a provider, a
 resource or a variable document is written into the system to take away.
 
+`--purge` is what reaches the history.  A removal on its own is not recorded:
+it changes what the system *would* do, not what it is, and the next `detc apply`
+records the difference.  A purge deletes a configuration file outright, which is
+the one thing here that changes the system, so it is committed — as a single
+commit rather than the pair an apply writes, because a file that is gone has no
+before and after to compare:
+
+```console
+$ detc report --list
+2  2026-02-14 11:40:55 +0000  remove  1 purged
+1  2026-02-14 09:12:03 +0000  apply   1 created
+
+$ detc report --last
+run      2  2026-02-14 11:40:55 +0000  remove
+cause    `detc remove` was asked for it
+applied  e12e9f5  1 purged
+
+purge    /etc/chrony/chrony.conf  as detc wrote it
+```
+
+The dump of the last run in `/var/lib/detc/last.yaml` is left alone either way.
+It is the report of the run that reconciled the system, and a removal rewriting
+it would take that away in exchange for a line that has just been printed.
+
 Every object is resolved and judged before any of them is touched, so a command
 naming several is never half done.  The lock is taken, since a run halfway
-through instantiating an object must not have it unlinked underneath it.  A
-removal is not recorded in the history: it changes what the system *would* do,
-not what it is, and the next `detc apply` records the difference.
+through instantiating an object must not have it unlinked underneath it.
 
 `--dry-run` can say less than usual here.  What would be unlinked or masked is
 named, but what that would uncover is a question about the ladder without the
@@ -1114,7 +1136,9 @@ from re-arming itself at every boot.
 
 Every run of `detc apply` that changes something is recorded in a git
 repository that `detc` manages in `/var/lib/detc/journal.git`, and `report`
-reads it back.
+reads it back.  So is a [`detc remove --purge`](#detc-remove-object), which is
+the one other command that changes the system rather than what the system
+would do.
 
 ```console
 $ detc report --list
@@ -1135,9 +1159,10 @@ Without arguments it reports the last run, and a number addresses one.
 `--only-fails` prints the objects that could not be applied, and narrows
 `--list` down to the runs that have any.
 
-A run writes two commits, the system as it found it and the system as it left
-it, and neither of them is written when it says what the journal already holds:
-a converged system records nothing.  The tree holds the state of the system,
+An `apply` writes two commits, the system as it found it and the system as it
+left it, and neither of them is written when it says what the journal already
+holds: a converged system records nothing.  A purge writes one, there being no
+before and after of a file that is gone.  The tree holds the state of the system,
 with what it was told to be kept apart from what it turned out to be:
 
 ```

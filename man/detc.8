@@ -305,6 +305,23 @@ A file that was edited, or one whose template no longer renders and so cannot be
 compared, is named and left where it is \(em deleting somebody's work on a guess
 is the one mistake a removal must not make.  It is refused for every other type,
 which write nothing into the system to take away.
+.IP
+A purge is the one thing a removal does that reaches the history, since it is
+the one thing that changes the system rather than what the system would do.  It
+is committed as a single commit rather than the pair that
+.B detc apply
+writes, a file that is gone having no before and after to compare, and
+.B detc report
+names it under the
+.B remove
+command.  A removal without
+.B \-\-purge
+records nothing, and the next
+.B detc apply
+records the difference.  The dump in
+.I /var/lib/detc/last.yaml
+is left alone either way: it is the report of the run that reconciled the
+system.
 .TP
 .B \-\-dry\-run
 Global, and named here because it can say less than usual.  What would be

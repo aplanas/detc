@@ -1639,6 +1639,94 @@ fn test_purge_takes_away_the_file_the_template_wrote() -> TestResult {
     Ok(())
 }
 
+/// A purge deletes a configuration file, which is the only thing a removal does
+/// to the system and so the only thing of one that the history holds.
+#[cfg(feature = "journal")]
+#[test]
+fn test_the_history_holds_the_file_that_a_purge_took_away() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    let name = "/etc/ssh/sshd_config.d/root.conf";
+    let target = root.join("etc/ssh/sshd_config.d/root.conf");
+
+    fs::create_dir_all(target.parent().expect("the target has a directory"))?;
+    assert!(detc(root, &["apply", name]).status.success());
+
+    // Taking the template out of the ladder is not a change to the system: the
+    // file it wrote is still there, saying what it said, and the history has
+    // nothing to add until something writes it again
+    let injected = root.join("run/detc/templates.d/etc/ssh/sshd_config.d/root.conf");
+    fs::create_dir_all(injected.parent().expect("the template has a directory"))?;
+    fs::copy(
+        root.join("usr/share/detc/templates.d/etc/ssh/sshd_config.d/root.conf"),
+        &injected,
+    )?;
+
+    let before = stdout(&detc(root, &["report", "--list"]));
+    assert!(detc(root, &["remove", name]).status.success());
+    assert_eq!(stdout(&detc(root, &["report", "--list"])), before);
+
+    // The purge is the other case, and it is one commit rather than the pair
+    // that an apply writes: there is no before and after of a file that is gone
+    let output = detc(root, &["remove", name, "--mask", "--purge"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!target.exists());
+
+    let output = detc(root, &["report", "--list"]);
+    let listed = stdout(&output);
+    assert_eq!(listed.lines().count(), 2, "{listed}");
+    assert!(listed.contains("\tremove\t"), "{listed}");
+    assert!(listed.contains("1 purged"), "{listed}");
+
+    let reported = stdout(&detc(root, &["report", "--last"]));
+    assert!(reported.starts_with("run\t2\t"), "{reported}");
+    assert!(reported.contains("\napplied\t"), "{reported}");
+    assert!(!reported.contains("\nfound\t"), "{reported}");
+    assert!(
+        reported.contains(&format!("purge\t{}\tas detc wrote it", target.display())),
+        "{reported}"
+    );
+
+    // A removal is its own reason, and the run that has nothing in front of it
+    // must not be read as the machine having described itself differently
+    assert!(
+        reported.contains("cause\t`detc remove` was asked for it"),
+        "{reported}"
+    );
+
+    // Both the file and the template that wrote it have left the history, and
+    // nothing else has: a removal was given one object and speaks for no other
+    let git = |arguments: &[&str]| {
+        let output = std::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(root.join("var/lib/detc/journal.git"))
+            .args(arguments)
+            .output()
+            .expect("git reads the journal");
+        String::from_utf8_lossy(&output.stdout).to_string()
+    };
+
+    let tree = git(&["ls-tree", "-r", "--name-only", "main"]);
+    assert!(
+        !tree.contains("files/etc/ssh/sshd_config.d/root.conf"),
+        "{tree}"
+    );
+    assert!(
+        !tree.contains("templates/etc/ssh/sshd_config.d/root.conf"),
+        "{tree}"
+    );
+    assert!(tree.contains("variables.yaml"), "{tree}");
+
+    // And the dump of the last run is left alone, because it is the report of
+    // the run that reconciled the system and not of the one that undid it
+    let last = fs::read_to_string(root.join("var/lib/detc/last.yaml"))?;
+    assert!(last.contains("command: apply\n"), "{last}");
+
+    Ok(())
+}
+
 /// A provider that goes away leaves every resource of its type unappliable, and
 /// the removal lists them.
 #[test]

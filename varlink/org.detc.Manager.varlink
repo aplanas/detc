@@ -57,7 +57,9 @@ type Probe (
   path: string
 )
 
-# A run of `apply`, as the journal lists it.
+# A run that changed the system, as the journal lists it.  Almost always an
+# `apply`; a `Remove` with `purge` is the other one, since it deletes a
+# configuration file rather than only changing what would be written.
 type Run (
   id: int,
   time: string,
@@ -71,7 +73,7 @@ type Commit (
   summary: string
 )
 
-# A run of `apply`, in full.
+# A run that changed the system, in full.
 type RunDetail (
   id: int,
   time: string,
@@ -209,6 +211,13 @@ method Apply(
 # it.  `purge` takes that file away as well, and only where it is: a file that
 # was edited, or one whose template no longer renders and so cannot be compared,
 # is named and left alone.  It is refused for every type but template.
+#
+# A purge is the one part of a removal that the journal holds, being the one
+# part that changes the system rather than what the system would do.  It is a
+# single commit rather than the pair that `Apply` writes, a file that is gone
+# having no before and after to compare, and `Report` names it under the
+# `remove` command.  A removal without `purge` records nothing, and the next
+# `Apply` records the difference.
 #
 # With `dry_run`, name what would be taken away.  A dry run cannot say what a
 # removal would uncover, since that is a question about the ladder without the

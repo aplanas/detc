@@ -81,6 +81,10 @@ pub mod journal {
             Ok(())
         }
 
+        pub fn purged(&self, _targets: &[std::path::PathBuf], _lines: &[String]) -> Result<()> {
+            Ok(())
+        }
+
         pub fn runs(&self) -> Result<Vec<Run>> {
             Ok(Vec::new())
         }
