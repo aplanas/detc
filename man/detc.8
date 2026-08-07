@@ -8,7 +8,7 @@
 .\" for three pages.  `man ./man/detc.8` renders this one from the repository.
 .\"
 .\" Two fields here go stale by hand: the date and the version in .TH.
-.TH DETC 8 2026\-08\-04 "detc 0.1.0" "System Administration"
+.TH DETC 8 2026\-08\-07 "detc 0.1.0" "System Administration"
 .
 .SH NAME
 detc \- declarative generation of configuration files in a running host
@@ -100,6 +100,7 @@ touching the host.
 Say what would happen instead of doing it.  It covers everything that writes:
 .BR apply ,
 .BR remove ,
+.BR orphans ,
 .BR unmask ,
 the
 .B var
@@ -164,6 +165,20 @@ each change is reported as it is made.  Objects that could not be applied are
 reported and the run ends with a non\-zero status; the ones that succeeded are
 still applied and still recorded.
 .PP
+What the run puts in each configuration file is written down in
+.IR /var/lib/detc/written.yaml ,
+so that a file whose template later leaves the ladder can still be recognised.
+A run that looked at the whole system \(em no
+.I FILE
+and no
+.B \-t
+\(em names those files at the end, as
+.BR orphan ,
+and takes none of them away:
+.B detc orphans
+below is the half that acts, and says why the two are apart.  An orphan is not a
+failure and does not change the status.
+.PP
 A machine that kept bundles and does not hold them \(em one that has rebooted
 and has not converged yet \(em has them put back here, before anything is
 measured, so that what the system declares is all of what it declares.  A
@@ -177,7 +192,10 @@ With
 nothing is put back, and what the ladder does not hold is not planned either, so
 the report that follows is measured without the bundle: on a machine that is
 missing everything one carries it would otherwise be an empty report, which
-reads as nothing to change.  The first line says which it is.
+reads as nothing to change.  The first line says which it is.  No orphan is
+named then either, for the same reason
+.B detc orphans
+refuses while a bundle is out: every file the bundle wrote would be one.
 .PP
 .RS
 .EX
@@ -380,6 +398,71 @@ file out; so there is no
 line and no verdict on an orphan.  With
 .B \-\-purge
 the file that is at stake is still named.
+.
+.SS detc orphans
+Show the configuration files that no template writes any more.
+.PP
+.B detc remove \-\-purge
+covers the removal somebody asked for.  This covers the one nobody did: a
+template can leave the ladder on its own \(em a bundle taken away, a new version
+of one that no longer carries it, a package upgrade, a file masked by hand \(em
+and the file it instantiated stays where it is, configuring the machine, with
+nothing left to say where it came from.
+.PP
+Nothing in a ladder remembers what it used to hold, and a file cannot be
+recognised by rendering a template that is gone; so every
+.B detc apply
+writes down what it put where, in
+.IR /var/lib/detc/written.yaml ,
+and this reads that back against the ladder.  A record that holds nothing \(em
+the first boot of a version that keeps one \(em reports nothing, until something
+has been applied.
+.PP
+.B detc apply
+prints the same files at the end of a run and takes none of them away.  That
+separation is the reason this command exists:
+.B apply
+is what runs unattended at every boot, and a ladder that is short because
+.I /usr
+is not mounted, or because a bundle has not come back, reads exactly like a
+template that was withdrawn.  Naming an orphan that is not one costs a line;
+deleting
+.I /etc/resolv.conf
+on the strength of a mount that was late costs the machine.
+.PP
+The command is refused outright while a bundle is kept and not installed, naming
+it: the templates it carries are not in the ladder, so everything they wrote
+would read as an orphan.  Other commands only get a note on the standard error;
+this one would be answering wrongly rather than incompletely.
+.TP
+.B \-\-purge
+Take away the ones that still hold what detc wrote; the line is then
+.B purge
+rather than
+.BR orphan .
+A file that was edited since is named and left where it is, the same way
+.B detc remove \-\-purge
+leaves one.  It is committed to the history as a single commit, under the
+.B orphans
+command, which
+.B detc report
+names; a run that only reports records nothing and takes no lock.
+.TP
+.BR \-\-forget " " \fIFILE\fR
+Stop the record answering for a file instead, without touching it, which is how
+one that was edited becomes the administrator's own rather than a line at every
+run.  The line is
+.BR forget .
+.IP
+A path that no record holds is refused, and so is one that a template of the
+system still writes: the next run would record it again, and forgetting it would
+only look as though it had worked.  Every path is checked before any of them is
+forgotten.  This cannot be asked for together with
+.BR \-\-purge .
+.TP
+.B \-\-dry\-run
+Global, and it says everything the run would say: what would be taken away and
+what would be forgotten are named, and nothing is written.
 .
 .SS detc unmask OBJECT...
 Put objects back that a zero byte file takes out of the ladder.
@@ -778,6 +861,16 @@ The history.
 What the last run did, which is what
 .B report
 reads when there is no journal.
+.TP
+.I /var/lib/detc/written.yaml
+Every configuration file a run instantiated, the digest of what was put in it,
+and the template that put it there.  It is what
+.B detc orphans
+reads, and it is kept here and not under
+.I /run
+because what it describes is: a reboot takes the ladder away and leaves
+.I /etc/motd
+exactly where it was.  Readable by its owner alone.
 .TP
 .I /var/lib/detc/run.lock
 The lock named by

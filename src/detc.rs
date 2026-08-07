@@ -5,7 +5,7 @@
 //! different from `/` with `--root`, so that a system can be inspected, or
 //! prepared, from outside.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -21,6 +21,7 @@ use serde_json::Value;
 
 use detc::{
     Result, apply, bundle, cfs, doc, err, journal, last, lock, provider, resource, template, var,
+    written,
 };
 
 use crate::record::{Commit, Record, Sink, TextSink};
@@ -221,6 +222,19 @@ pub(crate) enum Commands {
         /// else instantiates it and it still holds what the template wrote
         #[arg(long)]
         purge: bool,
+    },
+
+    /// Show the configuration files that no template writes any more
+    Orphans {
+        /// Take away the ones that still hold what detc wrote.  A file that
+        /// was edited since is named and left alone
+        #[arg(long)]
+        purge: bool,
+
+        /// Stop answering for these files instead, without touching them,
+        /// which is how a file that was edited becomes the administrator's
+        #[arg(long, value_name = "FILE", conflicts_with = "purge")]
+        forget: Vec<PathBuf>,
     },
 
     /// Put objects back that a zero byte file takes out of the ladder
@@ -1234,7 +1248,37 @@ fn remove(
         warn!("Cannot record the purge: {e}");
     }
 
+    if let Err(e) = forget_purged(root, &purged) {
+        warn!("Cannot record what was purged: {e}");
+    }
+
     Ok(())
+}
+
+/// Stop answering for the files that a purge took away.
+///
+/// The [record](written) is of what detc wrote and where it still is, and a
+/// file this run deleted is neither.  Leaving the entry costs nothing in the
+/// end — the next run finds the file gone and drops it — but it is wrong for as
+/// long as it lasts, and `detc orphans` would be the one reading it.
+fn forget_purged(root: &Path, purged: &[PathBuf]) -> Result<()> {
+    if purged.is_empty() {
+        return Ok(());
+    }
+
+    let mut written = written::Written::read(root)?;
+    let mut forgotten = false;
+
+    for target in purged {
+        forgotten |= written.forget(&key_of(root, target));
+    }
+
+    // A system that has never applied anything has no record, and a removal is
+    // not the run that should be starting one
+    match forgotten {
+        true => written.write(root),
+        false => Ok(()),
+    }
 }
 
 /// Take one object away, and report what the system says afterwards.
@@ -1431,6 +1475,299 @@ fn orphaned(
 
         _ => Ok(None),
     }
+}
+
+/// Every configuration file that the ladder declares, named the way the record
+/// of what detc wrote names it.
+///
+/// It is the whole ladder and never the objects that a run was asked about:
+/// only a run that looked at everything can say that a file is not declared.
+fn declared(root: &Path, templates: &template::Templates) -> BTreeSet<String> {
+    templates
+        .templates()
+        .iter()
+        .map(|template| apply::files_key(root, template.target()))
+        .collect()
+}
+
+/// How the record of what detc wrote names a file that somebody typed.
+///
+/// A path is taken as a report prints it — `/etc/motd`, or under the root when
+/// there is one — and as the record spells it, so that a line that was printed
+/// can be pasted back.
+fn key_of(root: &Path, path: &Path) -> String {
+    apply::files_key(root, path)
+        .trim_start_matches('/')
+        .to_string()
+}
+
+/// The configuration files that no template writes any more.
+///
+/// This is the other half of [`orphaned`].  A removal names what the object it
+/// took away leaves behind; this names what was left behind by a template that
+/// nobody removed at all — a bundle that was taken away, a new version of one
+/// that no longer carries it, a package upgrade, a file masked by hand.  The
+/// ladder has no memory of what it used to hold, so nothing else in detc can
+/// see those, which is what the [record](written) of what detc wrote is for.
+///
+/// A run of `apply` finds them and says so, and this is the deliberate half
+/// that acts on them.  The two are separate on purpose: `apply` runs unattended
+/// at every boot, and a ladder that is short because `/usr` is not mounted, or
+/// because a bundle did not come back, reads exactly like a template that was
+/// withdrawn.  Reporting an orphan that is not one costs a line, and deleting
+/// `resolv.conf` on the strength of a mount that is late costs the machine.
+fn orphans(
+    out: &mut dyn Sink,
+    root: &Path,
+    purge: bool,
+    forget: &[PathBuf],
+    dry_run: bool,
+) -> Result<()> {
+    // The same reason, from the one direction detc can do something about: the
+    // templates of a bundle that has not come back are not in the ladder, so
+    // every file they wrote is about to be called an orphan.  Other commands
+    // are given the note that says the system is holding less than it declares;
+    // this one is refused, because the answer would not merely be incomplete,
+    // it would be wrong
+    let outstanding = bundle::outstanding(root)?;
+    if !outstanding.is_empty() {
+        let (subject, are, carry) = match outstanding.len() {
+            1 => ("bundle", "is", "it carries"),
+            _ => ("bundles", "are", "they carry"),
+        };
+
+        return err!(
+            "The {subject} {} {are} kept and not installed, so the templates {carry} are not in the ladder and every file they wrote would read as an orphan; `detc bundle restore` puts {} back first",
+            outstanding.join(", "),
+            if outstanding.len() == 1 { "it" } else { "them" }
+        );
+    }
+
+    let mut written = written::Written::read(root)?;
+    let declared = declared(root, &template::Templates::from_system(root)?);
+
+    if !forget.is_empty() {
+        return release(out, root, written, &declared, forget, dry_run);
+    }
+
+    let orphans = written.orphans(root, &declared);
+    let writes = purge && !dry_run;
+
+    // The namespace is built only when the journal is going to be given
+    // something, and building it runs every probe that the system has
+    // installed: a run that only reports is not one that should pay for that.
+    // It is built before anything is deleted, because what a probe answers
+    // afterwards is not the system the purge happened in
+    let recording = writes
+        && orphans
+            .iter()
+            .any(|orphan| orphan.state == written::State::AsWritten);
+    let var = recording
+        .then(|| var::Variables::from_system(root))
+        .transpose()?;
+
+    // A run reads the objects it was told about and then instantiates them, and
+    // this deletes what one of them wrote
+    let _lock = writes.then(|| lock::Lock::acquire(root)).transpose()?;
+
+    let mut purged = Vec::new();
+    let mut lines = Vec::new();
+    let mut forgotten = false;
+
+    for orphan in &orphans {
+        let file = orphan.path.display().to_string();
+
+        match orphan.state {
+            // Somebody has been here already.  The record is the last thing
+            // left of the file, and it is worth neither reporting nor keeping
+            written::State::Gone => {
+                if writes {
+                    written.forget(&orphan.key);
+                    forgotten = true;
+                }
+            }
+
+            // The file is at stake and the run is a rehearsal, so it is named
+            // rather than counted: a dry run that says nothing about a file it
+            // was going to delete is the one that must not happen
+            written::State::AsWritten if purge && dry_run => {
+                out.emit(Record::Change {
+                    action: "orphan".to_string(),
+                    object: file,
+                    summary: Some(format!("would be taken away, {}", orphan.why())),
+                    error: None,
+                })?;
+            }
+
+            written::State::AsWritten if purge => {
+                fs::remove_file(&orphan.path).map_err(|e| format!("Cannot remove {file}: {e}"))?;
+                written.forget(&orphan.key);
+
+                let record = Record::Change {
+                    action: "purge".to_string(),
+                    object: file,
+                    summary: Some(orphan.why().to_string()),
+                    error: None,
+                };
+
+                lines.push(record.line());
+                purged.push(orphan.path.clone());
+                out.emit(record)?;
+            }
+
+            // Which leaves the file that was edited, and the whole list when
+            // nothing was asked for.  Asking for a purge and not getting one is
+            // worth a word, the same one a removal says it with
+            _ => {
+                let why = match purge {
+                    true => format!("{}, so it was left alone", orphan.summary()),
+                    false => orphan.summary(),
+                };
+
+                out.emit(Record::Change {
+                    action: "orphan".to_string(),
+                    object: file,
+                    summary: Some(why),
+                    error: None,
+                })?;
+            }
+        }
+    }
+
+    if forgotten || !purged.is_empty() {
+        written.write(root)?;
+    }
+
+    if let (false, Some(var)) = (purged.is_empty(), &var)
+        && let Some(journal) = journal::Journal::start(root, var, "orphans")
+        && let Err(e) = journal.purged(&purged, &lines)
+    {
+        warn!("Cannot record the purge: {e}");
+    }
+
+    Ok(())
+}
+
+/// Take down what the run put in the system, and drop what is not in it any
+/// more.
+///
+/// `templates` is the whole ladder for a run that looked at all of it, and
+/// nothing for a run that was given one object.  An entry is dropped only when
+/// the file it names is neither declared nor in the system, and a run that did
+/// not look at everything cannot say the first half of that.
+fn keep_what_was_written(
+    root: &Path,
+    plan: &apply::Plan,
+    templates: Option<&template::Templates>,
+) -> Result<()> {
+    let mut written = written::Written::read(root)?;
+
+    written.record(root, plan);
+
+    if let Some(templates) = templates {
+        let gone: Vec<String> = written
+            .orphans(root, &declared(root, templates))
+            .iter()
+            .filter(|orphan| orphan.state == written::State::Gone)
+            .map(|orphan| orphan.key.clone())
+            .collect();
+
+        for key in gone {
+            written.forget(&key);
+        }
+    }
+
+    written.write(root)
+}
+
+/// Name the configuration files that no template writes any more, for a run
+/// that was not asked about them.
+///
+/// A run of `apply` reports them and takes none of them away; [`orphans`] is
+/// the half that acts, and each line says which way this one goes.  They are
+/// not failures — the system is not wrong, it is holding something that nothing
+/// declares — so the exit status of the run says nothing about them.
+fn report_orphans(out: &mut dyn Sink, root: &Path, declared: &BTreeSet<String>) -> Result<()> {
+    for orphan in written::Written::read(root)?.orphans(root, declared) {
+        // A file that is not there any more is not something the run has to
+        // tell anybody about
+        if orphan.state == written::State::Gone {
+            continue;
+        }
+
+        let next = match orphan.state {
+            written::State::AsWritten => "`detc orphans --purge` takes it away",
+            _ => "`detc orphans --forget` stops the report",
+        };
+
+        out.emit(Record::Change {
+            action: "orphan".to_string(),
+            object: orphan.path.display().to_string(),
+            summary: Some(format!("{}; {next}", orphan.summary())),
+            error: None,
+        })?;
+    }
+
+    Ok(())
+}
+
+/// Stop answering for files that were left behind, without touching them.
+///
+/// A file that was edited since detc wrote it is never deleted, so without this
+/// there would be no way to stop being told about it but to delete it by hand.
+/// It is the administrator's from here, which is what it already was.
+///
+/// A path that the ladder still declares is refused rather than forgotten: the
+/// next run writes the file and records it again, so the only thing forgetting
+/// it would do is make this look as though it had worked.
+fn release(
+    out: &mut dyn Sink,
+    root: &Path,
+    mut written: written::Written,
+    declared: &BTreeSet<String>,
+    forget: &[PathBuf],
+    dry_run: bool,
+) -> Result<()> {
+    // Every path is checked before any of them is dropped, so that a list with
+    // a typo in it leaves the record as it was rather than half rewritten
+    let mut keys = Vec::new();
+
+    for path in forget {
+        let key = key_of(root, path);
+        let file = root.join(&key);
+
+        if written.template_of(&key).is_none() {
+            return err!("Nothing that detc wrote is recorded at {}", file.display());
+        }
+
+        if declared.contains(&key) {
+            return err!(
+                "{} is written by a template that the system still has, so it is not an orphan and there is nothing to forget",
+                file.display()
+            );
+        }
+
+        keys.push((key, file));
+    }
+
+    for (key, file) in &keys {
+        if !dry_run {
+            written.forget(key);
+        }
+
+        out.emit(Record::Change {
+            action: "forget".to_string(),
+            object: file.display().to_string(),
+            summary: Some("detc stops answering for it".to_string()),
+            error: None,
+        })?;
+    }
+
+    if !dry_run {
+        written.write(root)?;
+    }
+
+    Ok(())
 }
 
 /// What putting one masked object back is going to do.
@@ -2329,16 +2666,28 @@ fn apply_system(
         selected_resources.as_deref(),
     )?;
 
+    // A run that was given an object has only looked at that one, so it cannot
+    // say that the rest of the system is gone
+    let full = file.is_none() && kind.is_none();
+
+    // And neither can a run that is measuring a system a bundle has not come
+    // back to: the templates it carries are not in the ladder, so what they
+    // wrote would read as left behind by nothing.  A run that put the bundles
+    // back has already made this false
+    let complete = full && !bundle::needs_restore(root);
+
     if dry_run {
         for change in plan.changes() {
             out.emit(change_record(change.action().planned(), change))?;
         }
+
+        if complete {
+            report_orphans(out, root, &declared(root, &templates))?;
+        }
+
         return Ok(());
     }
 
-    // A run that was given an object has only looked at that one, so it cannot
-    // say that the rest of the system is gone
-    let full = file.is_none() && kind.is_none();
     let journal = journal::Journal::start(root, &var, "apply");
     let last = last::Last::found(&plan);
 
@@ -2412,6 +2761,20 @@ fn apply_system(
     // either: what a run says about itself is not what it did
     if let Err(e) = last.write(root, "apply", full, &plan) {
         warn!("Cannot write what the run did: {e}");
+    }
+
+    // What detc wrote, so that a template leaving the ladder later does not
+    // take with it the only way of recognising the file it wrote.  This one is
+    // read back, by the run that reports the orphans and by `detc orphans`, but
+    // it still fails no run: a record that could not be kept leaves a file
+    // unaccounted for, and a run that refused to converge over it would leave
+    // the whole system that way
+    if let Err(e) = keep_what_was_written(root, &plan, complete.then_some(&templates)) {
+        warn!("Cannot record what the run wrote: {e}");
+    }
+
+    if complete {
+        report_orphans(out, root, &declared(root, &templates))?;
     }
 
     if failed > 0 {
@@ -2878,12 +3241,17 @@ pub(crate) fn dispatch(
     command: &Commands,
     dry_run: bool,
 ) -> Result<()> {
-    // Every command but the three that answer for themselves: `apply` puts the
+    // Every command but the four that answer for themselves: `apply` puts the
     // bundles back and reports it, `bundle` is where the question is asked
-    // outright, and `report` reads the history rather than the system
+    // outright, `report` reads the history rather than the system, and
+    // `orphans` refuses outright, the note being too mild for what a bundle
+    // that has not come back would do to its answer
     if !matches!(
         command,
-        Commands::Apply { .. } | Commands::Bundle { .. } | Commands::Report { .. }
+        Commands::Apply { .. }
+            | Commands::Bundle { .. }
+            | Commands::Report { .. }
+            | Commands::Orphans { .. }
     ) {
         note_what_is_missing(root);
     }
@@ -2906,6 +3274,7 @@ pub(crate) fn dispatch(
             mask,
             purge,
         } => remove(out, root, object, *r#type, *mask, *purge, dry_run),
+        Commands::Orphans { purge, forget } => orphans(out, root, *purge, forget, dry_run),
         Commands::Unmask { object, r#type } => unmask(out, root, object, *r#type, dry_run),
         Commands::Check { file, r#type, var } => check(out, root, file.as_deref(), *r#type, var),
         Commands::Var {

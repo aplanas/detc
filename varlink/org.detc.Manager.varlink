@@ -240,6 +240,45 @@ method Remove(
   dry_run: bool
 ) -> (change: ?Change)
 
+# The configuration files that no template writes any more, and what to do
+# about them.
+#
+# A template can leave the ladder without anybody removing it -- a bundle taken
+# away, a new version of one that no longer carries it, a package upgrade, a
+# file masked by hand -- and the file it instantiated stays in the system,
+# configuring the machine, with nothing left to say where it came from.  The
+# ladder has no memory of what it used to hold, so these are found in the record
+# that every `Apply` keeps of what it wrote: the path of each configuration
+# file, the digest of what was put in it, and the template that put it there.
+#
+# The `orphan` action names one, and its summary says which template wrote it
+# and whether the file is still those bytes.  `Apply` reports the same lines and
+# takes nothing away, which is the whole reason this method is separate: a
+# ladder that is short because a file system is not mounted, or because a bundle
+# has not come back, reads exactly like a template that was withdrawn, and
+# `Apply` is what runs unattended at every boot.
+#
+# With `purge`, the files that still hold what detc wrote are taken away and
+# reported with the `purge` action; one that was edited since is named and left
+# alone, and is the administrator's to keep or delete.  `forget` stops the
+# record answering for the given files without touching them, which is how an
+# edited one stops being reported; a path that no record holds, or that a
+# template of the system still writes, is refused.  The two cannot be asked for
+# together.
+#
+# A purge is recorded in the journal, being the one thing here that changes the
+# system, and `Report` names it under the `orphans` command.
+#
+# The call is refused outright while a bundle is kept and not installed, rather
+# than answering about a ladder that is missing what it carries.
+#
+# With `dry_run`, name what would be taken away or forgotten.  Streaming.
+method Orphans(
+  purge: bool,
+  forget: []string,
+  dry_run: bool
+) -> (change: ?Change)
+
 # Put masked objects back in the ladder, named the way `List` with `masked`
 # reports them, or by the path of the zero byte file itself.  This is the other
 # end of `Remove` with `mask`, and the only method that addresses an object the

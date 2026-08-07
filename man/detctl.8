@@ -1,6 +1,6 @@
 .\" Manual page for detctl.  See the comment at the top of detc.8 for why these
 .\" are roff and not markdown put through a converter.
-.TH DETCTL 8 2026\-08\-04 "detc 0.1.0" "System Administration"
+.TH DETCTL 8 2026\-08\-07 "detc 0.1.0" "System Administration"
 .
 .SH NAME
 detctl \- run a detc subcommand on other machines
@@ -220,9 +220,12 @@ with the same options:
 .BR doc ,
 .BR schema ,
 .BR var ,
-.B bundle
+.BR bundle ,
+.BR report ,
+.BR remove ,
+.B orphans
 and
-.BR report .
+.BR unmask .
 .PP
 Paths in them are paths on the machine that answers, and the namespace a
 .B \-k

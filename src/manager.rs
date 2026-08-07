@@ -73,6 +73,7 @@ pub(crate) const METHODS: &[Method] = &[
     method("GetBundle", "bundle", true, false),
     method("Apply", "change", true, true),
     method("Remove", "change", true, true),
+    method("Orphans", "change", true, true),
     method("Unmask", "change", true, true),
     method("SetVariables", "change", true, true),
     method("UnsetVariables", "change", true, true),
@@ -181,6 +182,19 @@ struct CatParams {
 
     #[serde(default)]
     var: Var,
+}
+
+/// `Orphans`.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct OrphansParams {
+    #[serde(default)]
+    purge: bool,
+
+    #[serde(default)]
+    forget: Vec<String>,
+
+    #[serde(default)]
+    dry_run: bool,
 }
 
 /// `Remove`.
@@ -495,6 +509,15 @@ pub(crate) fn call(command: &Commands, dry_run: bool) -> Result<(&'static Method
             })?,
         ),
 
+        Commands::Orphans { purge, forget } => (
+            "Orphans",
+            varlink::parameters(&OrphansParams {
+                purge: *purge,
+                forget: forget.iter().map(name).collect(),
+                dry_run,
+            })?,
+        ),
+
         Commands::Unmask { object, r#type } => (
             "Unmask",
             varlink::parameters(&UnmaskParams {
@@ -679,6 +702,18 @@ pub(crate) fn command(method: &Method, parameters: Option<Value>) -> Result<(Com
                     r#type: params.r#type,
                     mask: params.mask,
                     purge: params.purge,
+                },
+                params.dry_run,
+            )
+        }
+
+        "Orphans" => {
+            let params: OrphansParams = varlink::take(parameters)?;
+
+            (
+                Commands::Orphans {
+                    purge: params.purge,
+                    forget: params.forget.into_iter().map(PathBuf::from).collect(),
                 },
                 params.dry_run,
             )
@@ -1044,6 +1079,7 @@ mod tests {
             "InstallBundle" => varlink::parameters(&InstallParams::default()),
             "RemoveBundle" => varlink::parameters(&RemoveParams::default()),
             "Remove" => varlink::parameters(&RemoveObjectParams::default()),
+            "Orphans" => varlink::parameters(&OrphansParams::default()),
             "Unmask" => varlink::parameters(&UnmaskParams::default()),
             method => panic!("{method} is served, and takes no parameters here"),
         }
@@ -1179,6 +1215,13 @@ mod tests {
                     purge: true,
                 },
                 "Remove",
+            ),
+            (
+                Commands::Orphans {
+                    purge: true,
+                    forget: Vec::new(),
+                },
+                "Orphans",
             ),
             (
                 Commands::Unmask {

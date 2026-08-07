@@ -101,3 +101,4 @@ pub mod resource;
 pub(crate) mod tar;
 pub mod template;
 pub mod var;
+pub mod written;

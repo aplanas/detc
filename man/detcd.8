@@ -1,6 +1,6 @@
 .\" Manual page for detcd.  See the comment at the top of detc.8 for why these
 .\" are roff and not markdown put through a converter.
-.TH DETCD 8 2026\-08\-04 "detc 0.1.0" "System Administration"
+.TH DETCD 8 2026\-08\-07 "detc 0.1.0" "System Administration"
 .
 .SH NAME
 detcd \- answer for a detc system over varlink
@@ -95,14 +95,18 @@ Answer for a system mounted somewhere else instead of
 .TP
 .B \-\-read\-only
 Refuse every method that changes the system \(em
-.BR Apply
-without
-.IR dry_run ,
+.BR Apply ,
+.BR Remove ,
+.BR Orphans ,
+.BR Unmask ,
 .BR SetVariables ,
+.BR UnsetVariables ,
 .BR MergeDocument ,
 .B InstallBundle
 and
-.B RemoveBundle
+.BR RemoveBundle ,
+each of them without
+.I dry_run
 \(em with the
 .B ReadOnly
 error.  See
@@ -139,6 +143,7 @@ and
 answer the commands of the same name;
 .BR GetVariables ,
 .BR SetVariables ,
+.BR UnsetVariables ,
 .BR MergeDocument ,
 .B ListProbes
 and
@@ -159,9 +164,12 @@ and
 answer
 .BR "detc bundle" ;
 and
-.B Apply
-answers
-.BR "detc apply" .
+.BR Apply ,
+.BR Remove ,
+.B Orphans
+and
+.B Unmask
+answer the subcommands they are named after.
 .PP
 Most of them stream: they send one reply per line of what the subcommand
 prints, so they want

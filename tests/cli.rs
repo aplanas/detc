@@ -1727,6 +1727,223 @@ fn test_the_history_holds_the_file_that_a_purge_took_away() -> TestResult {
     Ok(())
 }
 
+/// A template can leave the ladder with nobody running `detc remove` — a
+/// package upgrade, a bundle taken away — and the file it wrote stays in the
+/// system, configuring the machine, with nothing left to say where it came
+/// from.  The record of what detc wrote is the only thing that can still
+/// recognise it.
+#[test]
+fn test_a_file_whose_template_is_gone_is_reported_and_taken_away() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+    complete(root)?;
+
+    let target = root.join("etc/chrony/chrony.conf");
+    let source = "usr/share/detc/templates.d/etc/chrony/chrony.conf";
+
+    let output = detc(root, &["apply"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(target.is_file());
+
+    // Nothing is left behind while the ladder still declares it, which is the
+    // ordinary state of a system that has been configured
+    let output = detc(root, &["orphans"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+
+    fs::remove_file(root.join(source))?;
+
+    let line = format!(
+        "orphan\t{}\tof template {source}, which is no longer in the system, as detc wrote it",
+        target.display()
+    );
+
+    let output = detc(root, &["orphans"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), format!("{line}\n"));
+
+    // A run that was given one object has not looked at the rest of the system,
+    // so it cannot say that anything of it is gone
+    let output = detc(root, &["apply", "/etc/ssh/sshd_config.d/root.conf"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!stdout(&output).contains("orphan"), "{}", stdout(&output));
+
+    // A run that looked at everything says it, and says what to do about it,
+    // and still takes nothing away
+    let output = detc(root, &["apply"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains(&format!("{line}; `detc orphans --purge` takes it away")),
+        "{}",
+        stdout(&output)
+    );
+    assert!(target.is_file());
+
+    // A dry run names the file that is at stake rather than leaving it out
+    let output = detc(root, &["--dry-run", "orphans", "--purge"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "orphan\t{}\twould be taken away, as detc wrote it\n",
+            target.display()
+        )
+    );
+    assert!(target.is_file());
+
+    let output = detc(root, &["orphans", "--purge"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!("purge\t{}\tas detc wrote it\n", target.display())
+    );
+    assert!(!target.exists());
+
+    // And there is nothing left to say about it, by either half
+    assert_eq!(stdout(&detc(root, &["orphans"])), "");
+    let applied = stdout(&detc(root, &["apply"]));
+    assert!(!applied.contains("orphan"), "{applied}");
+
+    Ok(())
+}
+
+/// The one mistake this must not make is deleting somebody's work on a guess.
+/// A file that was edited is named and left alone, and `--forget` is how it
+/// stops being reported without being deleted.
+#[test]
+fn test_an_orphan_that_was_edited_is_left_alone_and_can_be_forgotten() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+    complete(root)?;
+
+    let target = root.join("etc/chrony/chrony.conf");
+    let source = "usr/share/detc/templates.d/etc/chrony/chrony.conf";
+
+    assert!(detc(root, &["apply"]).status.success());
+
+    fs::remove_file(root.join(source))?;
+    fs::write(&target, "server ntp.example.com iburst\n")?;
+
+    let output = detc(root, &["orphans", "--purge"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "orphan\t{}\tof template {source}, which is no longer in the system, changed since detc wrote it, so it was left alone\n",
+            target.display()
+        )
+    );
+    assert_eq!(
+        fs::read_to_string(&target)?,
+        "server ntp.example.com iburst\n"
+    );
+
+    // A path that no record holds is a typo, and one that a template still
+    // writes is not an orphan at all: forgetting it would only look as though
+    // it had worked
+    let output = detc(root, &["orphans", "--forget", "/etc/nothing"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("Nothing that detc wrote is recorded at"),
+        "{}",
+        stderr(&output)
+    );
+
+    let output = detc(
+        root,
+        &["orphans", "--forget", "/etc/ssh/sshd_config.d/root.conf"],
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("is written by a template that the system still has"),
+        "{}",
+        stderr(&output)
+    );
+
+    // The file is the administrator's from here, and stays exactly as it is
+    let output = detc(root, &["orphans", "--forget", "/etc/chrony/chrony.conf"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "forget\t{}\tdetc stops answering for it\n",
+            target.display()
+        )
+    );
+
+    assert_eq!(stdout(&detc(root, &["orphans"])), "");
+    let applied = stdout(&detc(root, &["apply"]));
+    assert!(!applied.contains("orphan"), "{applied}");
+    assert_eq!(
+        fs::read_to_string(&target)?,
+        "server ntp.example.com iburst\n"
+    );
+
+    Ok(())
+}
+
+/// A bundle that was kept and is not installed carries templates that are not
+/// in the ladder, so every file they wrote would read as left behind by
+/// nothing.  The question is refused rather than answered wrongly, which is the
+/// whole reason `apply` is not what deletes these.
+#[test]
+fn test_orphans_are_not_answered_while_a_bundle_has_not_come_back() -> TestResult {
+    let tmp_built = tempfile::tempdir()?;
+    let file = bundle(tmp_built.path())?;
+
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    complete(root)?;
+
+    let output = detc(
+        root,
+        &[
+            "bundle",
+            "install",
+            file.to_str().unwrap(),
+            "--persist",
+            "--apply",
+            "--allow-unsigned",
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let target = root.join("etc/chrony/chrony.conf");
+    assert!(target.is_file());
+    assert_eq!(stdout(&detc(root, &["orphans"])), "");
+
+    // A reboot is the tmpfs going away, and nothing else
+    fs::remove_dir_all(root.join("run"))?;
+
+    let output = detc(root, &["orphans", "--purge"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains(
+            "The bundle fleet is kept and not installed, so the templates it carries are not in the ladder"
+        ),
+        "{}",
+        stderr(&output)
+    );
+    assert!(target.is_file());
+
+    // A dry run of apply is the other half of the same question: it puts
+    // nothing back, so it measures a ladder the bundle is not in, and must not
+    // call what the bundle wrote an orphan either
+    let output = detc(root, &["--dry-run", "apply"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!stdout(&output).contains("orphan"), "{}", stdout(&output));
+
+    // And once it is back, the question has an answer again
+    assert!(detc(root, &["bundle", "restore"]).status.success());
+    let output = detc(root, &["orphans"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "");
+
+    Ok(())
+}
+
 /// A resource that goes away leaves whatever its provider did about it in the
 /// system, and the removal says that nothing manages it any more.
 #[test]

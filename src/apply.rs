@@ -141,6 +141,16 @@ pub fn template_id(root: &Path, path: &Path) -> String {
     format!("template/{}", files_key(root, path))
 }
 
+/// How the content of a configuration file is fingerprinted.
+///
+/// One definition, because the namespace publishes it under [`FILES`] while the
+/// run is being planned and the [record](crate::written) of what detc wrote
+/// keeps it afterwards, and a file that reads as unchanged in one and as
+/// somebody's work in the other would be worse than either.
+pub fn digest(content: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(content))
+}
+
 /// One object of the system, reduced to what deciding a requirement needs.
 ///
 /// It is not a [`Change`] because `detc check` asks the same question without
@@ -298,6 +308,22 @@ pub enum Snapshot {
     },
 }
 
+/// The configuration file that a change puts in the system, for whoever keeps
+/// a record of what detc wrote.
+///
+/// It is not a [`Snapshot`]: that is the state of an object at a moment of the
+/// run, and reads the template and the file from the system to give it. This is
+/// what the run already worked out, borrowed.
+pub struct Instantiated<'a> {
+    /// The configuration file.
+    pub path: &'a Path,
+    /// The template that writes it, as the ladder resolved it.
+    pub template: &'a Path,
+    /// What the template rendered to, which is what the file holds once the
+    /// change has been applied.
+    pub content: &'a str,
+}
+
 /// One object of the system, and what has to happen to it.
 #[derive(Debug)]
 pub struct Change {
@@ -422,6 +448,29 @@ impl Change {
     /// that was left exactly as the run found it.
     pub fn skip(&mut self, requirement: impl Into<String>) {
         self.skipped = Some(requirement.into());
+    }
+
+    /// The configuration file that the change instantiates, and what goes in
+    /// it.
+    ///
+    /// `None` for a resource, which writes nothing that is detc's to recognise
+    /// later, and for an object that could not be worked out: a template that
+    /// stopped rendering for one run has not stopped writing the file it wrote
+    /// in the previous one, and there is nothing here to say about it.
+    pub fn instantiated(&self) -> Option<Instantiated<'_>> {
+        match &self.target {
+            Target::Template {
+                template,
+                path,
+                content,
+                ..
+            } => Some(Instantiated {
+                path,
+                template: template.source(),
+                content,
+            }),
+            Target::Resource { .. } | Target::Broken { .. } => None,
+        }
     }
 
     /// The object as it is at `phase`, for the history of the system.
@@ -682,11 +731,9 @@ impl Plan {
             // A template that did not render is left out rather than given a
             // null, the way a probe that failed already is
             if let Target::Template { path, content, .. } = &change.target {
-                let digest = Sha256::digest(content.as_bytes());
-
                 files.insert(
                     files_key(root, path),
-                    Value::String(format!("sha256:{digest:x}")),
+                    Value::String(digest(content.as_bytes())),
                 );
             }
         }

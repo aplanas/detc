@@ -782,6 +782,19 @@ counted: the object it waited on already is.
 A run that changes something is recorded in the history, see `detc report`.  A
 dry run is not: it changed nothing.
 
+A run that looked at the whole system also names the configuration files that no
+template writes any more, and takes none of them away — see
+[`detc orphans`](#detc-orphans), which is the half that acts:
+
+```console
+$ detc apply
+ok       template  /etc/ssh/sshd_config.d/60-detc.conf
+orphan   /etc/chrony/chrony.conf  of template usr/share/detc/templates.d/etc/chrony/chrony.conf, which is no longer in the system, as detc wrote it; `detc orphans --purge` takes it away
+```
+
+An orphan is not a failure and does not change the exit status: the system is
+not wrong, it is holding something that nothing declares.
+
 ### `detc remove <object>...`
 
 Take objects away, and say what that uncovers.  Objects are addressed the way
@@ -935,6 +948,80 @@ file that is at stake is still named:
 $ detc --dry-run remove /etc/chrony/chrony.conf --purge
 remove   template  /etc/detc/templates.d/etc/chrony/chrony.conf
 orphan   /etc/chrony/chrony.conf  would be taken away if nothing else instantiates it and it is unchanged
+```
+
+### `detc orphans`
+
+The configuration files that no template writes any more.
+
+`detc remove --purge` covers the removal somebody asked for.  This covers the
+one nobody did: a template can leave the ladder on its own — a bundle taken
+away, a new version of one that no longer carries it, a package upgrade, a file
+masked by hand — and the file it instantiated stays in the system, configuring
+the machine, with nothing left to say where it came from.
+
+Nothing in a ladder remembers what it used to hold, and a file cannot be
+recognised by rendering a template that is gone.  So the answer is written down
+while it still can be: every `detc apply` records what it put where, in
+[`/var/lib/detc/written.yaml`](#varlibdetcwrittenyaml), and this reads it back
+against the ladder.
+
+```console
+$ detc orphans
+orphan   /etc/chrony/chrony.conf  of template usr/share/detc/templates.d/etc/chrony/chrony.conf, which is no longer in the system, as detc wrote it
+```
+
+`detc apply` prints the same files at the end of a run and takes none of them
+away.  That separation is the whole reason this command exists: `apply` is what
+runs unattended at every boot, and a ladder that is short because `/usr` is not
+mounted, or because a bundle has not come back, reads exactly like a template
+that was withdrawn.  Naming an orphan that is not one costs a line; deleting
+`/etc/resolv.conf` on the strength of a mount that was late costs the machine.
+
+`--purge` takes away the ones that still hold what detc wrote:
+
+```console
+$ detc orphans --purge
+purge    /etc/chrony/chrony.conf  as detc wrote it
+```
+
+A file that was edited since is named and left where it is, the same way
+`detc remove --purge` leaves one:
+
+```console
+$ detc orphans --purge
+orphan   /etc/chrony/chrony.conf  of template usr/share/detc/templates.d/etc/chrony/chrony.conf, which is no longer in the system, changed since detc wrote it, so it was left alone
+```
+
+Which would otherwise be reported at every run for good.  `--forget` stops the
+record answering for a file, without touching it — it was the administrator's
+already, and this is how they say so:
+
+```console
+$ detc orphans --forget /etc/chrony/chrony.conf
+forget   /etc/chrony/chrony.conf  detc stops answering for it
+```
+
+A path that no record holds is refused, and so is one that a template of the
+system still writes: the next run would record it again, and forgetting it would
+only look as though it had worked.  `--forget` and `--purge` cannot be asked for
+together.
+
+A purge is committed to the history the same way `detc remove --purge` is, under
+the `orphans` command; a run that only reports records nothing.  `--dry-run`
+names what would be taken away or forgotten and writes nothing.
+
+The command is refused outright while a bundle is [kept and not
+installed](#transient-by-default): the templates it carries are not in the
+ladder, so everything they wrote is about to be called an orphan.  Other
+commands get a note on the standard error; this one would be answering wrongly
+rather than incompletely.
+
+```console
+$ detc orphans
+The bundle fleet is kept and not installed, so the templates it carries are not
+in the ladder and every file they wrote would read as an orphan; `detc bundle
+restore` puts it back first
 ```
 
 ### `detc unmask <object>...`
@@ -1281,6 +1368,38 @@ of the file is the time of the run.  And nothing reads it back — it is not how
 provider learns that a configuration file changed, which happens [while the run
 is still being planned](#reacting-to-a-configuration-file-that-changed).  This
 is what somebody looking at a machine afterwards reads.
+
+#### `/var/lib/detc/written.yaml`
+
+The other document beside the journal, and the one thing detc keeps that *is*
+read back.  Every run of `detc apply` takes down the configuration files it
+instantiated, what it put in each, and which template put it there:
+
+```yaml
+# /var/lib/detc/written.yaml
+etc/chrony/chrony.conf:
+  digest: sha256:1f0c9a3e…
+  template: usr/share/detc/templates.d/etc/chrony/chrony.conf
+etc/ssh/sshd_config.d/60-detc.conf:
+  digest: sha256:8b41d7c2…
+  template: usr/share/detc/templates.d/etc/ssh/sshd_config.d/60-detc.conf
+```
+
+It is what [`detc orphans`](#detc-orphans) reads: a template that leaves the
+ladder takes with it the only other way of recognising the file it wrote, so the
+answer has to be written down before it does.  A digest and not the content —
+the question is whether the file is still detc's, and a copy of the machine's
+own configuration on disk would answer nothing more.
+
+It is kept in `/var` and not in `/run` because what it describes is: a reboot
+takes the ladder away and leaves `/etc/chrony/chrony.conf` exactly where it was.
+Mode `0600`, for the same reason `last.yaml` is.
+
+Only a run that looked at the whole system drops anything from it; a `--type`
+run or one given a single file updates what it touched and nothing else, since
+it cannot say that the rest of the machine is gone.  A system that upgrades into
+a version that keeps this holds an empty record, and reports no orphans until it
+has applied something.
 
 ## Another machine
 
