@@ -2028,14 +2028,17 @@ fn bundle(out: &mut dyn Sink, root: &Path, command: &BundleCommands, dry_run: bo
                 }),
 
                 // The reason is reported as the answer, the way a check of any
-                // other object is, and the run still fails
+                // other object is, and the run still fails.  What ends it says
+                // only that the answer was no: a bundle is refused for who
+                // signed it, for what it carries, and for what another bundle
+                // has already written, and the record above has said which
                 Err(e) => {
                     out.emit(Record::Check {
                         name: source.to_string(),
                         error: Some(e.to_string()),
                     })?;
 
-                    err!("The bundle cannot be trusted")
+                    err!("The bundle would not be installed on this system")
                 }
             }
         }

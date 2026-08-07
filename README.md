@@ -1145,7 +1145,7 @@ Build, check and install a tree of objects, see [Bundles](#bundles).
 | Subcommand | |
 | --- | --- |
 | `create [dir] -o <file>` | Build a bundle out of a source tree, the current directory by default.  `--sign <key>` signs it, `-o -` writes it to the standard output |
-| `verify <file\|-\|url>` | Check that a bundle can be trusted and that everything it carries can be installed |
+| `verify <file\|-\|url>` | Check that a bundle can be trusted, that everything it carries can be installed, and that no other bundle has already written it |
 | `install <file\|-\|url>` | Install it, taking away the older version of the same name.  `--persist`, `--apply`, `--allow-unsigned` |
 | `restore` | Install again every copy that `--persist` kept |
 | `status` | Every bundle the machine knows, one per line, and nothing when it knows none |
@@ -1679,6 +1679,7 @@ run/detc/bundles.d/fleet.yaml         what it is, and what the install learned
 run/detc/bundles.d/fleet.files        every path it wrote
 var/lib/detc/bundles.d/fleet.detc     the signed file, when it persists
 var/lib/detc/bundles.d/fleet.yaml     and what it was installed as
+var/lib/detc/bundles.d/fleet.files    the same list again
 ```
 
 Installing a bundle whose name is already there is a new version of it: it
@@ -1693,10 +1694,21 @@ bundle that got there first:
 
 ```console
 $ detc bundle install other.detc
-error: The bundle other carries run/detc/templates.d/motd, which the installed
+The bundle other carries run/detc/templates.d/etc/motd, which the installed
 bundle web 3 wrote.  Two bundles land in the same prefix and the ladder cannot
 choose between them: take web away, or build other without that file
 ```
+
+`bundle verify` gives the same answer without installing anything, which is what
+makes it worth asking of a fleet before installing on all of it.
+
+The list is written twice because the two copies answer for different moments.
+The one in `run` says what is in the system, and goes with it.  The one beside
+the kept file says what will be there once the bundle is put back, so a bundle
+that was kept holds its paths through the window between the reboot and the
+restore.  Without that the install in the window succeeds, and the bundle that
+was waiting then fails to come back at every boot afterwards — a refusal either
+way, and the late one arrives long after whoever caused it has gone.
 
 What a bundle wrote in `etc` through `apply` is not taken away with it: `remove`
 takes away the objects, not the configuration of the machine.

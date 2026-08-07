@@ -531,7 +531,9 @@ prefixes, which is how a whole configuration reaches a machine as one file.
 A machine holds as many bundles as it was given, each under the name its
 manifest carries.  Installing one of a name that is already there takes away the
 version before it; installing one that would write a file another bundle already
-wrote is refused, naming that bundle.
+wrote is refused, naming that bundle.  A bundle that was kept and is not
+installed holds its paths as well, so the refusal does not wait for the boot
+that cannot put it back.
 .PP
 While a bundle is kept and not installed, every command that reads the ladder
 says so once on the standard error, because the answer it gives on the standard
@@ -562,7 +564,9 @@ instead, which still wins over the distribution and still loses to whatever the
 administrator sets.
 .TP
 .B verify \fIBUNDLE\fR
-Check a bundle and everything it carries, without installing it.
+Check a bundle and everything it carries, without installing it: the signature,
+what the members are, and whether another bundle of this machine has already
+written any of them.  Which is what a fleet asks before installing on all of it.
 .I BUNDLE
 is a file,
 .I \-
@@ -779,15 +783,15 @@ reads when there is no journal.
 The lock named by
 .BR DETC_RUN_LOCK .
 .TP
-.IR /var/lib/detc/bundles.d/ name .detc ", " /var/lib/detc/bundles.d/ name .yaml
+.IR /var/lib/detc/bundles.d/ name .detc ", " .yaml ", " .files
 A bundle kept by
 .BR \-\-persist ,
-and what is known about it.  The directory goes with the last bundle taken away,
-which is what
+what is known about it, and every path it writes when it is put back.  The
+directory goes with the last bundle taken away, which is what
 .B detc\-restore.service
 asks about.
 .TP
-.IR /run/detc/bundles.d/ name .yaml ", " /run/detc/bundles.d/ name .files
+.IR /run/detc/bundles.d/ name .yaml ", " .files
 What an installed bundle is, and every path it wrote.  A reboot takes them away
 with the rest of
 .IR /run .

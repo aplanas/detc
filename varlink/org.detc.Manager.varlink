@@ -175,14 +175,15 @@ method GetRun(id: ?int) -> (detail: RunDetail)
 # What went wrong in one run, as the lines the journal kept.  Streaming.
 method GetFailures(id: ?int) -> (line: ?string)
 
-# Whether a bundle can be trusted and everything it carries can be installed.
-# `bundle` is the file itself, base64 encoded, and `url` is one that the machine
-# that answers fetches itself.  Exactly one of the two.  Streaming.
+# Whether a bundle can be trusted, everything it carries can be installed, and
+# no other bundle of the machine has already written any of it.  `bundle` is the
+# file itself, base64 encoded, and `url` is one that the machine that answers
+# fetches itself.  Exactly one of the two.  Streaming.
 method VerifyBundle(bundle: ?string, url: ?string) -> (check: ?Verdict)
 
-# The bundle that is installed, or the one that was kept when a reboot has taken
-# the installed one away and nothing has restored it yet, and nothing when the
-# machine knows neither.  Streaming.
+# Every bundle that is installed, one reply each, and every one that was kept
+# where a reboot has taken the installed copy away and nothing has restored it
+# yet.  Nothing when the machine knows none.  Streaming.
 method GetBundle() -> (bundle: ?Bundle)
 
 # Bring the system to the state that its objects declare, one object or all of
@@ -283,12 +284,12 @@ method UnsetVariables(key: []string, dry_run: bool) -> (change: ?Change)
 # answers.  Streaming.
 method MergeDocument(file: string, persist: bool, dry_run: bool) -> (change: ?Change)
 
-# Install a bundle, taking away the one that was installed before it.  `bundle`
-# is the file itself, base64 encoded, and `url` is one that the machine that
-# answers fetches itself; exactly one of the two, or neither to install again
-# the copy that `persist` left in the system.  With `apply`, the system is
-# brought to the state that the bundle declares once it is installed.
-# Streaming.
+# Install a bundle, taking away the version of that name that was installed
+# before it, and refusing a path that another bundle wrote.  `bundle` is the
+# file itself, base64 encoded, and `url` is one that the machine that answers
+# fetches itself; exactly one of the two, or neither to install again every
+# copy that `persist` left in the system.  With `apply`, the system is brought
+# to the state that the bundle declares once it is installed.  Streaming.
 method InstallBundle(
   bundle: ?string,
   url: ?string,
