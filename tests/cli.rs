@@ -1386,6 +1386,28 @@ fn test_a_name_that_addresses_more_than_one_probe_is_refused() -> TestResult {
         )
     );
 
+    // The file itself addresses it too, and what is uncovered is a fact about
+    // the system rather than about the spelling that reached it: the removal
+    // asks which file answers for the key, and the path of the one that has
+    // just gone is the one spelling that could never have found it
+    program(
+        &injected,
+        "echo '{\"disk\": {\"root\": \"/dev/nvme0n1p1\"}}'\n",
+    )?;
+
+    let output = detc(root, &["remove", &injected.display().to_string()]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!(
+            "remove\tprobe\t{}\nremains\tprobe {}\t{}\n",
+            injected.display(),
+            injected.display(),
+            root.join("usr/libexec/detc/probes/system.d/20-disk")
+                .display()
+        )
+    );
+
     Ok(())
 }
 
@@ -1636,6 +1658,26 @@ fn test_a_provider_that_goes_away_names_the_resources_it_orphans() -> TestResult
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(
         stdout(&output).contains("remains\tprovider pkg"),
+        "{output:?}"
+    );
+    assert!(!stdout(&output).contains("orphan"), "{output:?}");
+
+    // And the same removal addressed by the file rather than by the type says
+    // the same thing.  Which resources are orphaned is a question about the
+    // system, and answering it by the name that was typed would have found no
+    // provider left and named every resource of the type -- while the copy the
+    // distribution ships still implements every one of them
+    fs::copy(root.join("usr/libexec/detc/providers.d/pkg"), &injected)?;
+    fs::set_permissions(&injected, fs::Permissions::from_mode(0o755))?;
+
+    let output = detc(root, &["remove", &injected.display().to_string()]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains(&format!(
+            "remains\tprovider {}\t{}",
+            injected.display(),
+            root.join("usr/libexec/detc/providers.d/pkg").display()
+        )),
         "{output:?}"
     );
     assert!(!stdout(&output).contains("orphan"), "{output:?}");

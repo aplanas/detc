@@ -670,6 +670,22 @@ fn masked(root: &Path, kind: Type) -> Result<Vec<(String, PathBuf)>> {
     }
 }
 
+/// The file that the ladder answers with for one key, out of the entries that a
+/// resolver came back with.
+///
+/// The file that answers for a key sits at the same path below its prefix,
+/// whichever prefix that is, so the entry to look for is the one whose file ends
+/// there.  Asking by the name that was typed would do for a template, a
+/// resource and a variable document, whose name is the same on every rung, but
+/// not for a probe or a provider: either can be addressed by its path, and a
+/// path only ever names the file that has just been taken away.
+fn at_key(entries: Vec<(String, PathBuf)>, rest: &Path) -> Option<PathBuf> {
+    entries
+        .into_iter()
+        .find(|(_, path)| path.ends_with(rest))
+        .map(|(_, path)| path)
+}
+
 /// List the objects of the system, one per line, as the type of the object, the
 /// name that addresses it, and where it comes from.
 ///
@@ -977,6 +993,9 @@ struct Removal {
     /// The zero byte file to write instead of unlinking the source, when the
     /// object is being taken out of the ladder rather than removed.
     mask: Option<PathBuf>,
+    /// The path of the source below its prefix, which is the identity of the
+    /// key across the whole ladder, and so what says which file is under it.
+    rest: PathBuf,
     leaves: Leaves,
 }
 
@@ -1091,6 +1110,7 @@ fn plan_removal(
     Ok(Removal {
         name: name.display().to_string(),
         mask: mask.then(|| root.join(admin).join(&rest)),
+        rest,
         object,
         leaves,
     })
@@ -1173,7 +1193,9 @@ fn take_away(
     purge: bool,
     dry_run: bool,
 ) -> Result<()> {
-    let Removal { name, mask, .. } = removal;
+    let Removal {
+        name, mask, rest, ..
+    } = removal;
     let (kind, source) = (removal.kind(), removal.source());
 
     let (action, path) = match mask {
@@ -1223,13 +1245,16 @@ fn take_away(
         return Ok(());
     }
 
-    // A copy in a lower prefix answers for the name now, so the object has not
-    // gone anywhere and nothing it holds up has been let go of
-    if let Some(what) = installed_object(root, Path::new(name), kind)? {
+    // A copy in a lower prefix answers for the key now, so the object has not
+    // gone anywhere and nothing it holds up has been let go of.  The name is
+    // still the one that was typed, which is not always the one that addresses
+    // what is left -- a mount point can carry several probes -- but the file
+    // that answers is named beside it
+    if let Some(path) = at_key(installed(root, kind)?, rest) {
         return out.emit(Record::Change {
             action: "remains".to_string(),
             object: format!("{kind} {name}"),
-            summary: Some(what.source().display().to_string()),
+            summary: Some(path.display().to_string()),
             error: None,
         });
     }
@@ -1483,22 +1508,11 @@ fn put_back(out: &mut dyn Sink, root: &Path, unmasking: &Unmasking, dry_run: boo
         return Ok(());
     }
 
-    // The file that answers for a key sits at the same path below its prefix,
-    // whichever prefix that is, so the entry the resolver came back with is the
-    // one whose file ends there.  Asking by name would do for every type but a
-    // probe, where one mount point can address several
-    let at_key = |entries: Vec<(String, PathBuf)>| {
-        entries
-            .into_iter()
-            .find(|(_, path)| path.ends_with(rest))
-            .map(|(_, path)| path)
-    };
-
-    let (action, summary) = match at_key(installed(root, *kind)?) {
+    let (action, summary) = match at_key(installed(root, *kind)?, rest) {
         Some(path) => ("remains", path.display().to_string()),
         // A bundle can carry a mask of its own, and a second one under the
         // first is still a mask
-        None => match at_key(masked(root, *kind)?) {
+        None => match at_key(masked(root, *kind)?, rest) {
             Some(path) => ("masked", path.display().to_string()),
             None => ("absent", "the mask covered no file".to_string()),
         },
