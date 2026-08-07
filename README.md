@@ -1639,6 +1639,16 @@ created   template  /etc/ssh/sshd_config.d/60-detc.conf
 The signature is checked again every time, so a key that was revoked in the
 meantime stops a bundle that was accepted once.
 
+A dry run puts nothing back, and an object the ladder does not hold is not
+planned either — so on a machine that has rebooted and not converged yet, the
+rest of the report is measured without the bundle, and would otherwise be an
+empty report that reads as nothing to change.  The first line says which it is:
+
+```console
+$ detc --dry-run apply
+restore  bundle fleet 3  would be put back first, so what follows is measured without it
+```
+
 One bundle is installed at a time.  Installing another writes everything it
 carries and only then takes away the files that the previous one left, so
 `run/lib/detc` keeps what a different injector put there, and every path holds

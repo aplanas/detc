@@ -163,6 +163,25 @@ What is planned is only what differs, in the order the providers declare, and
 each change is reported as it is made.  Objects that could not be applied are
 reported and the run ends with a non\-zero status; the ones that succeeded are
 still applied and still recorded.
+.PP
+A machine that kept a bundle and does not hold it \(em one that has rebooted and
+has not converged yet \(em has it put back here, before anything is measured, so
+that what the system declares is all of what it declares.  A restore that fails
+fails the run.
+.PP
+With
+.B \-\-dry\-run
+nothing is put back, and what the ladder does not hold is not planned either, so
+the report that follows is measured without the bundle: on a machine that is
+missing everything one carries it would otherwise be an empty report, which
+reads as nothing to change.  The first line says which it is.
+.PP
+.RS
+.EX
+$ detc \-\-dry\-run apply
+restore  bundle fleet 3  would be put back first, so what follows is measured without it
+.EE
+.RE
 .
 .SS detc list
 List the objects of the system: what they are, the name that addresses each,

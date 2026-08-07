@@ -1961,13 +1961,20 @@ fn check(
 
 /// What installing or removing a bundle did, or would do.
 fn bundle_record(action: &str, outcome: &bundle::Outcome) -> Record {
+    bundle_record_of(
+        action,
+        &outcome.bundle,
+        format!("{} written, {} removed", outcome.written, outcome.removed),
+    )
+}
+
+/// The line about a bundle whose summary is already worked out, for the one
+/// caller that has something to say about it that counting files does not.
+fn bundle_record_of(action: &str, bundle: &bundle::Bundle, summary: String) -> Record {
     Record::Change {
         action: action.to_string(),
-        object: format!("bundle {} {}", outcome.bundle.name, outcome.bundle.version),
-        summary: Some(format!(
-            "{} written, {} removed",
-            outcome.written, outcome.removed
-        )),
+        object: format!("bundle {} {}", bundle.name, bundle.version),
+        summary: Some(summary),
         error: None,
     }
 }
@@ -2180,7 +2187,24 @@ fn apply_system(
     // the bundle is part of the declared state, and converging without it
     // silently would be worse than not converging at all.
     if bundle::needs_restore(root) {
-        restore_bundle(out, root, dry_run)?;
+        let outcome = bundle::restore(root, dry_run)?;
+
+        // A dry run puts nothing back, and everything reported below this line
+        // is then measured against a ladder that the bundle is not in.  What an
+        // object is not in the ladder for is not in the plan either, so saying
+        // only that the bundle would be restored leaves a machine that is
+        // missing everything it carries reporting that it has nothing to
+        // change -- which is the one answer a drift report must never get wrong
+        let record = match dry_run {
+            true => bundle_record_of(
+                "restore",
+                &outcome.bundle,
+                "would be put back first, so what follows is measured without it".to_string(),
+            ),
+            false => bundle_record("restored", &outcome),
+        };
+
+        out.emit(record)?;
     }
 
     let var = args.variables(root)?;

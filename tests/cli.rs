@@ -3262,6 +3262,65 @@ fn test_a_bundle_that_persists_comes_back_after_a_reboot() -> TestResult {
     Ok(())
 }
 
+/// A dry run puts the bundle back nowhere, so what it reports about the rest of
+/// the machine was measured without it — and it says so.  What the ladder does
+/// not hold is not in the plan, so the report is otherwise an all clear given to
+/// a machine that is missing everything the bundle carries.
+#[test]
+fn test_a_dry_run_says_it_measured_the_system_without_the_bundle() -> TestResult {
+    let tmp_built = tempfile::tempdir()?;
+    let file = bundle(tmp_built.path())?;
+
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    complete(root)?;
+
+    let output = detc(
+        root,
+        &[
+            "bundle",
+            "install",
+            file.to_str().unwrap(),
+            "--persist",
+            "--allow-unsigned",
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(detc(root, &["apply"]).status.success());
+
+    // A reboot is the tmpfs going away, and nothing else
+    fs::remove_dir_all(root.join("run"))?;
+
+    // The whole of the report, which is the point: everything the bundle
+    // carries is out of the ladder and so out of the plan, so what is left
+    // without this line is a machine that is missing all of it and an empty
+    // report saying there is nothing to change
+    let output = detc(root, &["--dry-run", "apply"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "restore\tbundle fleet 1\twould be put back first, so what follows is measured without it\n"
+    );
+
+    // And it really did put it back nowhere: the line is a caveat about the
+    // report, not the report of a restore that quietly happened
+    assert!(!root.join("run").exists());
+    assert_eq!(
+        stdout(&detc(root, &["bundle", "status"])),
+        "fleet\t1\tunsigned\tlocal\tkept\n"
+    );
+
+    // Once the bundle is back there is nothing to say, and the same report is
+    // the one that was worth having in the first place
+    assert!(detc(root, &["apply"]).status.success());
+
+    let output = detc(root, &["--dry-run", "apply"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!stdout(&output).contains("restore"), "{}", stdout(&output));
+
+    Ok(())
+}
+
 #[test]
 fn test_a_bundle_that_was_kept_is_taken_away_before_it_comes_back() -> TestResult {
     let tmp_built = tempfile::tempdir()?;
