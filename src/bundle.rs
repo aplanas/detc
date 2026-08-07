@@ -53,8 +53,22 @@
 //! *file* rather than moving its contents somewhere that outranks the admin.
 //! The trust anchor is read from `usr/share` and `etc` only, never from `run`,
 //! so a bundle cannot widen the trust that admitted it.
+//!
+//! Several bundles are installed at a time, each known by the name its manifest
+//! gives it, and the system keeps one entry per bundle in each of two places:
+//!
+//! ```text
+//! run/detc/bundles.d/fleet.yaml         what it is, and what the install learned
+//! run/detc/bundles.d/fleet.files        every path it wrote
+//! var/lib/detc/bundles.d/fleet.detc     the signed file, when it persists
+//! var/lib/detc/bundles.d/fleet.yaml     and what it was installed as
+//! ```
+//!
+//! They share the prefixes and the ladder makes no ranking between them, so a
+//! path that one bundle wrote is a path no other may write: an install that
+//! would land on one is refused, naming the bundle that got there first.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -77,13 +91,19 @@ const SIGNATURE: &str = "payload.tar.sig";
 /// signatures.
 const NAMESPACE: &str = "detc-bundle";
 
-/// The file that names the bundle, written by whoever wrote the tree and
-/// installed with what it describes.
+/// The file that names the bundle, written by whoever wrote the tree and read
+/// when what it describes is installed.
 const MANIFEST: &str = "bundle.yaml";
 
-/// The list of the paths that the installed bundle wrote, which is how the
-/// next install knows what to take away.
-const FILES: &str = "bundle.files";
+/// The directory, in each of the two places that hold the state of a bundle,
+/// that holds one entry per installed bundle.
+const BUNDLES: &str = "bundles.d";
+
+/// What each of those entries is called, after the name of the bundle: what it
+/// is, the paths it wrote, and the signed file itself.
+const STATE: &str = ".yaml";
+const FILES: &str = ".files";
+const KEPT: &str = ".detc";
 
 /// The directory of the tool inside a prefix.
 const DETC: &str = "detc";
@@ -96,8 +116,7 @@ const EXEC_PREFIX: &str = "run/lib";
 
 /// Where a bundle that was installed with `--persist` is kept, so that it can
 /// be installed again after a reboot took the tmpfs with it.
-const STORED_FILE: &str = "var/lib/detc/bundle.detc";
-const STORED_STATE: &str = "var/lib/detc/bundle.yaml";
+const KEPT_PREFIX: &str = "var/lib";
 
 /// Name and prefixes of the trust anchor.  Deliberately not the prefixes of
 /// [`cfs::SEARCH_PREFIXES`]: `run` is where a bundle installs, and a bundle
@@ -110,6 +129,12 @@ pub const UNSIGNED: &str = "unsigned";
 
 /// The origin of a bundle whose bytes were given rather than fetched.
 pub const LOCAL_ORIGIN: &str = "local";
+
+/// The modes that a bundle is installed with, imposed here rather than taken
+/// from the archive: a file that root writes and everybody reads, or a program
+/// that everybody runs.
+const DATA_MODE: u32 = 0o644;
+const EXEC_MODE: u32 = 0o755;
 
 /// The most that a bundle can hold, which is the most that is read from
 /// wherever one arrives from.
@@ -180,16 +205,16 @@ pub fn create(dir: &Path, key: Option<&Path>) -> Result<(Bundle, Vec<u8>)> {
 
     if entries.len() == 1 {
         warn!(
-            "The bundle {} holds nothing but its {MANIFEST}, and installing it will take away whatever the bundle before it left",
+            "The bundle {} holds nothing but its {MANIFEST}, and installing it will take away whatever the bundle of that name left before it",
             bundle.name
         );
     }
 
     let payload = tar::write(&entries)?;
-    let mut members = vec![tar::Entry::new(PAYLOAD, 0o644, payload.clone())];
+    let mut members = vec![tar::Entry::new(PAYLOAD, DATA_MODE, payload.clone())];
 
     match key {
-        Some(key) => members.push(tar::Entry::new(SIGNATURE, 0o644, sign(&payload, key)?)),
+        Some(key) => members.push(tar::Entry::new(SIGNATURE, DATA_MODE, sign(&payload, key)?)),
         None => warn!(
             "The bundle is not signed, and installing it will need --allow-unsigned; sign it with --sign"
         ),
@@ -207,12 +232,17 @@ pub fn verify(root: &Path, file: &[u8], allow_unsigned: bool) -> Result<Bundle> 
     Ok(open(root, file, allow_unsigned)?.bundle)
 }
 
-/// Install a bundle, taking away the one that was installed before it.
+/// Install a bundle, taking away whatever the bundle of the same name left.
 ///
 /// Every file is written whole, to a temporary name and renamed over its
 /// target, and everything is written before anything is removed: at every
 /// instant each path holds either the old content or the new, and a path that
-/// both bundles carry is never missing.
+/// both versions carry is never missing.
+///
+/// A path that another bundle wrote is refused before anything is written.  The
+/// two land in the same prefix, and the ladder ranks prefixes rather than the
+/// bundles inside one, so there is no answer to which of them the file belongs
+/// to and the install says so instead of picking.
 pub fn install(
     root: &Path,
     file: &[u8],
@@ -225,13 +255,17 @@ pub fn install(
     content.bundle.origin = origin.to_string();
     content.bundle.persist = persist;
 
+    let name = content.bundle.name.clone();
+
     // The identity and the list belong to the bundle as much as its members do,
     // so that removing it removes them too
     let mut wanted: BTreeSet<PathBuf> = content.files.iter().map(|(p, _, _)| p.clone()).collect();
-    wanted.insert(data_path(MANIFEST));
-    wanted.insert(data_path(FILES));
+    wanted.insert(installed_path(&name, STATE));
+    wanted.insert(installed_path(&name, FILES));
 
-    let previous = recorded(root)?;
+    claim(root, &name, &wanted)?;
+
+    let previous = recorded(root, &name)?;
     let stale: Vec<&PathBuf> = previous.difference(&wanted).collect();
 
     let outcome = Outcome {
@@ -253,37 +287,61 @@ pub fn install(
     }
 
     let state = serde_yaml_ng::to_string(&outcome.bundle)?;
-    write_atomically(&root.join(data_path(FILES)), &listing(&wanted), Some(0o644))?;
     write_atomically(
-        &root.join(data_path(MANIFEST)),
+        &root.join(installed_path(&name, FILES)),
+        &listing(&wanted),
+        Some(DATA_MODE),
+    )?;
+    write_atomically(
+        &root.join(installed_path(&name, STATE)),
         state.as_bytes(),
-        Some(0o644),
+        Some(DATA_MODE),
     )?;
 
-    // A bundle that does not persist takes away the copy that the one before it
-    // left, so that a reboot cannot bring back a bundle that was replaced
+    // A version that does not persist takes away the copy that the one before
+    // it left, so that a reboot cannot bring back a bundle that was replaced
     if persist {
-        write_atomically(&root.join(STORED_FILE), file, Some(0o644))?;
-        write_atomically(&root.join(STORED_STATE), state.as_bytes(), Some(0o644))?;
+        write_atomically(&root.join(kept_path(&name, KEPT)), file, Some(DATA_MODE))?;
+        write_atomically(
+            &root.join(kept_path(&name, STATE)),
+            state.as_bytes(),
+            Some(DATA_MODE),
+        )?;
     } else {
-        discard(root)?;
+        discard(root, &name)?;
     }
 
     Ok(outcome)
 }
 
-/// Install again the bundle that `--persist` kept, which is what a machine
-/// needs after a reboot took `run` with it.
+/// Install again every bundle that `--persist` kept and that is not installed,
+/// which is what a machine needs after a reboot took `run` with it.
 ///
-/// The signature is checked again, so the decision to trust the bundle is made
+/// The signature is checked again, so the decision to trust a bundle is made
 /// once per boot and a key that was withdrawn stops a bundle that this machine
 /// had already accepted.
-pub fn restore(root: &Path, dry_run: bool) -> Result<Outcome> {
-    let path = root.join(STORED_FILE);
+///
+/// One that cannot be put back does not stop the others: they are separate
+/// bundles and the machine is better off holding the ones it can.  Each is
+/// answered for by name, and it is for the caller to report them and to fail
+/// the run.
+pub fn restore(root: &Path, dry_run: bool) -> Result<Vec<(String, Result<Outcome>)>> {
+    Ok(outstanding(root)?
+        .into_iter()
+        .map(|name| {
+            let outcome = restore_one(root, &name, dry_run);
+            (name, outcome)
+        })
+        .collect())
+}
+
+/// Install again one bundle that was kept, as it was installed.
+fn restore_one(root: &Path, name: &str, dry_run: bool) -> Result<Outcome> {
+    let path = root.join(kept_path(name, KEPT));
     let file = fs::read(&path)
         .map_err(|e| format!("Cannot read the bundle kept in {}: {e}", path.display()))?;
 
-    let state = stored(root)?.unwrap_or_default();
+    let state = kept_state(root, name)?.unwrap_or_default();
     install(
         root,
         &file,
@@ -294,22 +352,22 @@ pub fn restore(root: &Path, dry_run: bool) -> Result<Outcome> {
     )
 }
 
-/// Take away the installed bundle, and the copy that was kept of it.
+/// Take away one bundle, and the copy that was kept of it.
 ///
-/// Nothing installed is nothing to do, which is what lets this be called
-/// without asking first.
+/// A name that names nothing is nothing to do, which is what lets this be
+/// called without asking first.
 ///
 /// A bundle that was kept but is not installed is still taken away, because
 /// that is the machine between the reboot that emptied the tmpfs and the
 /// restore that fills it again -- and the machine whose restore keeps failing,
 /// which is the one that most needs to be able to say no to it.  There is
 /// nothing to unlink there, so what is removed is the copy alone.
-pub fn remove(root: &Path, dry_run: bool) -> Result<Option<Outcome>> {
-    let Some(bundle) = installed(root)?.or(stored(root)?) else {
+pub fn remove(root: &Path, name: &str, dry_run: bool) -> Result<Option<Outcome>> {
+    let Some(bundle) = installed_state(root, name)?.or(kept_state(root, name)?) else {
         return Ok(None);
     };
 
-    let files = recorded(root)?;
+    let files = recorded(root, name)?;
     let outcome = Outcome {
         bundle,
         written: 0,
@@ -323,31 +381,56 @@ pub fn remove(root: &Path, dry_run: bool) -> Result<Option<Outcome>> {
     for path in &files {
         unlink(root, path)?;
     }
-    discard(root)?;
+    discard(root, name)?;
 
     Ok(Some(outcome))
 }
 
-/// The bundle that is installed, if there is one.
+/// Every bundle that is installed, by name.
 ///
 /// The state is read from the content itself, so it cannot go stale: it goes
 /// away with the tmpfs, which is exactly when the files it describes do.
-pub fn installed(root: &Path) -> Result<Option<Bundle>> {
-    read_state(&root.join(data_path(MANIFEST)))
+pub fn installed(root: &Path) -> Result<Vec<Bundle>> {
+    names(&root.join(installed_dir()), STATE)?
+        .iter()
+        .filter_map(|name| installed_state(root, name).transpose())
+        .collect()
 }
 
-/// The bundle that `--persist` kept, if there is one.
-pub fn stored(root: &Path) -> Result<Option<Bundle>> {
-    read_state(&root.join(STORED_STATE))
+/// Every bundle that `--persist` kept, by name.
+pub fn kept(root: &Path) -> Result<Vec<Bundle>> {
+    names(&root.join(kept_dir()), KEPT)?
+        .iter()
+        .filter_map(|name| kept_state(root, name).transpose())
+        .collect()
 }
 
-/// Whether there is a bundle to install again: one was kept, and nothing is
-/// installed.  Which is the machine after a reboot.
+/// Whether there is anything to install again: something was kept, and it is
+/// not installed.  Which is the machine after a reboot.
 pub fn needs_restore(root: &Path) -> bool {
-    root.join(STORED_FILE).is_file() && !root.join(data_path(MANIFEST)).is_file()
+    outstanding(root).is_ok_and(|names| !names.is_empty())
 }
 
-/// The bundle that installed `path`, when the installed one claims it.
+/// The bundles that were kept and are not installed, in the order of their
+/// names.
+///
+/// Which is what a machine is missing between the reboot that empties the tmpfs
+/// and the restore that fills it again, and so what a command that reads the
+/// ladder in the meantime has to be able to say it is answering without.
+///
+/// A bundle that is installed is left alone rather than written again: what is
+/// there is what the copy holds, and putting it back would take away the file
+/// of anything that landed in the meantime for no gain at all.
+pub fn outstanding(root: &Path) -> Result<Vec<String>> {
+    let installed = root.join(installed_dir());
+
+    Ok(names(&root.join(kept_dir()), KEPT)?
+        .into_iter()
+        .filter(|name| !installed.join(format!("{name}{STATE}")).is_file())
+        .collect())
+}
+
+/// The bundle that installed `path`, when one of the installed ones claims it.
 ///
 /// `path` is relative to the root, the way the list of what was installed holds
 /// it.  A path that no bundle could have written is answered without reading
@@ -355,14 +438,57 @@ pub fn needs_restore(root: &Path) -> bool {
 /// administrator's prefix and a bundle never reaches it.
 ///
 /// This is what lets a command that writes refuse a path that is not its own.
-/// The list is the only record there is, and it goes away with the tmpfs it
-/// describes, so a stale answer is not something that can be reached from here.
+/// The lists are the only record there is, and they go away with the tmpfs they
+/// describe, so a stale answer is not something that can be reached from here.
 pub fn owner(root: &Path, path: &Path) -> Result<Option<Bundle>> {
-    if !ours(path) || !recorded(root)?.contains(path) {
+    if !ours(path) {
         return Ok(None);
     }
 
-    installed(root)
+    match claimed(root)?.get(path) {
+        Some(name) => installed_state(root, name),
+        None => Ok(None),
+    }
+}
+
+/// Every path that an installed bundle wrote, and the name of the bundle that
+/// wrote it.
+fn claimed(root: &Path) -> Result<BTreeMap<PathBuf, String>> {
+    let mut claimed = BTreeMap::new();
+
+    for name in names(&root.join(installed_dir()), FILES)? {
+        for path in recorded(root, &name)? {
+            claimed.insert(path, name.clone());
+        }
+    }
+
+    Ok(claimed)
+}
+
+/// Refuse an install that would write over what another bundle wrote.
+///
+/// Before anything is written, because a bundle that is half installed over
+/// another one is a system that neither of them describes.
+fn claim(root: &Path, name: &str, wanted: &BTreeSet<PathBuf>) -> Result<()> {
+    let claimed = claimed(root)?;
+
+    for path in wanted {
+        let Some(other) = claimed.get(path).filter(|other| *other != name) else {
+            continue;
+        };
+
+        let version = match installed_state(root, other)? {
+            Some(bundle) => format!("{other} {}", bundle.version),
+            None => other.to_string(),
+        };
+
+        return err!(
+            "The bundle {name} carries {}, which the installed bundle {version} wrote.  Two bundles land in the same prefix and the ladder cannot choose between them: take {other} away, or build {name} without that file",
+            path.display()
+        );
+    }
+
+    Ok(())
 }
 
 /// The trees that a payload can carry, and whether what is in them is code.
@@ -412,25 +538,20 @@ fn places() -> String {
 
 /// Where a member of a payload is installed, and with which mode.
 ///
-/// The mode is imposed and never read from the archive, so a bundle cannot ask
-/// for anything but a file that root can write and everybody can read, or a
-/// program that everybody can run.
+/// The manifest is not one of them: it is read rather than laid down, and what
+/// the install learned is written back with it, under the name it gives.
 fn place(name: &str) -> Result<(PathBuf, u32)> {
-    if name == MANIFEST {
-        return Ok((data_path(MANIFEST), 0o644));
-    }
-
-    if name == FILES {
+    if name == BUNDLES || name.starts_with(&format!("{BUNDLES}/")) {
         return err!(
-            "A bundle cannot hold {FILES}, which is the list of its own files and is written when it is installed"
+            "A bundle cannot hold {name}, because {BUNDLES} is where the system writes what each installed bundle is and which files it wrote"
         );
     }
 
     for (tree, code) in trees() {
         if name == tree || name.starts_with(&format!("{tree}.d/")) {
             return Ok(match code {
-                true => (exec_path(name), 0o755),
-                false => (data_path(name), 0o644),
+                true => (exec_path(name), EXEC_MODE),
+                false => (data_path(name), DATA_MODE),
             });
         }
     }
@@ -487,6 +608,24 @@ fn data_path(name: &str) -> PathBuf {
 /// Where a program of a bundle lands, relative to the root.
 fn exec_path(name: &str) -> PathBuf {
     Path::new(EXEC_PREFIX).join(DETC).join(name)
+}
+
+/// Where the state of the installed bundles is, and where the kept copies are.
+fn installed_dir() -> PathBuf {
+    data_path(BUNDLES)
+}
+
+fn kept_dir() -> PathBuf {
+    Path::new(KEPT_PREFIX).join(DETC).join(BUNDLES)
+}
+
+/// One of the entries that the system keeps for a bundle, by name.
+fn installed_path(name: &str, suffix: &str) -> PathBuf {
+    installed_dir().join(format!("{name}{suffix}"))
+}
+
+fn kept_path(name: &str, suffix: &str) -> PathBuf {
+    kept_dir().join(format!("{name}{suffix}"))
 }
 
 /// The name a member of a bundle has, which is where it sits in the tree that
@@ -550,9 +689,21 @@ fn collect(dir: &Path, entries: &mut Vec<tar::Entry>) -> Result<()> {
                 return err!("{reason}");
             }
 
-            match place(&name) {
-                Ok((_, mode)) => entries.push(tar::Entry::new(name, mode, fs::read(entry.path())?)),
-                Err(e) => warn!("{e}"),
+            // The manifest is carried and read rather than laid down anywhere,
+            // so it is the one member that has no place of its own
+            let mode = match name == MANIFEST {
+                true => Some(DATA_MODE),
+                false => match place(&name) {
+                    Ok((_, mode)) => Some(mode),
+                    Err(e) => {
+                        warn!("{e}");
+                        None
+                    }
+                },
+            };
+
+            if let Some(mode) = mode {
+                entries.push(tar::Entry::new(name, mode, fs::read(entry.path())?));
             }
         } else {
             warn!("Leaving out {name}, which is not a regular file");
@@ -575,14 +726,15 @@ fn open(root: &Path, file: &[u8], allow_unsigned: bool) -> Result<Content> {
             return err!("The bundle holds {} twice", entry.name);
         }
 
-        let (path, mode) = place(&entry.name)?;
-
-        // Written by the install, from what the manifest says and what the
-        // install itself learned
-        match entry.name == MANIFEST {
-            true => manifest = Some(entry.data),
-            false => files.push((path, mode, entry.data)),
+        // Written by the install, under the name of the bundle, from what the
+        // manifest says and what the install itself learned
+        if entry.name == MANIFEST {
+            manifest = Some(entry.data);
+            continue;
         }
+
+        let (path, mode) = place(&entry.name)?;
+        files.push((path, mode, entry.data));
     }
 
     let Some(manifest) = manifest else {
@@ -749,27 +901,109 @@ fn parse(text: &str) -> Result<Bundle> {
         return err!("The {MANIFEST} of a bundle needs a name and a version");
     }
 
+    if !named_well(&bundle.name) {
+        return err!(
+            "A bundle called {} cannot be installed: the name is what the system keeps its state under, so it is written the way a file name is, with letters, digits, and - _ or . between them",
+            bundle.name
+        );
+    }
+
     Ok(bundle)
 }
 
-/// Read the state that was written next to what it describes.
-fn read_state(path: &Path) -> Result<Option<Bundle>> {
+/// Whether a name is one that a bundle can be called.
+///
+/// It becomes a component of the paths where the system writes what the bundle
+/// is and what it wrote, so it is held to what a file name may be.  A name with
+/// a slash in it, or one that begins with a dot, would be a bundle choosing
+/// where its own state is kept, and `..` would be one choosing where everything
+/// else is.
+fn named_well(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+}
+
+/// The names of the bundles that a directory holds an entry each for.
+///
+/// What is not an entry of a bundle is left alone, so the two directories can
+/// be read without trusting what somebody dropped in them.
+fn names(dir: &Path, suffix: &str) -> Result<Vec<String>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return err!("Cannot read {}: {e}", dir.display()),
+    };
+
+    let mut names = Vec::new();
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Cannot read {}: {e}", dir.display()))?;
+        let file = entry.file_name();
+
+        let Some(name) = file.to_str().and_then(|file| file.strip_suffix(suffix)) else {
+            continue;
+        };
+
+        match named_well(name) {
+            true => names.push(name.to_string()),
+            false => warn!(
+                "Leaving {} alone, which is not named for any bundle",
+                entry.path().display()
+            ),
+        }
+    }
+
+    names.sort();
+
+    Ok(names)
+}
+
+/// What an installed bundle is, and what a kept one was installed as.
+fn installed_state(root: &Path, name: &str) -> Result<Option<Bundle>> {
+    read_state(&root.join(installed_path(name, STATE)), name)
+}
+
+fn kept_state(root: &Path, name: &str) -> Result<Option<Bundle>> {
+    read_state(&root.join(kept_path(name, STATE)), name)
+}
+
+/// Read the state that was written next to what it describes, and answer under
+/// the name that the system knows the bundle by.
+///
+/// Which is the name of the file rather than the one inside it: what the bundle
+/// wrote is listed beside it under that name, and a document that says anything
+/// else was edited after the install wrote it.
+fn read_state(path: &Path, name: &str) -> Result<Option<Bundle>> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
         Err(e) => return err!("Cannot read {}: {e}", path.display()),
     };
 
-    Ok(Some(parse(&text)?))
+    let mut bundle = parse(&text)?;
+
+    if bundle.name != name {
+        warn!(
+            "{} calls itself {}, and what that bundle wrote is listed under {name}; taking it as {name}",
+            path.display(),
+            bundle.name
+        );
+        bundle.name = name.to_string();
+    }
+
+    Ok(Some(bundle))
 }
 
-/// The paths that the installed bundle wrote.
+/// The paths that an installed bundle wrote.
 ///
 /// A path outside the two trees that a bundle installs into is dropped: the
 /// list is written by this tool and read as root, and a corrupted one must not
 /// be able to point the removal at the rest of the system.
-fn recorded(root: &Path) -> Result<BTreeSet<PathBuf>> {
-    let path = root.join(data_path(FILES));
+fn recorded(root: &Path, name: &str) -> Result<BTreeSet<PathBuf>> {
+    let path = root.join(installed_path(name, FILES));
 
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
@@ -834,16 +1068,23 @@ fn unlink(root: &Path, relative: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Take away the copy that `--persist` kept.
-fn discard(root: &Path) -> Result<()> {
-    for name in [STORED_FILE, STORED_STATE] {
-        let path = root.join(name);
+/// Take away the copy that `--persist` kept of one bundle.
+fn discard(root: &Path, name: &str) -> Result<()> {
+    for suffix in [KEPT, STATE] {
+        let path = root.join(kept_path(name, suffix));
 
         match fs::remove_file(&path) {
             Ok(()) => debug!("Removed {}", path.display()),
             Err(e) if e.kind() == ErrorKind::NotFound => (),
             Err(e) => return err!("Cannot remove {}: {e}", path.display()),
         }
+    }
+
+    // The directory goes with the last bundle in it, because whether a machine
+    // has anything to put back is asked of the boot as whether it is empty
+    let dir = root.join(kept_dir());
+    if fs::remove_dir(&dir).is_ok() {
+        debug!("Removed {}", dir.display());
     }
 
     Ok(())
@@ -883,6 +1124,20 @@ mod tests {
         write(dir.join(".git/config"), "[core]\n")?;
 
         Ok(())
+    }
+
+    /// The one bundle that a system holds, where holding one is the point.
+    fn one(bundles: Vec<Bundle>) -> Bundle {
+        assert_eq!(bundles.len(), 1, "one bundle: {bundles:?}");
+
+        bundles.into_iter().next().expect("the one bundle")
+    }
+
+    /// What restoring the one bundle that was kept did.
+    fn only(restored: Vec<(String, Result<Outcome>)>) -> Result<Outcome> {
+        assert_eq!(restored.len(), 1, "one bundle was put back");
+
+        restored.into_iter().next().expect("the one bundle").1
     }
 
     /// Whether a program that a test needs is installed.
@@ -928,7 +1183,7 @@ mod tests {
         assert_eq!(bundle.version, "1");
         assert_eq!(bundle.signer, UNSIGNED);
 
-        assert_eq!(installed(&root)?, None);
+        assert!(installed(&root)?.is_empty());
         let outcome = install(&root, &file, LOCAL_ORIGIN, false, true, false)?;
         assert_eq!(outcome.removed, 0);
 
@@ -942,8 +1197,8 @@ mod tests {
             ("run/detc/variables/system.d/10-ssh.yaml", 0o644),
             ("run/lib/detc/probes/system.d/10-net", 0o755),
             ("run/lib/detc/providers.d/unit", 0o755),
-            ("run/detc/bundle.yaml", 0o644),
-            ("run/detc/bundle.files", 0o644),
+            ("run/detc/bundles.d/fleet.yaml", 0o644),
+            ("run/detc/bundles.d/fleet.files", 0o644),
         ] {
             let path = root.join(name);
             let found = fs::metadata(&path)?.permissions().mode() & 0o777;
@@ -954,21 +1209,21 @@ mod tests {
         assert!(!root.join("run/detc/README.md").exists());
         assert!(!root.join("run/detc/.git").exists());
 
-        let state = installed(&root)?.expect("the bundle is installed");
+        let state = one(installed(&root)?);
         assert_eq!(state.name, "fleet");
         assert_eq!(state.origin, LOCAL_ORIGIN);
         assert!(!state.persist);
 
-        let outcome = remove(&root, false)?.expect("the bundle is removed");
+        let outcome = remove(&root, "fleet", false)?.expect("the bundle is removed");
         assert_eq!(outcome.removed, 6);
-        assert_eq!(installed(&root)?, None);
+        assert!(installed(&root)?.is_empty());
 
         // And the directories that it wrote went with the files, up to but
         // never past the prefixes that the system owns
         assert!(!root.join("run/detc").exists());
         assert!(!root.join("run/lib/detc").exists());
 
-        assert_eq!(remove(&root, false)?, None);
+        assert_eq!(remove(&root, "fleet", false)?, None);
 
         Ok(())
     }
@@ -999,7 +1254,7 @@ mod tests {
             None
         );
 
-        remove(&root, false)?;
+        remove(&root, "fleet", false)?;
         assert_eq!(owner(&root, installed_path)?, None);
 
         Ok(())
@@ -1016,24 +1271,24 @@ mod tests {
 
         // The reboot, which takes the content and leaves the copy
         fs::remove_dir_all(root.join("run"))?;
-        assert_eq!(installed(&root)?, None);
+        assert!(installed(&root)?.is_empty());
         assert!(needs_restore(&root));
 
         // There is nothing left to unlink, so what is taken away is the copy,
         // and taking it away is what stops the next boot bringing it back.
         // Without this the machine whose restore keeps failing -- a key that
         // was withdrawn -- has no way to say no to it
-        let outcome = remove(&root, true)?.expect("the copy is still a bundle");
+        let outcome = remove(&root, "fleet", true)?.expect("the copy is still a bundle");
         assert_eq!(outcome.bundle.name, "fleet");
         assert_eq!(outcome.removed, 0);
         assert!(needs_restore(&root));
 
-        let outcome = remove(&root, false)?.expect("the copy is still a bundle");
+        let outcome = remove(&root, "fleet", false)?.expect("the copy is still a bundle");
         assert_eq!(outcome.removed, 0);
-        assert_eq!(stored(&root)?, None);
+        assert!(kept(&root)?.is_empty());
         assert!(!needs_restore(&root));
 
-        assert_eq!(remove(&root, false)?, None);
+        assert_eq!(remove(&root, "fleet", false)?, None);
 
         Ok(())
     }
@@ -1045,7 +1300,7 @@ mod tests {
 
         for (name, said) in [
             ("etc/passwd", "not one of the trees"),
-            ("bundle.files", "written when it is installed"),
+            ("bundles.d/fleet.files", "which files it wrote"),
             ("templates/etc/passwd", "not one of the trees"),
             ("../escape", "not one of the trees"),
         ] {
@@ -1103,7 +1358,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bundle_takes_away_the_one_before_it_and_nothing_else() -> Result<()> {
+    fn a_version_takes_away_the_one_before_it_and_nothing_else() -> Result<()> {
         let tmp = tempfile::tempdir()?;
         let (tree, root) = (tmp.path().join("tree"), tmp.path().join("root"));
 
@@ -1148,6 +1403,112 @@ mod tests {
     }
 
     #[test]
+    fn several_bundles_are_installed_at_a_time_and_each_answers_for_its_own() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let (tree, root) = (tmp.path().join("tree"), tmp.path().join("root"));
+
+        write(tree.join(MANIFEST), "name: fleet\nversion: '1'\n")?;
+        write(tree.join("templates.d/etc/one.conf"), "one\n")?;
+        install(
+            &root,
+            &create(&tree, None)?.1,
+            LOCAL_ORIGIN,
+            true,
+            true,
+            false,
+        )?;
+
+        write(tree.join(MANIFEST), "name: web\nversion: '3'\n")?;
+        fs::remove_file(tree.join("templates.d/etc/one.conf"))?;
+        write(tree.join("templates.d/etc/two.conf"), "two\n")?;
+        install(
+            &root,
+            &create(&tree, None)?.1,
+            LOCAL_ORIGIN,
+            false,
+            true,
+            false,
+        )?;
+
+        // Both are there, by name, and neither took the other away
+        let held: Vec<(String, String)> = installed(&root)?
+            .into_iter()
+            .map(|what| (what.name, what.version))
+            .collect();
+        assert_eq!(
+            held,
+            [
+                ("fleet".to_string(), "1".to_string()),
+                ("web".to_string(), "3".to_string())
+            ]
+        );
+        assert!(root.join("run/detc/templates.d/etc/one.conf").exists());
+        assert!(root.join("run/detc/templates.d/etc/two.conf").exists());
+
+        // Each file answers with the bundle that wrote it, and only that one
+        // was kept, so only that one comes back
+        let what = owner(&root, Path::new("run/detc/templates.d/etc/two.conf"))?;
+        assert_eq!(what.map(|what| what.name), Some("web".to_string()));
+        assert_eq!(
+            kept(&root)?
+                .into_iter()
+                .map(|what| what.name)
+                .collect::<Vec<_>>(),
+            ["fleet"]
+        );
+
+        // And taking one away leaves the other where it is
+        remove(&root, "fleet", false)?;
+        assert_eq!(one(installed(&root)?).name, "web");
+        assert!(!root.join("run/detc/templates.d/etc/one.conf").exists());
+        assert!(root.join("run/detc/templates.d/etc/two.conf").exists());
+        assert!(!needs_restore(&root));
+
+        Ok(())
+    }
+
+    #[test]
+    fn a_bundle_that_would_write_over_another_one_is_refused() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let (tree, root) = (tmp.path().join("tree"), tmp.path().join("root"));
+
+        write(tree.join(MANIFEST), "name: fleet\nversion: '1.4'\n")?;
+        write(tree.join("templates.d/etc/chrony.conf"), "one\n")?;
+        install(
+            &root,
+            &create(&tree, None)?.1,
+            LOCAL_ORIGIN,
+            false,
+            true,
+            false,
+        )?;
+
+        // The same path, from a bundle of another name: the two land in the one
+        // prefix, and the ladder has nothing to say about which of them wins
+        write(tree.join(MANIFEST), "name: web\nversion: '3'\n")?;
+        let file = create(&tree, None)?.1;
+
+        let error = install(&root, &file, LOCAL_ORIGIN, false, true, false)
+            .expect_err("a path that another bundle wrote is not written over")
+            .to_string();
+        assert!(
+            error.contains("the installed bundle fleet 1.4 wrote"),
+            "{error}"
+        );
+        assert!(error.contains("take fleet away"), "{error}");
+
+        // Refused before anything was written, so what is there is one whole
+        // bundle rather than the halves of two
+        assert_eq!(one(installed(&root)?).name, "fleet");
+        assert_eq!(
+            fs::read_to_string(root.join("run/detc/templates.d/etc/chrony.conf"))?,
+            "one\n"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn a_bundle_that_persists_is_installed_again_after_a_reboot() -> Result<()> {
         let tmp = tempfile::tempdir()?;
         let (tree, root) = (tmp.path().join("tree"), tmp.path().join("root"));
@@ -1155,16 +1516,16 @@ mod tests {
         let file = create(&tree, None)?.1;
 
         install(&root, &file, LOCAL_ORIGIN, true, true, false)?;
-        assert!(root.join(STORED_FILE).is_file());
-        assert!(installed(&root)?.expect("it is installed").persist);
+        assert!(root.join(kept_path("fleet", KEPT)).is_file());
+        assert!(one(installed(&root)?).persist);
         assert!(!needs_restore(&root));
 
         // A reboot, which takes the tmpfs and everything a bundle wrote in it
         fs::remove_dir_all(root.join("run"))?;
-        assert_eq!(installed(&root)?, None);
+        assert!(installed(&root)?.is_empty());
         assert!(needs_restore(&root));
 
-        let outcome = restore(&root, false)?;
+        let outcome = only(restore(&root, false)?)?;
         assert_eq!(outcome.bundle.name, "fleet");
         assert!(
             root.join("run/detc/variables/system.d/10-ssh.yaml")
@@ -1172,12 +1533,18 @@ mod tests {
         );
         assert!(!needs_restore(&root));
 
-        // And a bundle that does not persist takes away the copy that would
+        // Nothing is left to put back, so a restore now does nothing at all
+        assert!(restore(&root, false)?.is_empty());
+
+        // And a version that does not persist takes away the copy that would
         // otherwise come back in its place
         install(&root, &file, LOCAL_ORIGIN, false, true, false)?;
-        assert!(!root.join(STORED_FILE).exists());
-        assert_eq!(stored(&root)?, None);
+        assert!(!root.join(kept_path("fleet", KEPT)).exists());
+        assert!(kept(&root)?.is_empty());
         assert!(!needs_restore(&root));
+
+        // And the directory went with it, which is what the boot asks about
+        assert!(!root.join(kept_dir()).exists());
 
         Ok(())
     }
@@ -1436,9 +1803,9 @@ mod tests {
         assert!(!root.exists());
 
         install(&root, &file, LOCAL_ORIGIN, false, true, false)?;
-        let outcome = remove(&root, true)?.expect("there is one to remove");
+        let outcome = remove(&root, "fleet", true)?.expect("there is one to remove");
         assert_eq!(outcome.removed, 6);
-        assert!(installed(&root)?.is_some());
+        assert_eq!(installed(&root)?.len(), 1);
 
         Ok(())
     }
@@ -1463,6 +1830,20 @@ mod tests {
                 error.contains("needs a name and a version"),
                 "{text:?}: {error}"
             );
+        }
+
+        // And a name that is not a name is refused too: it is a component of
+        // the paths where the system keeps what the bundle wrote
+        for name in ["../escape", "etc/passwd", ".hidden", "one two"] {
+            write(
+                tree.join(MANIFEST),
+                &format!("name: {name:?}\nversion: '1'\n"),
+            )?;
+            let error = create(&tree, None)
+                .expect_err("a name that is not one is refused")
+                .to_string();
+
+            assert!(error.contains("the way a file name is"), "{name}: {error}");
         }
 
         Ok(())

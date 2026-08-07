@@ -135,6 +135,8 @@ install:
 	install -Dm755 tools/detc-inject $(LIBEXECDIR)/detc-inject
 	install -Dm755 tools/detc-defer $(LIBEXECDIR)/detc-defer
 	install -Dm644 units/detc.service $(UNITDESTDIR)/detc.service
+	install -Dm644 units/detc-restore.service \
+		$(UNITDESTDIR)/detc-restore.service
 	install -Dm755 dracut/50detc/module-setup.sh \
 		$(DRACUTDESTDIR)/module-setup.sh
 	install -Dm644 dracut/50detc/detc-inject.service \
@@ -154,7 +156,7 @@ uninstall:
 	$(call uninstall-tree,tools/inject,$(LIBEXECDIR)/inject)
 	rm -f $(MANDIR)/detc.8 $(MANDIR)/detcd.8 $(MANDIR)/detctl.8
 	rm -f $(LIBEXECDIR)/detc-inject $(LIBEXECDIR)/detc-defer
-	rm -f $(UNITDESTDIR)/detc.service
+	rm -f $(UNITDESTDIR)/detc.service $(UNITDESTDIR)/detc-restore.service
 	rm -f $(DRACUTDESTDIR)/module-setup.sh \
 		$(DRACUTDESTDIR)/detc-inject.service
 	-@find $(LIBEXECDIR) $(DATADIR) $(MANDIR) $(VARLINKDIR) $(DRACUTDESTDIR) \

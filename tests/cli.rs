@@ -6,7 +6,7 @@
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // The history is read back with git itself, which is only built with it
 #[cfg(feature = "journal")]
@@ -3169,7 +3169,7 @@ fn test_a_bundle_carries_a_system_to_a_machine_that_has_none() -> TestResult {
     );
 
     // Taking the bundle away takes away what it brought, and nothing else
-    let output = detc(root, &["bundle", "remove"]);
+    let output = detc(root, &["bundle", "remove", "fleet"]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(
         stdout(&output).starts_with("removed\tbundle fleet 1\t"),
@@ -3188,6 +3188,175 @@ fn test_a_bundle_carries_a_system_to_a_machine_that_has_none() -> TestResult {
     // What was written stays written: a bundle declares the state, and taking
     // it away is not a reason to unconfigure the machine
     assert!(root.join("etc/ssh/sshd_config.d/root.conf").exists());
+
+    Ok(())
+}
+
+/// A machine holds as many bundles as it is given, each known by the name its
+/// manifest gives it and each answering for the files it wrote.
+///
+/// They land in the one prefix, and the ladder ranks prefixes rather than what
+/// is inside one, so the rule that keeps them apart is that no two of them
+/// write the same path.
+#[test]
+fn test_several_bundles_are_installed_at_a_time_and_none_writes_over_another() -> TestResult {
+    let tmp_built = tempfile::tempdir()?;
+    let built = tmp_built.path();
+    let fleet = bundle(built)?;
+
+    /// A bundle of one template, built where the others are.
+    fn carrying(
+        built: &Path,
+        name: &str,
+        template: &str,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let tree = built.join(name);
+        let target = tree.join("templates.d").join(template);
+
+        fs::create_dir_all(target.parent().expect("the template is in a directory"))?;
+        fs::write(
+            tree.join("bundle.yaml"),
+            format!("name: {name}\nversion: '3'\n"),
+        )?;
+        fs::write(&target, "what the bundle says\n")?;
+
+        let file = built.join(format!("{name}.detc"));
+        let output = detc(
+            built,
+            &[
+                "bundle",
+                "create",
+                &tree.to_string_lossy(),
+                "-o",
+                &file.to_string_lossy(),
+            ],
+        );
+
+        match output.status.success() {
+            true => Ok(file),
+            false => Err(stderr(&output).into()),
+        }
+    }
+
+    let web = carrying(built, "web", "etc/motd")?;
+    let other = carrying(built, "other", "etc/motd")?;
+
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    complete(root)?;
+
+    for file in [&fleet, &web] {
+        let output = detc(
+            root,
+            &[
+                "bundle",
+                "install",
+                &file.to_string_lossy(),
+                "--allow-unsigned",
+            ],
+        );
+        assert!(output.status.success(), "{}", stderr(&output));
+    }
+
+    // Both are held, by name, and neither took the other away
+    assert_eq!(
+        stdout(&detc(root, &["bundle", "status"])),
+        "fleet\t1\tunsigned\tlocal\ttransient\nweb\t3\tunsigned\tlocal\ttransient\n"
+    );
+
+    // A third that carries a path one of them wrote is refused, and refused
+    // before anything is written: what is there stays two whole bundles
+    let output = detc(
+        root,
+        &[
+            "bundle",
+            "install",
+            &other.to_string_lossy(),
+            "--allow-unsigned",
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("the installed bundle web 3 wrote"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(
+        stdout(&detc(root, &["bundle", "status"])),
+        "fleet\t1\tunsigned\tlocal\ttransient\nweb\t3\tunsigned\tlocal\ttransient\n"
+    );
+
+    // What each of them declares is in the one system, so applying it writes
+    // what both of them asked for
+    let output = detc(root, &["apply"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        fs::read_to_string(root.join("etc/ssh/sshd_config.d/root.conf"))?,
+        "PermitRootLogin=no\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("etc/motd"))?,
+        "what the bundle says\n"
+    );
+
+    // Taking one away leaves the other where it was
+    let output = detc(root, &["bundle", "remove", "fleet"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&detc(root, &["bundle", "status"])),
+        "web\t3\tunsigned\tlocal\ttransient\n"
+    );
+    assert!(root.join("run/detc/templates.d/etc/motd").is_file());
+    assert!(
+        !root
+            .join("run/detc/templates.d/etc/ssh/sshd_config.d/root.conf")
+            .exists()
+    );
+
+    // And the path it wrote is free, so the bundle that was refused for it is
+    // taken now that nothing else answers for it
+    let output = detc(
+        root,
+        &[
+            "bundle",
+            "install",
+            &other.to_string_lossy(),
+            "--allow-unsigned",
+        ],
+    );
+    assert!(!output.status.success());
+
+    let output = detc(root, &["bundle", "remove", "web"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let output = detc(
+        root,
+        &[
+            "bundle",
+            "install",
+            &other.to_string_lossy(),
+            "--allow-unsigned",
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    // A name that names nothing takes nothing away, and says so rather than
+    // taking away the ones it does know
+    let output = detc(root, &["bundle", "remove", "other", "fleet"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("no bundle called fleet"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(
+        stdout(&detc(root, &["bundle", "status"])),
+        "other\t3\tunsigned\tlocal\ttransient\n"
+    );
+
+    assert!(detc(root, &["bundle", "remove", "--all"]).status.success());
+    assert_eq!(stdout(&detc(root, &["bundle", "status"])), "");
+    assert!(!root.join("run/detc").exists());
 
     Ok(())
 }
@@ -3232,8 +3401,9 @@ fn test_a_bundle_that_persists_comes_back_after_a_reboot() -> TestResult {
         "fleet\t1\tunsigned\tlocal\tkept\n"
     );
 
-    // Applying the system is what puts it back, so a machine that reboots
-    // needs no unit of its own, and the run records that it happened
+    // Applying the system is what puts it back, for the machine that reaches
+    // an apply before it reaches a restore, and the run records that it
+    // happened
     let output = detc(root, &["apply"]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(
@@ -3252,7 +3422,7 @@ fn test_a_bundle_that_persists_comes_back_after_a_reboot() -> TestResult {
     );
 
     // And a bundle that is taken away does not come back
-    assert!(detc(root, &["bundle", "remove"]).status.success());
+    assert!(detc(root, &["bundle", "remove", "fleet"]).status.success());
     fs::remove_dir_all(root.join("run"))?;
 
     let output = detc(root, &["apply"]);
@@ -3321,6 +3491,68 @@ fn test_a_dry_run_says_it_measured_the_system_without_the_bundle() -> TestResult
     Ok(())
 }
 
+/// Between the reboot and the restore every answer is right about the system
+/// and wrong about what the system declares, and nothing in the answer itself
+/// shows the difference — so it is said alongside, on the standard error.
+#[test]
+fn test_a_command_says_when_the_system_is_holding_less_than_it_declares() -> TestResult {
+    let tmp_built = tempfile::tempdir()?;
+    let file = bundle(tmp_built.path())?;
+
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    complete(root)?;
+
+    let output = detc(
+        root,
+        &[
+            "bundle",
+            "install",
+            file.to_str().unwrap(),
+            "--persist",
+            "--allow-unsigned",
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    // A bundle that is held is a bundle nobody has to be told about
+    assert!(!stderr(&detc(root, &["list"])).contains("bundle restore"));
+
+    // A reboot is the tmpfs going away, and nothing else
+    fs::remove_dir_all(root.join("run"))?;
+
+    // The listing is still an answer, and still a success: what changed is that
+    // it is answering for a system that is missing everything the bundle
+    // carries, which the standard output has no room to say
+    let output = detc(root, &["list"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), only_what_the_admin_wrote(root));
+    assert_eq!(
+        stderr(&output),
+        "detc: the bundle fleet was kept and is not installed, so nothing it carries is in this system yet; `detc bundle restore` puts it back\n"
+    );
+
+    // Not on the commands that answer the question outright, or that answer it
+    // by doing something about it
+    assert!(!stderr(&detc(root, &["bundle", "status"])).contains("bundle restore"));
+    assert!(!stderr(&detc(root, &["report"])).contains("bundle restore"));
+
+    // And this is the command the unit runs at boot, which closes the window
+    // that the note is about
+    let output = detc(root, &["bundle", "restore"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "restored\tbundle fleet 1\t10 written, 0 removed\n"
+    );
+
+    let output = detc(root, &["list"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stderr(&output), "");
+
+    Ok(())
+}
+
 #[test]
 fn test_a_bundle_that_was_kept_is_taken_away_before_it_comes_back() -> TestResult {
     let tmp_built = tempfile::tempdir()?;
@@ -3347,15 +3579,15 @@ fn test_a_bundle_that_was_kept_is_taken_away_before_it_comes_back() -> TestResul
     // saying no to the bundle has to work there or it works nowhere
     fs::remove_dir_all(root.join("run"))?;
 
-    let output = detc(root, &["--dry-run", "bundle", "remove"]);
+    let output = detc(root, &["--dry-run", "bundle", "remove", "fleet"]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(
         stdout(&output),
         "remove\tbundle fleet 1\t0 written, 0 removed\n"
     );
-    assert!(root.join("var/lib/detc/bundle.detc").is_file());
+    assert!(root.join("var/lib/detc/bundles.d/fleet.detc").is_file());
 
-    let output = detc(root, &["bundle", "remove"]);
+    let output = detc(root, &["bundle", "remove", "--all"]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(
         stdout(&output),
@@ -3364,7 +3596,11 @@ fn test_a_bundle_that_was_kept_is_taken_away_before_it_comes_back() -> TestResul
 
     // The copy is gone, so the machine knows no bundle and applying it brings
     // nothing back
-    assert!(!root.join("var/lib/detc/bundle.detc").exists());
+    assert!(!root.join("var/lib/detc/bundles.d/fleet.detc").exists());
+
+    // And the directory went with the last bundle in it, which is what the
+    // unit that puts them back at boot asks about
+    assert!(!root.join("var/lib/detc/bundles.d").exists());
     assert_eq!(stdout(&detc(root, &["bundle", "status"])), "");
 
     let output = detc(root, &["apply"]);
@@ -3372,10 +3608,18 @@ fn test_a_bundle_that_was_kept_is_taken_away_before_it_comes_back() -> TestResul
     assert!(!stdout(&output).contains("restored"), "{}", stdout(&output));
 
     // And there is nothing left to say no to
-    let output = detc(root, &["bundle", "remove"]);
+    let output = detc(root, &["bundle", "remove", "fleet"]);
     assert!(!output.status.success());
     assert!(
-        stderr(&output).contains("no bundle installed"),
+        stderr(&output).contains("no bundle called fleet"),
+        "{}",
+        stderr(&output)
+    );
+
+    let output = detc(root, &["bundle", "remove", "--all"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("no bundle in this system"),
         "{}",
         stderr(&output)
     );
@@ -3564,7 +3808,7 @@ fn test_a_variable_is_not_set_over_a_file_that_a_bundle_owns() -> TestResult {
     fs::create_dir_all(dropin.parent().expect("the drop-in has a directory"))?;
     fs::write(&dropin, "{\"dns\": {\"domain\": \"from-the-bundle\"}}\n")?;
 
-    let listing = root.join("run/detc/bundle.files");
+    let listing = root.join("run/detc/bundles.d/fleet.files");
     let owned = format!(
         "{}run/detc/variables/user.d/95-dns-domain.json\n",
         fs::read_to_string(&listing)?

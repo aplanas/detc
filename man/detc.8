@@ -164,10 +164,13 @@ each change is reported as it is made.  Objects that could not be applied are
 reported and the run ends with a non\-zero status; the ones that succeeded are
 still applied and still recorded.
 .PP
-A machine that kept a bundle and does not hold it \(em one that has rebooted and
-has not converged yet \(em has it put back here, before anything is measured, so
-that what the system declares is all of what it declares.  A restore that fails
-fails the run.
+A machine that kept bundles and does not hold them \(em one that has rebooted
+and has not converged yet \(em has them put back here, before anything is
+measured, so that what the system declares is all of what it declares.  A
+restore that fails fails the run.
+.B detc\-restore.service
+is what does it earlier, and this is the backstop where that unit is not
+enabled.
 .PP
 With
 .B \-\-dry\-run
@@ -312,7 +315,7 @@ does not write
 or
 .I usr/libexec
 and the next upgrade would put the file back anyway.  It is also the answer for
-a file that the installed bundle owns, which unlinking would only take away
+a file that an installed bundle owns, which unlinking would only take away
 until the next restore or the next boot; that too is refused, naming the bundle.
 Masking something that is already in the administrator's prefix is refused as
 well, there being no prefix above it to write in.
@@ -525,7 +528,20 @@ Build, check and install a tree of objects.  A bundle is a signed tar archive
 of variables, templates, resources, probes and providers that installs into the
 .I run
 prefixes, which is how a whole configuration reaches a machine as one file.
-Installing one takes away the bundle installed before it.
+A machine holds as many bundles as it was given, each under the name its
+manifest carries.  Installing one of a name that is already there takes away the
+version before it; installing one that would write a file another bundle already
+wrote is refused, naming that bundle.
+.PP
+While a bundle is kept and not installed, every command that reads the ladder
+says so once on the standard error, because the answer it gives on the standard
+output is right about the system and silent about what the system declares.
+.B apply
+and
+.B bundle
+say it their own way, and
+.B report
+reads the history rather than the system.
 .TP
 .B create [\fIDIR\fB] \-o \fIOUTPUT\fB [\-\-sign \fIKEY\fB]
 Build a bundle out of the source tree
@@ -574,11 +590,17 @@ Install a bundle that carries no signature.
 .RE
 .TP
 .BR restore " [" \-\-apply ]
-Install the kept copy again, which is what a machine does after a reboot.
+Install every kept copy again, which is what a machine does after a reboot.
+One that cannot be put back does not stop the others, and the command still
+fails.
+.B detc\-restore.service
+runs this early in the boot, and
+.B detc apply
+does it too before it measures anything.
 .TP
 .B status
-Show the bundle the machine knows, and nothing when it knows none.  The last
-field says whether it comes back after a reboot:
+Show every bundle the machine knows, one per line, and nothing when it knows
+none.  The last field says whether it comes back after a reboot:
 .B transient
 for one that will not,
 .B persistent
@@ -587,9 +609,11 @@ for one that a copy was kept of, and
 for the copy alone, which is the machine that has rebooted and has not been
 restored yet.
 .TP
-.B remove
-Take away the installed bundle, and the copy that was kept of it.  A bundle in
-the
+.BR remove " \fINAME\fR... | " \-\-all
+Take away the bundles that are named, and the copies that were kept of them, or
+every bundle of the system with
+.BR \-\-all .
+A name that names no bundle takes away none of them.  A bundle in the
 .B kept
 state is taken away as well, which is how a machine whose restore keeps failing
 stops arming it again at every boot.
@@ -736,7 +760,7 @@ the boot that gives this one back.
 takes both away, and nothing else in either directory.  Both directories are the
 administrator's alone: a bundle cannot carry
 .IR variables/user.d ,
-and a variable is not set over a file that the installed bundle owns.
+and a variable is not set over a file that an installed bundle owns.
 .TP
 .IR /etc/detc/allowed_signers ", " /usr/share/detc/allowed_signers
 Who may sign a bundle this machine will install, in the format of
@@ -755,10 +779,18 @@ reads when there is no journal.
 The lock named by
 .BR DETC_RUN_LOCK .
 .TP
-.IR /var/lib/detc/bundle.detc ", " /var/lib/detc/bundle.yaml
-The bundle kept by
+.IR /var/lib/detc/bundles.d/ name .detc ", " /var/lib/detc/bundles.d/ name .yaml
+A bundle kept by
 .BR \-\-persist ,
-and what is known about it.
+and what is known about it.  The directory goes with the last bundle taken away,
+which is what
+.B detc\-restore.service
+asks about.
+.TP
+.IR /run/detc/bundles.d/ name .yaml ", " /run/detc/bundles.d/ name .files
+What an installed bundle is, and every path it wrote.  A reboot takes them away
+with the rest of
+.IR /run .
 .TP
 .I /var/lib/detc/providers/
 Where a provider keeps what it recorded, one directory per type.  Not to be

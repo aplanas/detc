@@ -489,11 +489,11 @@ fn test_a_bundle_reaches_the_machine_it_is_installed_on() -> TestResult {
     );
 
     // Taking it away changes the system, so read-only refuses that too
-    let output = detctl(root, "--read-only", &["bundle", "remove"]);
+    let output = detctl(root, "--read-only", &["bundle", "remove", "fleet"]);
     assert!(!output.status.success());
     assert!(stderr(&output).contains("read-only"), "{output:?}");
 
-    let output = detctl(root, "", &["bundle", "remove"]);
+    let output = detctl(root, "", &["bundle", "remove", "fleet"]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(stdout(&detctl(root, "", &["bundle", "status"])), "");
 

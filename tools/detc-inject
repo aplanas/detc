@@ -206,26 +206,6 @@ for source in "$libexec/inject/"*; do
     fi
 done
 
-# One bundle, and the first one wins.  `bundle install` takes away the one
-# installed before it, so a second would not add to the first but replace it --
-# and the order the sources run in is the order of how deliberate they are, most
-# deliberate first.  Variables documents do add up, which is what they are for.
-#
-# The file is read twice rather than the values collected into one variable,
-# because a value is a path and a path can hold a space; a list in a shell
-# variable is a list that has to be split again, and splitting it is where that
-# space would be lost
-bundle=
-while IFS='	' read -r kind value; do
-    [ "$kind" = bundle ] || continue
-    [ -n "$value" ] || continue
-    if [ -n "$bundle" ]; then
-        say "ignoring a second bundle, $value; this machine already has one"
-    else
-        bundle=$value
-    fi
-done < "$found"
-
 while IFS='	' read -r kind value; do
     case "$kind" in
       bundle|vars|"") ;;
@@ -233,18 +213,33 @@ while IFS='	' read -r kind value; do
     esac
 done < "$found"
 
-if [ -n "$bundle" ]; then
-    set -- bundle install "$bundle" --persist
+# Every bundle a source named, in the order the sources ran, which is the order
+# of how deliberate they are.  They add up: a machine holds as many bundles as
+# it is given, each under the name its manifest carries, and installing one is
+# only refused where it would write a file another one already wrote -- so the
+# more deliberate source is the one that keeps a contested path.  Two sources
+# that name a bundle of the same name are the exception: a bundle is replaced by
+# the next one of its name, and there the last to run is the one that stays.
+#
+# The file is read once per kind rather than the values collected into one
+# variable, because a value is a path and a path can hold a space; a list in a
+# shell variable is a list that has to be split again, and splitting it is where
+# that space would be lost
+while IFS='	' read -r kind value; do
+    [ "$kind" = bundle ] || continue
+    [ -n "$value" ] || continue
+
+    set -- bundle install "$value" --persist
     if [ "$unsigned" = yes ]; then
-        say "installing $bundle WITHOUT checking a signature, as the command line asked"
+        say "installing $value WITHOUT checking a signature, as the command line asked"
         set -- "$@" --allow-unsigned
     fi
 
     # Not fatal.  A bundle that fails to verify is a bundle that this machine
     # was right to refuse, and refusing it is not a reason to leave the machine
     # unconfigured as well
-    "$detc" --root "$root" "$@" || say "the bundle at $bundle was not installed"
-fi
+    "$detc" --root "$root" "$@" || say "the bundle at $value was not installed"
+done < "$found"
 
 while IFS='	' read -r kind value; do
     [ "$kind" = vars ] || continue

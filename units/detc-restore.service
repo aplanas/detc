@@ -1,0 +1,44 @@
+# Put back the bundles that were kept, once per boot, as early as they can be.
+#
+# A bundle is installed into `run`, which a reboot takes with it, and `--persist`
+# keeps the signed file in `/var/lib/detc/bundles.d` so that the next boot can
+# put it back.  `detc apply` does that before it measures anything, so this unit
+# is not what makes a bundle survive a reboot -- it is what decides *when* it
+# comes back.
+#
+# Without it the window is the whole of the boot: everything a bundle carries --
+# its templates, its providers, its probes, its variables -- is missing from the
+# ladder until `detc.service` has waited for the network and run a full converge.
+# Anything that reads the system in between is told, truthfully, that those
+# objects do not exist.  This closes that window down to a read and a write of
+# what is already on the disk.
+#
+# `Before=detc.service` and nothing else: the ordering lives here rather than as
+# a `Requires=` over there, so that a machine that has no bundle needs neither
+# unit to know about the other.  Running genuinely earlier than this would mean
+# `DefaultDependencies=no` and hand-written shutdown ordering, which is a large
+# amount of care for a unit that only reads a file and writes a tmpfs.
+#
+# `ConditionDirectoryNotEmpty` is what keeps this off the machines that have no
+# bundle to put back: a failed condition is a skip and not a failure, so nothing
+# ordered after it is held up.  It is why the last bundle to be taken away takes
+# the directory with it.
+
+[Unit]
+Description=Put back the bundles that were kept
+Documentation=man:detc(8)
+After=local-fs.target
+Before=detc.service
+
+# A restore reads the tree and writes to it, so it belongs on the running system
+# and not in the initrd; `detc-inject.service` is what runs there
+ConditionPathExists=!/etc/initrd-release
+ConditionDirectoryNotEmpty=/var/lib/detc/bundles.d
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/detc bundle restore
+
+[Install]
+WantedBy=multi-user.target

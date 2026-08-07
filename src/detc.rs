@@ -328,7 +328,7 @@ pub(crate) enum BundleCommands {
         bundle: Source,
     },
 
-    /// Install a bundle, taking away the one that was installed before it
+    /// Install a bundle, taking away what the one of the same name left
     Install {
         /// File, - for the standard input, or URL of the bundle
         bundle: Source,
@@ -346,18 +346,26 @@ pub(crate) enum BundleCommands {
         allow_unsigned: bool,
     },
 
-    /// Install again the bundle that was kept, as a reboot needs
+    /// Install again the bundles that were kept, as a reboot needs
     Restore {
-        /// Apply the system once the bundle is installed
+        /// Apply the system once the bundles are installed
         #[arg(long)]
         apply: bool,
     },
 
-    /// Show the bundle that is installed
+    /// Show the bundles that are installed, and the ones that were kept
     Status,
 
-    /// Take away the installed bundle, and the copy that was kept of it
-    Remove,
+    /// Take away a bundle, and the copy that was kept of it
+    Remove {
+        /// Names of the bundles to take away
+        #[arg(required_unless_present = "all")]
+        names: Vec<String>,
+
+        /// Take away every bundle instead of naming them
+        #[arg(long, conflicts_with = "names")]
+        all: bool,
+    },
 }
 
 /// Where the bytes of a bundle come from.
@@ -2074,52 +2082,145 @@ fn bundle(out: &mut dyn Sink, root: &Path, command: &BundleCommands, dry_run: bo
             }
         }
 
-        // A bundle that was kept is reported even when nothing is installed,
+        // A bundle that was kept is reported even when it is not installed,
         // because that machine is not one that has no bundle: it is one that
-        // will have this one again at the next restore.  Knowing neither says
+        // will have this one again at the next restore.  Knowing of none says
         // nothing, the way listing an empty system does
         BundleCommands::Status => {
-            let (bundle, installed) = match bundle::installed(root)? {
-                Some(what) => (Some(what), true),
-                None => (bundle::stored(root)?, false),
-            };
+            let installed = bundle::installed(root)?;
+            let kept = bundle::kept(root)?;
 
-            match bundle {
-                Some(what) => out.emit(Record::Bundle {
-                    name: what.name,
-                    version: what.version,
-                    signer: what.signer,
-                    origin: what.origin,
+            let held = installed.iter().map(|what| (what, true)).chain(
+                kept.iter()
+                    .filter(|what| !installed.iter().any(|other| other.name == what.name))
+                    .map(|what| (what, false)),
+            );
+
+            for (what, installed) in held {
+                out.emit(Record::Bundle {
+                    name: what.name.clone(),
+                    version: what.version.clone(),
+                    signer: what.signer.clone(),
+                    origin: what.origin.clone(),
                     persist: what.persist,
                     installed,
-                }),
-                None => Ok(()),
+                })?;
             }
+
+            Ok(())
         }
 
-        BundleCommands::Remove => match bundle::remove(root, dry_run)? {
-            Some(outcome) => {
-                let action = match dry_run {
-                    true => "remove",
-                    false => "removed",
-                };
-
-                out.emit(bundle_record(action, &outcome))
-            }
-            None => err!("There is no bundle installed in this system"),
-        },
+        BundleCommands::Remove { names, all } => remove_bundles(out, root, names, *all, dry_run),
     }
 }
 
-/// Install again the bundle that `--persist` kept.
+/// Install again the bundles that `--persist` kept, for the command that asks
+/// for that and nothing else.
 fn restore_bundle(out: &mut dyn Sink, root: &Path, dry_run: bool) -> Result<()> {
-    let outcome = bundle::restore(root, dry_run)?;
-    let action = match dry_run {
-        true => "restore",
-        false => "restored",
+    if bundle::kept(root)?.is_empty() {
+        return err!("There is no bundle kept in this system, so there is nothing to put back");
+    }
+
+    restore_bundles(out, root, dry_run, None)
+}
+
+/// Install again every bundle that was kept and is not installed, and say what
+/// happened to each of them.
+///
+/// One that cannot be put back does not stop the others, and the run still
+/// fails: they are separate bundles, so the machine is better off holding the
+/// ones it can, and what is kept is part of what the system declares.
+///
+/// `instead` replaces what a dry run would otherwise say about a bundle, for
+/// the caller that has something to add about the report that follows.
+fn restore_bundles(
+    out: &mut dyn Sink,
+    root: &Path,
+    dry_run: bool,
+    instead: Option<&str>,
+) -> Result<()> {
+    let mut failed = 0;
+
+    for (name, outcome) in bundle::restore(root, dry_run)? {
+        let record = match outcome {
+            Ok(outcome) => match (dry_run, instead) {
+                (true, Some(summary)) => {
+                    bundle_record_of("restore", &outcome.bundle, summary.to_string())
+                }
+                (true, None) => bundle_record("restore", &outcome),
+                (false, _) => bundle_record("restored", &outcome),
+            },
+
+            Err(e) => {
+                failed += 1;
+
+                Record::Change {
+                    action: "error".to_string(),
+                    object: format!("bundle {name}"),
+                    summary: None,
+                    error: Some(e.to_string()),
+                }
+            }
+        };
+
+        out.emit(record)?;
+    }
+
+    match failed {
+        0 => Ok(()),
+        failed => err!("{failed} bundle(s) cannot be put back"),
+    }
+}
+
+/// Take away the bundles that were named, or every one of them.
+///
+/// Every name is looked up before anything is taken away, so a name that names
+/// nothing leaves the system as it was rather than half of what was asked for.
+fn remove_bundles(
+    out: &mut dyn Sink,
+    root: &Path,
+    names: &[String],
+    all: bool,
+    dry_run: bool,
+) -> Result<()> {
+    let names = match all {
+        false => names.to_vec(),
+        true => {
+            let mut held: Vec<String> = bundle::installed(root)?
+                .into_iter()
+                .chain(bundle::kept(root)?)
+                .map(|what| what.name)
+                .collect();
+            held.sort();
+            held.dedup();
+
+            if held.is_empty() {
+                return err!("There is no bundle in this system");
+            }
+
+            held
+        }
     };
 
-    out.emit(bundle_record(action, &outcome))
+    for name in &names {
+        if bundle::remove(root, name, true)?.is_none() {
+            return err!("There is no bundle called {name} in this system");
+        }
+    }
+
+    let action = match dry_run {
+        true => "remove",
+        false => "removed",
+    };
+
+    for name in &names {
+        // A name that was given twice is gone by the second time round
+        if let Some(outcome) = bundle::remove(root, name, dry_run)? {
+            out.emit(bundle_record(action, &outcome))?;
+        }
+    }
+
+    Ok(())
 }
 
 /// One entry of a plan: what happens, the object it happens to, and, for a
@@ -2182,29 +2283,24 @@ fn apply_system(
     let _lock = (!dry_run).then(|| lock::Lock::acquire(root)).transpose()?;
 
     // A reboot takes the tmpfs, and with it everything that a bundle installed
-    // in it, so the copy that `--persist` kept is put back before the system is
-    // measured against what it declares.  A restore that fails fails the run:
-    // the bundle is part of the declared state, and converging without it
-    // silently would be worse than not converging at all.
+    // in it, so what `--persist` kept is put back before the system is measured
+    // against what it declares.  A restore that fails fails the run: a bundle
+    // is part of the declared state, and converging without one silently would
+    // be worse than not converging at all.
+    //
+    // A dry run puts nothing back, and everything reported below this line is
+    // then measured against a ladder that the bundle is not in.  What an object
+    // is not in the ladder for is not in the plan either, so saying only that
+    // the bundle would be restored leaves a machine that is missing everything
+    // it carries reporting that it has nothing to change -- which is the one
+    // answer a drift report must never get wrong
     if bundle::needs_restore(root) {
-        let outcome = bundle::restore(root, dry_run)?;
-
-        // A dry run puts nothing back, and everything reported below this line
-        // is then measured against a ladder that the bundle is not in.  What an
-        // object is not in the ladder for is not in the plan either, so saying
-        // only that the bundle would be restored leaves a machine that is
-        // missing everything it carries reporting that it has nothing to
-        // change -- which is the one answer a drift report must never get wrong
-        let record = match dry_run {
-            true => bundle_record_of(
-                "restore",
-                &outcome.bundle,
-                "would be put back first, so what follows is measured without it".to_string(),
-            ),
-            false => bundle_record("restored", &outcome),
-        };
-
-        out.emit(record)?;
+        restore_bundles(
+            out,
+            root,
+            dry_run,
+            Some("would be put back first, so what follows is measured without it"),
+        )?;
     }
 
     let var = args.variables(root)?;
@@ -2727,6 +2823,48 @@ pub(crate) fn init_logger(debug: u8) {
     env_logger::init_from_env(env);
 }
 
+/// Say, on the standard error, that this system is holding less than it
+/// declares.
+///
+/// Between the reboot that empties the tmpfs and the restore that fills it
+/// again, everything a kept bundle carries is out of the ladder: a `list` is
+/// missing its templates, a `cat` cannot find one, a `check` passes because
+/// there is nothing left to check.  Every one of those answers is right about
+/// the system and wrong about what the system declares, and nothing in them
+/// shows the difference.
+///
+/// It goes to the standard error because the standard output belongs to
+/// whatever is reading the answer, and it is said whether or not anything is
+/// logged: a caveat that a default log level swallows is a caveat that nobody
+/// is told.  A machine that cannot even read its own state is left to the
+/// command itself to fail over.
+fn note_what_is_missing(root: &Path) {
+    let Ok(names) = bundle::outstanding(root) else {
+        return;
+    };
+
+    let (subject, said, carry, them) = match names.len() {
+        0 => return,
+        1 => (
+            "bundle",
+            "was kept and is not installed",
+            "it carries",
+            "it",
+        ),
+        _ => (
+            "bundles",
+            "were kept and are not installed",
+            "they carry",
+            "them",
+        ),
+    };
+
+    eprintln!(
+        "detc: the {subject} {} {said}, so nothing {carry} is in this system yet; `detc bundle restore` puts {them} back",
+        names.join(", ")
+    );
+}
+
 /// Run one subcommand, reporting to `out`.
 ///
 /// Both entry points come through here, so that a command sent over a socket is
@@ -2737,6 +2875,16 @@ pub(crate) fn dispatch(
     command: &Commands,
     dry_run: bool,
 ) -> Result<()> {
+    // Every command but the three that answer for themselves: `apply` puts the
+    // bundles back and reports it, `bundle` is where the question is asked
+    // outright, and `report` reads the history rather than the system
+    if !matches!(
+        command,
+        Commands::Apply { .. } | Commands::Bundle { .. } | Commands::Report { .. }
+    ) {
+        note_what_is_missing(root);
+    }
+
     match command {
         Commands::List {
             types,

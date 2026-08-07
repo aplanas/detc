@@ -327,6 +327,12 @@ struct InstallParams {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct RemoveParams {
     #[serde(default)]
+    names: Vec<String>,
+
+    #[serde(default)]
+    all: bool,
+
+    #[serde(default)]
     dry_run: bool,
 }
 
@@ -430,9 +436,13 @@ fn bundle_call(command: &BundleCommands, dry_run: bool) -> Result<(&'static str,
             })?,
         ),
 
-        BundleCommands::Remove => (
+        BundleCommands::Remove { names, all } => (
             "RemoveBundle",
-            varlink::parameters(&RemoveParams { dry_run })?,
+            varlink::parameters(&RemoveParams {
+                names: names.clone(),
+                all: *all,
+                dry_run,
+            })?,
         ),
     })
 }
@@ -879,7 +889,10 @@ pub(crate) fn command(method: &Method, parameters: Option<Value>) -> Result<(Com
 
             (
                 Commands::Bundle {
-                    command: BundleCommands::Remove,
+                    command: BundleCommands::Remove {
+                        names: params.names,
+                        all: params.all,
+                    },
                 },
                 params.dry_run,
             )
@@ -1316,7 +1329,10 @@ mod tests {
             ),
             (
                 Commands::Bundle {
-                    command: BundleCommands::Remove,
+                    command: BundleCommands::Remove {
+                        names: vec!["fleet".to_string()],
+                        all: false,
+                    },
                 },
                 "RemoveBundle",
             ),

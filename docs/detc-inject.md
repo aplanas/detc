@@ -86,17 +86,24 @@ the tree dracut copies from does the same job.
 
 ## Rules
 
-### One bundle, and the first one wins
+### Bundles add up, and the order is the order of the sources
 
-`bundle install` takes away the one installed before it, so a second bundle would not add to
-the first but replace it.  The driver therefore stops at the first `bundle` line and warns
-about the rest, and the order of the filenames is the order of how deliberate the mechanism
-is — a kernel command line beats a credential beats an OEM string beats a volume somebody
-left attached.
+Every `bundle` line is installed, in the order the sources ran, and a machine holds as many
+bundles as it is given — each under the name its manifest carries.  Installing one is refused
+only where it would write a file that another bundle already wrote, which is reported and does
+not stop the rest.
 
-Number a new source into that scale rather than at the end.  `vars` documents do accumulate,
-which is what they are for: a hostname from the hypervisor and an SSH key from the platform
-are two answers, not two attempts at one.
+The order of the filenames is the order of how deliberate the mechanism is — a kernel command
+line beats a credential beats an OEM string beats a volume somebody left attached — so number
+a new source into that scale rather than at the end.  It is the more deliberate source whose
+bundle claims a contested path, and the less deliberate one that is told the path is taken.
+
+Two sources that name a bundle of the same *name* are the exception: a bundle is replaced by
+the next one of its name, so there the last source to run wins rather than the first.  Ship
+bundles that are named for what they carry and this does not come up.
+
+`vars` documents accumulate the same way, which is what they are for: a hostname from the
+hypervisor and an SSH key from the platform are two answers, not two attempts at one.
 
 ### Emit a locator, not configuration
 

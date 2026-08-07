@@ -166,16 +166,16 @@ install -d %{buildroot}%{_localstatedir}/lib/%{name}
 %endif
 
 %pre
-%service_add_pre %{name}.service
+%service_add_pre %{name}.service %{name}-restore.service
 
 %post
-%service_add_post %{name}.service
+%service_add_post %{name}.service %{name}-restore.service
 
 %preun
-%service_del_preun %{name}.service
+%service_del_preun %{name}.service %{name}-restore.service
 
 %postun
-%service_del_postun %{name}.service
+%service_del_postun %{name}.service %{name}-restore.service
 
 %files
 # FIXME: reinstate once upstream ships the file
@@ -201,6 +201,7 @@ install -d %{buildroot}%{_localstatedir}/lib/%{name}
 %{_datadir}/%{name}/resources.d
 %{_datadir}/%{name}/variables
 %{_unitdir}/%{name}.service
+%{_unitdir}/%{name}-restore.service
 %dir %{_sysconfdir}/%{name}
 %dir %{_localstatedir}/lib/%{name}
 

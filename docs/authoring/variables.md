@@ -187,7 +187,7 @@ create`, because a bundle installing there and `detc var` writing there would be
 paths, and whoever set a variable last would be undone by the next install.  Ship the document as
 `variables/system.d/` instead — from `run` it still wins over the distribution's `usr/share`, and
 it still loses to whatever the administrator sets.  Coming the other way, `detc var` refuses to
-write over a file that the installed bundle owns rather than quietly taking it away.
+write over a file that an installed bundle owns rather than quietly taking it away.
 
 ## Verifying it
 

@@ -298,8 +298,10 @@ method InstallBundle(
   dry_run: bool
 ) -> (change: ?Change)
 
-# Take away the installed bundle, and the copy that was kept of it.  Streaming.
-method RemoveBundle(dry_run: bool) -> (change: ?Change)
+# Take away the bundles that are named, and the copies that were kept of them,
+# or every bundle of the system with `all`.  A name that names nothing takes
+# away none of them.  Streaming.
+method RemoveBundle(names: []string, all: bool, dry_run: bool) -> (change: ?Change)
 
 # The service was started read-only, and the method changes the system.
 error ReadOnly()

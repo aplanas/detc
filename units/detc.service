@@ -6,9 +6,13 @@
 # be running -- the packages, the repositories, the units.
 #
 # It needs no state of its own.  A reboot takes `run` with it, and `detc apply`
-# puts back the bundle that `--persist` kept before it measures anything, so a
+# puts back the bundles that `--persist` kept before it measures anything, so a
 # machine that was given a bundle in the initrd on Monday is still running it in
 # September without anything having been written to remember that.
+# `detc-restore.service` is what puts them back earlier than this, and is the
+# reason a machine spends the boot holding what it declares rather than waiting
+# for this run; the restore here is what covers the machine that does not have
+# that unit enabled.
 #
 # `RemainAfterExit=yes` because this is a state of the system and not a process:
 # `systemctl status detc` should say that the system has been converged, and

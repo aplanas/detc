@@ -822,9 +822,9 @@ A mask is an ordinary file, and [`detc unmask`](#detc-unmask-object) is what
 takes it away again.  `detc remove` cannot: a masked object is no longer an
 object.
 
-The same answer covers a file that the installed bundle owns, which unlinking
+The same answer covers a file that an installed bundle owns, which unlinking
 would take away only until the next restore or the next boot; that is refused,
-naming the bundle and pointing at `detc bundle remove`.
+naming the bundle and pointing at `detc bundle remove <name>`.
 
 #### What an object leaves behind
 
@@ -1132,9 +1132,9 @@ document, through `detc var <file>`.
 Both stores are the administrator's alone.  A bundle cannot carry
 `variables/user.d/`, so nothing a bundle installs lands on what was typed here.
 The rule is enforced from both ends: a write, a persist or an `--unset` that
-would touch a file the installed bundle owns is refused, naming the bundle and
-saying to take it away with `detc bundle remove`, instead of quietly unlinking
-something that arrived with the bundle.  Nothing is written until every path the
+would touch a file an installed bundle owns is refused, naming the bundle and
+saying to take it away with `detc bundle remove <name>`, instead of quietly
+unlinking something that arrived with it.  Nothing is written until every path the
 command would touch has been checked, so a command naming several keys is never
 half done.
 
@@ -1146,16 +1146,19 @@ Build, check and install a tree of objects, see [Bundles](#bundles).
 | --- | --- |
 | `create [dir] -o <file>` | Build a bundle out of a source tree, the current directory by default.  `--sign <key>` signs it, `-o -` writes it to the standard output |
 | `verify <file\|-\|url>` | Check that a bundle can be trusted and that everything it carries can be installed |
-| `install <file\|-\|url>` | Install it, taking away the one before it.  `--persist`, `--apply`, `--allow-unsigned` |
-| `restore` | Install again the copy that `--persist` kept |
-| `status` | The bundle the machine knows, and nothing when it knows none |
-| `remove` | Take it away, and the copy that was kept of it |
+| `install <file\|-\|url>` | Install it, taking away the older version of the same name.  `--persist`, `--apply`, `--allow-unsigned` |
+| `restore` | Install again every copy that `--persist` kept |
+| `status` | Every bundle the machine knows, one per line, and nothing when it knows none |
+| `remove <name>...` | Take those bundles away, and the copies that were kept of them.  `--all` for every one of them |
 
 ```console
 $ detc bundle install fleet.detc --persist
 installed  bundle fleet 3  12 written, 0 removed
+$ detc bundle install web.detc --persist
+installed  bundle web 1  4 written, 0 removed
 $ detc bundle status
 fleet  3  fleet@example  local  persistent
+web    1  ops@example    local  persistent
 ```
 
 The last word is `transient` for a bundle that a reboot takes away, `persistent`
@@ -1165,6 +1168,16 @@ restore.  `kept` is not *no bundle*: this one comes back at the next `apply`.
 `remove` works there too, and takes away the copy, which is the only way to stop
 a bundle whose restore keeps failing — a signing key that was withdrawn, say —
 from re-arming itself at every boot.
+
+While anything is `kept`, every command that reads the ladder says so once on
+the standard error, because the answer on the standard output has no room to:
+
+```console
+$ detc list
+detc: the bundle fleet was kept and is not installed, so nothing it carries is
+in this system yet; `detc bundle restore` puts it back
+…
+```
 
 ### `detc report [id]`
 
@@ -1626,9 +1639,15 @@ injected during the first boot, and never into `etc` or `var/lib`: what arrives
 from outside must not be able to replace what the administrator installed.  It
 is therefore gone after a reboot, with the rest of the tmpfs.
 
-`--persist` keeps the signed file in `/var/lib/detc/bundle.detc`, and the next
-`detc apply` installs it again, so a machine that reboots needs no unit of its
-own:
+`--persist` keeps the signed file in `/var/lib/detc/bundles.d/fleet.detc`, and
+`detc-restore.service` installs it again early in the boot, before
+`detc.service` and without waiting for the network — a read and a write of what
+is already on the disk.  The unit is skipped where `/var/lib/detc/bundles.d` is
+empty, so a machine with nothing kept pays nothing for it.
+
+`detc apply` puts back anything still missing before it measures the system, so
+that is the backstop where the unit is not enabled, and the reason a bundle
+survives a reboot even then:
 
 ```console
 $ detc apply
@@ -1649,12 +1668,38 @@ $ detc --dry-run apply
 restore  bundle fleet 3  would be put back first, so what follows is measured without it
 ```
 
-One bundle is installed at a time.  Installing another writes everything it
-carries and only then takes away the files that the previous one left, so
-`run/lib/detc` keeps what a different injector put there, and every path holds
-either the old content or the new one at every instant.  What a bundle wrote in
-`etc` through `apply` is not taken away with it: `remove` takes away the
-objects, not the configuration of the machine.
+### Several at a time
+
+A machine holds as many bundles as it was given, each known by the name its
+manifest carries, and the system keeps one entry per bundle in each of two
+places:
+
+```text
+run/detc/bundles.d/fleet.yaml         what it is, and what the install learned
+run/detc/bundles.d/fleet.files        every path it wrote
+var/lib/detc/bundles.d/fleet.detc     the signed file, when it persists
+var/lib/detc/bundles.d/fleet.yaml     and what it was installed as
+```
+
+Installing a bundle whose name is already there is a new version of it: it
+writes everything it carries and only then takes away the files that the version
+before it left, so `run/lib/detc` keeps what a different injector put there, and
+every path holds either the old content or the new one at every instant.
+
+Bundles of different names share those prefixes, and the ladder makes no ranking
+between them — so a path that one bundle wrote is a path no other may write.  An
+install that would land on one is refused before it writes anything, naming the
+bundle that got there first:
+
+```console
+$ detc bundle install other.detc
+error: The bundle other carries run/detc/templates.d/motd, which the installed
+bundle web 3 wrote.  Two bundles land in the same prefix and the ladder cannot
+choose between them: take web away, or build other without that file
+```
+
+What a bundle wrote in `etc` through `apply` is not taken away with it: `remove`
+takes away the objects, not the configuration of the machine.
 
 ### A fleet
 
@@ -1857,7 +1902,7 @@ created    template  /etc/ssh/sshd_config.d/60-detc.conf
 ```
 
 `--persist` is what carries it over the reboot: a bundle installs into a tmpfs,
-and the copy it keeps is what the next `apply` installs again, see [Transient by
+and the copy it keeps is what the next boot installs again, see [Transient by
 default](#transient-by-default).
 
 Then write the node down, and it stops being one you have to remember:
@@ -1885,8 +1930,8 @@ installed  bundle fleet 3  12 written, 0 removed
 `--apply` is left off on purpose: an image is not a running system, and the
 templates are instantiated on the machine that will run them, where the probes
 report something true.  The first boot does it — `detc.service` is `detc apply`,
-once per boot, and it needs no state of its own because `apply` puts back the
-bundle that `--persist` kept before it measures anything:
+once per boot, and it needs no state of its own because the bundles that
+`--persist` kept are put back before anything is measured:
 
 ```console
 $ detc apply
@@ -1912,7 +1957,8 @@ Two stages, and the second is what makes the first safe to be partial:
 | | where | what converges |
 | --- | --- | --- |
 | `detc-inject.service` | the initrd, before switch-root | every template, and the `path`, `user`, `group` and `authorized_key` resources |
-| `detc.service` | the booted system | the same again, plus `pkg`, `repo` and `unit` — everything that needs a system to be running |
+| `detc-restore.service` | the booted system, early | nothing of the machine — it puts the kept bundles back into `run` so the ladder holds them for the rest of the boot |
+| `detc.service` | the booted system | the same as the first stage again, plus `pkg`, `repo` and `unit` — everything that needs a system to be running |
 
 Nothing in the first stage can install a package or start a unit, so those three
 types are stood in for rather than skipped: the stand-in answers with the real
@@ -1923,8 +1969,9 @@ are gone without anything having to remove them.
 
 #### What the machine is handed, and how
 
-The initrd runs one small script per delivery mechanism, in order, and the first
-bundle wins.  These are *sources*, and they are not objects: `detc` never reads
+The initrd runs one small script per delivery mechanism, in order, and every
+bundle any of them names is installed — they add up.  These are *sources*, and
+they are not objects: `detc` never reads
 them, they have no ladder and no schema, and they live in
 `usr/libexec/detc/inject/` because they belong to `detc-inject` and not to
 `detc`.  They are the four that work on a machine nobody has prepared:
@@ -1935,6 +1982,12 @@ them, they have no ladder and no schema, and they live in
 | systemd credentials | `20-credentials` | `detc.bundle`, `detc.vars` — which is qemu `fw_cfg`, SMBIOS `io.systemd.credential:`, a `.cred` in the ESP, nspawn, and a TPM-sealed credential, all at once |
 | SMBIOS OEM strings | `30-smbios` | `detc.bundle=<url>` and inline `detc.vars=` in DMI type 11, for a platform whose strings systemd is not importing |
 | a labelled volume | `40-volume` | `/detc.detc` or `/detc.yaml` on a filesystem labelled `DETC` — the seed ISO, and the one mechanism every hypervisor has |
+
+The order is the order of how deliberate a source is, and it is what settles a
+disagreement: a bundle that would write a file an earlier one already wrote is
+refused, so the more deliberate source keeps the contested path.  Two sources
+that name a bundle of the same name are the exception — a name is a version, so
+there the last one to run is the one that stays.
 
 A bundle is verified against `usr/share/detc/allowed_signers` and
 `etc/detc/allowed_signers` **of the tree being configured**, and nothing else: a
@@ -2110,7 +2163,7 @@ distribution and not to `detc`.
 | `varlink/` | `$(PREFIX)/share/varlink/` | 0644 |
 | `tools/inject/` | `$(PREFIX)/libexec/detc/inject/` | 0755 |
 | `tools/detc-inject`, `tools/detc-defer` | `$(PREFIX)/libexec/detc/` | 0755 |
-| `units/detc.service` | `$(UNITDIR)` | 0644 |
+| `units/detc.service`, `units/detc-restore.service` | `$(UNITDIR)` | 0644 |
 | `dracut/50detc/` | `$(DRACUTDIR)/50detc/` | 0755, 0644 |
 
 `inject/` is the one directory here without a `.d`, and that is deliberate: a
@@ -2122,8 +2175,9 @@ The last four are [the first boot](#from-the-initrd-on-the-first-boot).
 `/usr/lib/dracut/modules.d`, and neither is under `PREFIX`: a unit goes where
 systemd looks and a module goes where dracut looks, and detc does not get to
 choose either.  Both are overridable.  Installing them costs a machine that does
-not use them nothing — the dracut module is opt in, and the unit does nothing
-until it is enabled.
+not use them nothing — the dracut module is opt in, the units do nothing until
+they are enabled, and `detc-restore.service` is skipped where no bundle was
+kept.
 
 One manual page per name the binary answers to — [`detc(8)`](man/detc.8),
 [`detcd(8)`](man/detcd.8) and [`detctl(8)`](man/detctl.8) — and all three in
