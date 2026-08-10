@@ -82,6 +82,12 @@ A value is addressed with a dotted key, `ssh.permit_root_login`, which is also
 how a template names it.  Where the key addresses a list, a component that
 is a number reads one element of it, `dns.nameservers.0`.
 
+A document is a mapping of keys and values, as the root of the namespace is
+one.  A bare scalar or a bare list names no key and would replace the whole
+namespace, so it is refused and named — by `detc check`, and by `detc var
+<file>` before it copies anything.  A document of comments alone sets nothing
+and is fine.
+
 ### Merge strategies
 
 A document declares how it is combined with the namespace with the reserved
@@ -139,7 +145,8 @@ contain it, so
 [`examples/probes/boot/10-bootctl`](examples/probes/boot/10-bootctl),
 installed as `/usr/libexec/detc/probes.d/boot/10-bootctl`, populates
 `boot`.  A probe that sits directly in `probes.d/` reports into the root of the
-namespace, which `detc` prints as `.`.  The file name only orders the probe, it is not part of the mount
+namespace, which `detc` prints as `.` and where the same mapping rule applies as
+to a document.  The file name only orders the probe, it is not part of the mount
 point.  [The core set](#the-core-set) ships eight of them, and what they promise
 is written down there.
 
@@ -151,8 +158,10 @@ snapshots `snapper` does.  Both are [not installed](#build) — copy them into a
 prefix to use them.
 
 Probes are run before the documents are read, so the administrator can always
-pin or correct a value that a probe reports.  A probe that fails is skipped with
-a warning, and shows up in `detc check`.
+pin or correct a value that a probe reports.  A probe that fails, or that
+reports something the namespace cannot take where it is mounted, is skipped with
+a warning and named by `detc check`, which runs every probe and merges what it
+wrote.
 
 The probe is executed with its own directory as the working directory, and with
 `DETC_ROOT` in the environment, so that it can honor a root different from `/`.

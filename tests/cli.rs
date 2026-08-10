@@ -703,6 +703,98 @@ fn test_a_document_of_variables_is_merged_and_kept() -> TestResult {
     Ok(())
 }
 
+/// The root of the namespace is a mapping, and a document or a probe that
+/// reports a scalar or a list there is refused instead of becoming it.  Every
+/// merge strategy ends by replacing what it was merged into, so the alternative
+/// is a system where `detc var` answers `42` and nothing can be read again.
+#[test]
+fn test_the_root_of_the_namespace_is_a_mapping() -> TestResult {
+    let tmp_root = tempfile::tempdir()?;
+    let root = tmp_root.path();
+    fixture(root)?;
+
+    // A document handed to `var` is refused before it is stored.  A copy would
+    // be read again by every run after this one, and would have to be found and
+    // deleted by hand
+    let document = root.join("scalar.yaml");
+    fs::write(&document, "42\n")?;
+
+    let path = document.to_str().expect("a UTF-8 path");
+    let output = detc(root, &["var", path]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        stderr(&output).contains("Expected a mapping of keys and values, but got 42"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!root.join("run/detc/variables/user.d").exists());
+
+    // One that is already on disk is named by the file it is in, so an
+    // administrator with a directory of drop-ins knows which to open
+    let user = root.join("etc/detc/variables/user.d");
+    fs::create_dir_all(&user)?;
+    fs::write(user.join("50-list.yaml"), "- a\n- b\n")?;
+
+    let output = detc(root, &["check", "--type", "variable"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        stdout(&output).contains("error\tuser/50-list\tExpected a mapping"),
+        "{}",
+        stdout(&output)
+    );
+
+    let output = detc(root, &["var"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        stderr(&output).contains("50-list.yaml: Expected a mapping"),
+        "{}",
+        stderr(&output)
+    );
+    fs::remove_file(user.join("50-list.yaml"))?;
+
+    // A probe is skipped rather than fatal, as one broken script does not take
+    // the rest of the namespace with it -- and `check` is where the skipping is
+    // said out loud
+    program(
+        &root.join("usr/libexec/detc/probes.d/20-scalar"),
+        "echo 42\n",
+    )?;
+    program(
+        &root.join("usr/libexec/detc/probes.d/net/mtu/10-read"),
+        "echo 1500\n",
+    )?;
+
+    let output = detc(root, &["check", "--type", "probe"]);
+    assert!(!output.status.success(), "{output:?}");
+    let checked = stdout(&output);
+    assert!(
+        checked.contains("20-scalar\tExpected a mapping"),
+        "{checked}"
+    );
+    assert!(
+        checked.contains(&format!(
+            "ok\t{}",
+            root.join("usr/libexec/detc/probes.d/net/mtu/10-read")
+                .display()
+        )),
+        "{checked}"
+    );
+
+    // Only the root is under the obligation.  Below it the tree says where the
+    // value goes and the probe says only what it is, so a bare scalar there is
+    // a value and not a broken document
+    let output = detc(root, &["var", "-k", "net.mtu"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "1500\n");
+
+    assert_eq!(
+        stdout(&detc(root, &["var", "-k", "network.ip"])),
+        "10.0.0.1\n"
+    );
+
+    Ok(())
+}
+
 /// The core document says of itself that its nulls are taken away and the
 /// empty parent is what stays behind, and that is a claim about the shipped
 /// file rather than about a fixture.  It is here as a test because the

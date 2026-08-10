@@ -287,11 +287,18 @@ impl Variables {
     }
 
     /// Merge every variable document of the system, in order of precedence.
+    ///
+    /// Whatever a document is turned down for, it is turned down by name: an
+    /// administrator with a directory of drop-ins reads the reason and knows
+    /// which of them to open, rather than bisecting the directory to find out.
     fn merge_documents(&mut self, root: &Path, default: Merge) -> Result<()> {
         for name in VARIABLE_NAMES {
             for file in cfs::UAPICFS::with_root(name, root).files()? {
                 debug!("Reading variable file {}", file.display());
-                self.merge_document(&[], Self::from_file(file)?, default)?;
+
+                Self::from_file(&file)
+                    .and_then(|var| self.merge_document(&[], var, default))
+                    .map_err(|e| format!("Cannot read {}: {e}", file.display()))?;
             }
         }
 
@@ -309,7 +316,12 @@ impl Variables {
 
     /// Resolve the probes of the system, as pairs of namespace mount point
     /// components and probe path.
-    fn probe_entries(root: &Path) -> Result<Vec<(Vec<String>, PathBuf)>> {
+    ///
+    /// [`Self::probes`] is the same list with the mount point written out as a
+    /// name, which is what is shown and what a probe is addressed by.  The
+    /// components are what merging needs, so this is the one to use to say
+    /// where a probe's document would land.
+    pub fn probe_entries(root: &Path) -> Result<Vec<(Vec<String>, PathBuf)>> {
         let cfs = cfs::UAPICFS::with_root(PROBES_NAME, root)
             .prefixes(PROBE_PREFIXES)
             .recursive(true);
@@ -453,11 +465,23 @@ impl Variables {
     /// read.  Emptying a document and masking it are different things, and this
     /// is where the first of them means nothing at all.
     ///
+    /// **A document merged at the root of the namespace has to be a mapping**,
+    /// which is what
+    /// [`refuse_unless_mergeable_at_root`](Self::refuse_unless_mergeable_at_root)
+    /// is for.  A subtree is under no such obligation: a probe reports whatever
+    /// it likes at its mount point, and one under `probes.d/net/mtu/` printing a
+    /// bare `1500` is reporting `net.mtu`, with the tree saying where the value
+    /// goes and the probe saying only what it is.
+    ///
     /// [RFC 7396]: https://www.rfc-editor.org/rfc/rfc7396
     pub fn merge_document(&mut self, keys: &[String], mut var: Self, default: Merge) -> Result<()> {
         if var.value.is_null() {
             debug!("Skipping a document that holds nothing");
             return Ok(());
+        }
+
+        if keys.is_empty() {
+            Self::refuse_unless_mergeable_at_root(&var)?;
         }
 
         let strategy = var.take_merge()?.unwrap_or(default);
@@ -467,6 +491,30 @@ impl Variables {
         Self::merge_value(target, var.value, strategy);
 
         Ok(())
+    }
+
+    /// Refuse a document that cannot be merged at the root of the namespace.
+    ///
+    /// The root is a mapping, and everything the namespace is asked for
+    /// presupposes it: a dotted key names its way down from here, a probe is
+    /// mounted in a subtree of it, and a template is rendered with it.  A
+    /// document that is a scalar or a list has nothing to say about any key, so
+    /// combining it here is not a merge at all -- every strategy ends by
+    /// replacing what it was merged into, and the namespace becomes that value.
+    ///
+    /// It is refused rather than ignored because it is not a shade of meaning
+    /// that was misread: whoever wrote it meant something, and it is not
+    /// something this file can say.  A document that holds nothing is a
+    /// different case and is let through, as saying nothing is something a
+    /// document is allowed to do.
+    fn refuse_unless_mergeable_at_root(var: &Self) -> Result<()> {
+        match var.value.is_null() || var.value.is_object() {
+            true => Ok(()),
+            false => err!(
+                "Expected a mapping of keys and values, but got {}",
+                var.value
+            ),
+        }
     }
 
     /// Combine `var` with an explicit strategy.
@@ -732,8 +780,13 @@ impl Variables {
         let path = path.as_ref();
 
         // Deserialized first, so that a document that cannot be understood is
-        // not written anywhere
+        // not written anywhere -- and refused here rather than at the merge
+        // below for the same reason.  A drop-in that the namespace cannot take
+        // is read again by every run after this one, so writing it and failing
+        // afterwards would leave the node needing that file found and deleted
+        // by hand
         let var = Self::from_file(path)?;
+        Self::refuse_unless_mergeable_at_root(&var)?;
 
         let name = Self::dropin_file_name(path, store)?;
         Self::refuse_if_masked(store, &name, root.as_ref())?;
@@ -1043,14 +1096,17 @@ impl Document {
     }
 
     /// Check that the document can take part in the namespace: that it parses
-    /// as one of the formats that are understood, and that the strategy it
-    /// asks for in [`MERGE_KEY`] is one that exists.
+    /// as one of the formats that are understood, that it is a mapping of keys
+    /// and values as a document merged at the root has to be, and that the
+    /// strategy it asks for in [`MERGE_KEY`] is one that exists.
     ///
     /// Nothing is merged here, so this does not say that the namespace ends up
     /// holding what the author meant.  Which document wins a key is a question
     /// about all of them at once, and `detc var` is where it is answered.
     pub fn check(&self) -> Result<()> {
-        Variables::from_file(&self.source)?.take_merge().map(|_| ())
+        let mut var = Variables::from_file(&self.source)?;
+        Variables::refuse_unless_mergeable_at_root(&var)?;
+        var.take_merge().map(|_| ())
     }
 }
 

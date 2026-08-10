@@ -2098,21 +2098,47 @@ fn checked(out: &mut dyn Sink, status: Result<()>, name: impl fmt::Display) -> R
     Ok(failed)
 }
 
-/// Run the probes, and report the ones that fail or that return a document
-/// that cannot be deserialized.  Returns the number of broken probes.
+/// Run the probes, and report the ones that fail, that return a document that
+/// cannot be deserialized, or that report something the namespace cannot take
+/// where they are mounted.  Returns the number of broken probes.
+///
+/// The document is merged and not only parsed, because a probe is skipped at
+/// run time for either reason and this is the command that says which ones are
+/// being skipped.  Nothing is kept: each one is merged into a namespace of its
+/// own, so a probe is reported for what it says and not for what another probe
+/// said before it.
 fn check_probes(out: &mut dyn Sink, root: &Path, probe: Option<&Path>) -> Result<usize> {
-    let probes = match probe {
-        Some(probe) => vec![(String::new(), resolve_probe(probe, root)?)],
-        None => var::Variables::probes(root)?,
+    let installed = var::Variables::probe_entries(root)?;
+
+    // A probe named by its path is checked wherever the ladder has it, and a
+    // probe that is not installed anywhere has no mount point to be checked
+    // against -- which is the case while it is still being written
+    let probes: Vec<(Option<Vec<String>>, PathBuf)> = match probe {
+        Some(probe) => {
+            let path = resolve_probe(probe, root)?;
+            let mount = installed
+                .iter()
+                .find(|(_, installed)| *installed == path)
+                .map(|(mount, _)| mount.clone());
+
+            vec![(mount, path)]
+        }
+        None => installed
+            .into_iter()
+            .map(|(mount, path)| (Some(mount), path))
+            .collect(),
     };
 
     let mut failed = 0;
-    for (_, path) in probes {
-        if checked(
-            out,
-            var::Variables::from_probe(&path, root).map(|_| ()),
-            path.display(),
-        )? {
+    for (mount, path) in probes {
+        let reported = var::Variables::from_probe(&path, root).and_then(|document| match mount {
+            Some(mount) => {
+                var::Variables::new().merge_document(&mount, document, var::DEFAULT_MERGE)
+            }
+            None => Ok(()),
+        });
+
+        if checked(out, reported, path.display())? {
             failed += 1;
         }
     }

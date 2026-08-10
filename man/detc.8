@@ -259,10 +259,10 @@ shipped.
 .
 .SS detc check [FILE]
 Check that the objects can be instantiated: that every variable document
-parses, that every probe answers with a document, that every template renders,
-that every resource matches the schema of its provider, and that every provider
-is there and answers.  It changes nothing and needs no privilege beyond
-reading.
+parses, that every probe answers with a document the namespace can take where
+that probe is mounted, that every template renders, that every resource matches
+the schema of its provider, and that every provider is there and answers.  It
+changes nothing and needs no privilege beyond reading.
 .PP
 The status is non\-zero if anything failed, which is what makes this the
 command to put in a pipeline.
@@ -619,6 +619,12 @@ so that the next run reads it and the next boot takes it away.  With a
 .IR FILE ,
 it merges that whole document into the same place.  With none of them it
 prints the namespace.
+.PP
+A document is merged at the root of the namespace, which is a mapping, so a
+document that is a bare scalar or a bare list is refused and nothing is
+written: it names no key, and merging it would leave the namespace holding that
+value and nothing else.  A document of comments alone sets nothing and is
+accepted.
 .TP
 .B \-\-persist
 Write what is set to

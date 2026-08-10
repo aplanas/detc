@@ -17,7 +17,8 @@ as the working directory (`src/exec.rs`).
   that are not failures.
 - **A probe that fails is skipped with a warning**, and the rest of the namespace survives
   (`Variables::merge_probes`, `src/var.rs`).  It never ends the run.  `detc check` is where a
-  failing probe is reported as a failure.
+  failing probe is reported as a failure: it runs the probe and merges what it wrote at the
+  mount point it wrote it from, so a probe skipped at run time is a probe named here.
 - **Probes run before the variables documents are read**, so anything a probe reports can be
   pinned or replaced by an administrator's document.  You are providing a default view of the
   machine, not the last word on it.
@@ -131,6 +132,12 @@ Pick the key rather than letting the tool pick it.  `examples/.../10-snapper` mo
 configurations under `configs` and not at the root, because a configuration can be called
 anything and `snapshot.root` would read as "the snapshot of the root".
 
+A probe mounted at the root of the namespace has no choice in it: there, a bare array or a bare
+scalar is refused, and the probe is skipped with the reason.  A directory is a mapping of keys
+and values and so is the root, and a document that names no key would replace the whole of it.
+Below the root the tree says where the value goes and the probe says only what it is, so
+`probes.d/net/mtu/10-read` printing `1500` reports `net.mtu` and is perfectly good.
+
 ### Pass the tool's shape through
 
 Where a tool already writes JSON, hand it on unchanged: JSON is YAML, so
@@ -204,11 +211,10 @@ number wins:
 
 ```bash
 cat > "$stage/usr/share/detc/variables/system.d/99-fixture.yaml" <<'EOF'
-system:
-  net:
-    interfaces:
-      - ifname: eth0
-        addr_info: [{family: inet, local: 192.0.2.7}]
+net:
+  interfaces:
+    - ifname: eth0
+      addr_info: [{family: inet, local: 192.0.2.7}]
 EOF
 
 mkdir -p "$stage/usr/share/detc/templates.d/tmp"

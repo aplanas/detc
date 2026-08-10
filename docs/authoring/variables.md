@@ -32,6 +32,16 @@ answered ahead of the copy `--persist` left in `etc`.
 document is not.  What you write at the top level of the file is what a template addresses at
 the top level of the namespace, wherever the file itself sits.
 
+So **a document is a mapping of keys and values**, and one that is a bare scalar or a bare list
+is refused rather than merged: it names no key, and every strategy below ends by replacing what
+it was merged into, so the namespace would become that value and nothing could be read from it
+again.  `detc check --type variable` names the file, `detc var <file>` refuses before it copies
+anything, and a run stops at it rather than carrying on with a namespace it cannot use.
+
+A document that holds nothing — comments only — is a different thing and is allowed: it merges
+nothing and leaves the namespace alone.  A file of zero bytes is different again, and masks the
+document under it out of the ladder entirely.
+
 The content is parsed by trying JSON, then YAML, then TOML.  Any document is valid — detc
 imposes no schema on the namespace.
 
@@ -56,7 +66,8 @@ so it never reaches the namespace.  The default is `partial`.
 `partial` is [RFC 7396][rfc7396] JSON Merge Patch.
 
 A probe may declare `_merge` too, and it applies at the **mount point of the probe**, not at the
-root of the namespace.
+root of the namespace.  A probe mounted at the root is under the same obligation as a document
+and has to report a mapping; one mounted in a subtree is not, and may report anything at all.
 
 [rfc7396]: https://www.rfc-editor.org/rfc/rfc7396
 
@@ -105,8 +116,9 @@ An empty map or an empty list serves the same purpose, and better where the temp
 `sysctl: {}` and `modules: []` mean the `{% for %}` writes nothing and needs no guard at all.
 
 **This only covers what the core document declares.**  Anything a *probe* fills has no
-guaranteed parent — a node may not have the probe — so a template or a resource that reads
-`system.…` must still take its defaults [one level at a time](templates.md#strict-undefined-and-defaults-one-level-at-a-time).
+guaranteed parent — a node may not have the probe, and a probe that learns nothing reports
+nothing — so a template or a resource that reads what a probe fills must still take its defaults
+[one level at a time](templates.md#strict-undefined-and-defaults-one-level-at-a-time).
 
 ## The catalogue convention
 
