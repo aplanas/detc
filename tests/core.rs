@@ -156,10 +156,16 @@ fn test_a_probe_says_nothing_about_the_machine_it_is_not_asked_about() -> TestRe
     for (probe, subtree) in PROBES {
         let key = subtree.rsplit('.').next().expect("the subtree has a name");
         assert!(
-            reported.contains(&format!("{key}: null")),
+            !reported
+                .lines()
+                .any(|line| line.starts_with(&format!("{key}:"))),
             "{probe} said something about a tree it was not asked about: {reported}"
         );
     }
+
+    // And not one of them left its mount point behind either, so the namespace
+    // of a tree that answers nothing is empty rather than a page of nulls
+    assert_eq!(reported.trim(), "{}", "{reported}");
 
     // And every one of them is a program that runs and answers
     let output = detc(root, &["check", "--type", "probe"]);
@@ -186,11 +192,7 @@ fn test_a_probe_that_shells_out_only_answers_for_the_running_system() -> TestRes
     let bin = stubs(root, &[("systemd-detect-virt", "echo kvm\n")])?;
     let output = detc_with_path(root, &bin, &["var"]);
     assert!(output.status.success(), "{}", stderr(&output));
-    assert!(
-        stdout(&output).contains("virt: null"),
-        "{}",
-        stdout(&output)
-    );
+    assert_eq!(stdout(&output).trim(), "{}", "{}", stdout(&output));
     assert_eq!(asked(root), "");
 
     // And that it is silence and not a probe that never answers, asked the
@@ -245,14 +247,14 @@ fn test_a_probe_answers_for_a_root_the_machine_is_about_to_boot() -> TestResult 
     // distinction the flag draws.  This one has no `/etc/os-release` and no
     // package manager in it, and saying otherwise would be reporting on the
     // machine that is running the tests
-    assert!(reported.contains("os: null"), "{reported}");
-    assert!(reported.contains("pkg: null"), "{reported}");
+    assert!(!reported.contains("os:"), "{reported}");
+    assert!(!reported.contains("pkg:"), "{reported}");
 
     // Nothing of this is on by default: the same run without the flag is the
     // silence the other test asserts
     let output = detc_with_path(root, &bin, &["var"]);
     assert!(output.status.success(), "{}", stderr(&output));
-    assert!(stdout(&output).contains("hardware: null"), "{reported}");
+    assert!(!stdout(&output).contains("hardware:"), "{reported}");
 
     Ok(())
 }

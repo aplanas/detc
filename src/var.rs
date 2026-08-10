@@ -438,7 +438,28 @@ impl Variables {
     /// Combine `var` in the subtree of the namespace addressed by `keys`, with
     /// the strategy that the document declares, or `default` when it declares
     /// none.
+    ///
+    /// **A document with nothing in it contributes nothing**, and the subtree it
+    /// would have been mounted in is not created.  Two ordinary things arrive
+    /// here empty: a probe that found nothing to report, which is the path the
+    /// core set is written to take, and a document that holds only comments.
+    /// Merging either of them would write a null, and a null is how [RFC 7396]
+    /// *takes a key away* -- so the probe would leave its mount point behind as
+    /// a null, and the comments would erase the whole namespace they were
+    /// merged into.  Neither is anything the writer of that file said.
+    ///
+    /// A file of zero bytes never reaches this, as the resolver reads it as the
+    /// document being absent and it is masked out of the ladder before it is
+    /// read.  Emptying a document and masking it are different things, and this
+    /// is where the first of them means nothing at all.
+    ///
+    /// [RFC 7396]: https://www.rfc-editor.org/rfc/rfc7396
     pub fn merge_document(&mut self, keys: &[String], mut var: Self, default: Merge) -> Result<()> {
+        if var.value.is_null() {
+            debug!("Skipping a document that holds nothing");
+            return Ok(());
+        }
+
         let strategy = var.take_merge()?.unwrap_or(default);
         debug!("Merging document with strategy {strategy}");
 
@@ -1364,6 +1385,44 @@ mod tests {
 
         assert!(var.get_value("legacy").is_err());
         assert!(var.get_value("readme").is_err());
+
+        Ok(())
+    }
+
+    /// A document that holds nothing changes nothing, wherever it is merged.
+    ///
+    /// The two ways of arriving here empty are a probe that found nothing to
+    /// report and a document that is only comments, and each of them used to
+    /// write a null: the probe over its own mount point, and the comments over
+    /// the whole namespace, which a null takes away.
+    #[test]
+    fn test_a_document_that_holds_nothing_leaves_the_namespace_alone() -> TestResult {
+        let tmp_root = tempfile::tempdir()?;
+        let root = tmp_root.path();
+
+        probe(&root.join("usr/libexec/detc/probes.d/net/10-ip"), "")?;
+        probe(
+            &root.join("usr/libexec/detc/probes.d/disk/10-lsblk"),
+            r#"{"devices": ["sda"]}"#,
+        )?;
+
+        let documents = root.join("usr/share/detc/variables/system.d");
+        fs::create_dir_all(&documents)?;
+        fs::write(documents.join("10-dns.yaml"), "dns:\n  domain: lan\n")?;
+        fs::write(
+            documents.join("50-nothing.yaml"),
+            "# nothing set here yet\n",
+        )?;
+
+        let var = Variables::from_system(root)?;
+
+        // The probe that said nothing is not there at all, rather than there
+        // and null, and the one beside it reported all the same
+        assert!(var.get_value("net").is_err());
+        assert_eq!(var.get_yaml("disk.devices")?.trim(), "- sda");
+
+        // And the comments did not take the namespace away with them
+        assert_eq!(var.get_yaml("dns.domain")?.trim(), "lan");
 
         Ok(())
     }

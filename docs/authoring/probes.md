@@ -60,6 +60,11 @@ than a missing one because nothing downstream can tell it apart from a real one.
 `probes/pkg/10-manager` writes nothing when the tree has none of the three managers,
 rather than naming one.
 
+Writing nothing costs nothing: a probe whose document is empty is not merged at all, so it
+does not even leave its mount point behind as a null (`Variables::merge_document`,
+`src/var.rs`).  On a tree that answers none of the questions the core set asks, `detc var`
+answers `{}` and not a page of empty subtrees.
+
 The judgement is between "I learned that there is nothing" and "I could not learn anything":
 
 - `probes/virt/10-detect-virt` reports `none`, because *not virtualised* is something
@@ -180,8 +185,9 @@ detc=./target/release/detc
 $detc var --probe probes/os/10-os-release
 ```
 
-A probe that reports nothing prints `null`, which is the answer to look for on a tree it cannot
-read.  Then install and check where it lands:
+A probe that reports nothing prints `null` here, which is the answer to look for on a tree it
+cannot read — this is the probe's own document and not the namespace, which the same silence
+leaves untouched.  Then install and check where it lands:
 
 ```bash
 stage=$(mktemp -d)
