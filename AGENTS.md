@@ -24,7 +24,7 @@ One binary that answers to three names by the one it was invoked with: `detc` on
 A run of `detc apply` does four things, in this order:
 
 1. **Runs every probe** and merges what each writes into the *namespace* — a tree of values
-   addressed with a dotted key, `system.os.id`.
+   addressed with a dotted key, `os.id`.
 2. **Merges the variables documents** over it, lowest prefix first, so an administrator's
    document always beats a probe.
 3. **Renders every template** into the file it names, and publishes the digest of what each
@@ -39,7 +39,7 @@ property every asset has to preserve, not one the engine can give you for free.
 
 | | what it is | in the repo | installed to | mode |
 |---|---|---|---|---|
-| [probe](docs/authoring/probes.md) | an executable that reports a fact about the machine | `probes/` | `$(PREFIX)/libexec/detc/probes/` | 0755 |
+| [probe](docs/authoring/probes.md) | an executable that reports a fact about the machine | `probes/` | `$(PREFIX)/libexec/detc/probes.d/` | 0755 |
 | [provider](docs/authoring/providers.md) | an executable that implements one resource type | `providers/` | `$(PREFIX)/libexec/detc/providers.d/` | 0755 |
 | [template](docs/authoring/templates.md) | the content of a configuration file | `templates/` | `$(PREFIX)/share/detc/templates.d/` | 0644 |
 | [resource](docs/authoring/resources.md) | a piece of state that is not a file | `resources/` | `$(PREFIX)/share/detc/resources.d/` | 0644 |
@@ -93,7 +93,7 @@ probe and a provider run as root, and content that arrives from outside the syst
 be able to replace one the administrator installed.
 
 **The `.d` suffix is not a naming style, it is a fact.**  The constants name no suffix —
-`detc/templates`, `detc/resources`, `detc/providers`, `detc/probes/<category>` — and
+`detc/templates`, `detc/resources`, `detc/providers`, `detc/probes` — and
 `UAPICFS` appends `.d` when it resolves the drop-in directory.  So a `.d` directory in an
 installed tree is, by construction, one this ladder walks.  Do not name a directory `.d`
 that detc does not resolve: `libexec/detc/inject/` holds executables and is deliberately
@@ -130,7 +130,7 @@ root is not `/`, but the machine looking at it is the machine that will boot it.
 Exactly one caller can say that honestly — [`tools/detc-inject`](tools/detc-inject), in an
 initrd, where `/sysroot` is this machine's own future `/`, on this machine's cards and disks.
 Nothing else should ever set it, and a probe that reads a fact about the machine honours it:
-`system.d/net/10-ip`, `disk/10-lsblk` and `virt/10-detect-virt` answer instead of standing
+`net/10-ip`, `disk/10-lsblk` and `virt/10-detect-virt` answer instead of standing
 down, and `hardware/10-proc`, `firmware/10-firmware` and the two machine keys of `host/10-host`
 read `/proc` and `/sys` at their own paths rather than under a root that has neither mounted
 yet.
@@ -210,7 +210,7 @@ Then, in roughly this order:
 $detc --root "$stage" list                       # is it found, under the name you meant?
 $detc --root "$stage" var --probes               # every probe and its mount point
 $detc --root "$stage" var                        # the whole namespace it produced
-$detc var --probe probes/system.d/os/10-os-release   # one probe, straight out of the tree
+$detc var --probe probes/os/10-os-release   # one probe, straight out of the tree
 $detc --root "$stage" cat etc/foo.conf           # what a template actually writes
 $detc --root "$stage" cat --raw etc/foo.conf     # the template before rendering
 $detc --root "$stage" check                      # everything parses and validates
@@ -246,8 +246,8 @@ Four things that are easy to skip, and are exactly where the bugs have been:
 And for the repository itself:
 
 ```bash
-shellcheck -s sh probes/system.d/*/* providers/* tools/detc-* tools/inject/* \
-                 examples/probes/system.d/*/*
+shellcheck -s sh probes/*/* providers/* tools/detc-* tools/inject/* \
+                 examples/probes/*/*
 shellcheck -s bash dracut/50detc/module-setup.sh   # bash, because dracut sources it
 make check                                         # cargo fmt --check, clippy, test
 ```
@@ -264,7 +264,7 @@ by leaving it for the next reader to re-diagnose.
 `examples/` is not installed.  An asset belongs there, and not in the core set, when it
 
 - shells out to a tool that is not on every distribution
-  (`examples/probes/system.d/boot/10-bootctl`, `.../snapshot/10-snapper`), or
+  (`examples/probes/boot/10-bootctl`, `.../snapshot/10-snapper`), or
 - is a whole-file template, which would *empty* the file it names on a node that set no
   variable for it (`examples/templates/etc/hostname`, `.../etc/motd`).
 

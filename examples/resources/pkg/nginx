@@ -16,5 +16,5 @@
 #
 # The name is the name the distribution uses.  It is `nginx` on openSUSE,
 # Debian and Fedora alike, which is why this example uses it and not something
-# that has to be chosen by reading `system.pkg.manager`.
+# that has to be chosen by reading `pkg.manager`.
 installed: true

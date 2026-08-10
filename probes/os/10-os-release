@@ -2,7 +2,7 @@
 
 # Which distribution the tree is, out of `os-release`.
 #
-# This fills `system.os`, and it is the probe a fleet reads most: it is what a
+# This fills `os`, and it is the probe a fleet reads most: it is what a
 # template branches on and what the `pkg` provider's declarations are written
 # against.
 #

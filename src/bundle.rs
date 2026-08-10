@@ -31,7 +31,7 @@
 //! ├── variables/system.d/…      →  run/detc/…                     0644
 //! ├── templates.d/…             →  run/detc/…                     0644
 //! ├── resources.d/…             →  run/detc/…                     0644
-//! ├── probes/system.d/…         →  run/lib/detc/…                 0755
+//! ├── probes.d/…                →  run/lib/detc/…                 0755
 //! └── providers.d/…             →  run/lib/detc/…                 0755
 //! ```
 //!
@@ -558,11 +558,7 @@ fn trees() -> Vec<(String, bool)> {
         .map(|name| (tree(name), false))
         .collect();
 
-    trees.extend(
-        var::PROBE_CATEGORIES
-            .iter()
-            .map(|category| (tree(&var::probes_name(category)), true)),
-    );
+    trees.push((tree(var::PROBES_NAME), true));
     trees.push((tree(provider::PROVIDERS_NAME), true));
 
     trees
@@ -1179,7 +1175,7 @@ mod tests {
             dir.join("templates.d/etc/ssh/sshd_config.d/root.conf"),
             "PermitRootLogin {{ ssh.permit_root_login }}\n",
         )?;
-        write(dir.join("probes/system.d/10-net"), "#!/bin/sh\necho '{}'\n")?;
+        write(dir.join("probes.d/10-net"), "#!/bin/sh\necho '{}'\n")?;
         write(dir.join("providers.d/unit"), "#!/bin/sh\nexit 0\n")?;
         write(dir.join("README.md"), "how the tree is written\n")?;
         write(dir.join(".git/config"), "[core]\n")?;
@@ -1256,7 +1252,7 @@ mod tests {
                 0o644,
             ),
             ("run/detc/variables/system.d/10-ssh.yaml", 0o644),
-            ("run/lib/detc/probes/system.d/10-net", 0o755),
+            ("run/lib/detc/probes.d/10-net", 0o755),
             ("run/lib/detc/providers.d/unit", 0o755),
             ("run/detc/bundles.d/fleet.yaml", 0o644),
             ("run/detc/bundles.d/fleet.files", 0o644),
@@ -1424,7 +1420,7 @@ mod tests {
         let (tree, root) = (tmp.path().join("tree"), tmp.path().join("root"));
 
         // Something that another injector left in the slot that a bundle shares
-        let other = write(root.join("run/lib/detc/probes/system.d/50-other"), "#!\n")?;
+        let other = write(root.join("run/lib/detc/probes.d/50-other"), "#!\n")?;
 
         write(tree.join(MANIFEST), "name: fleet\nversion: '1'\n")?;
         let first = write(tree.join("templates.d/etc/one.conf"), "one\n")?;
@@ -1458,7 +1454,7 @@ mod tests {
         // The directory of the first bundle emptied and went, and what was not
         // its own stayed
         assert!(other.exists());
-        assert!(root.join("run/lib/detc/probes/system.d").exists());
+        assert!(root.join("run/lib/detc/probes.d").exists());
 
         Ok(())
     }
@@ -1710,7 +1706,7 @@ mod tests {
                 ("variables/system".to_string(), false),
                 ("templates".to_string(), false),
                 ("resources".to_string(), false),
-                ("probes/system".to_string(), true),
+                ("probes".to_string(), true),
                 ("providers".to_string(), true),
             ]
         );

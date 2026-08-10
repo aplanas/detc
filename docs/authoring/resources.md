@@ -295,7 +295,7 @@ filter is reached.  `resources/noop/ping`:
 message: "detc answers on {{ os.pretty_name | default('an unknown system') }}"
 ```
 
-A default on the whole chain does not rescue it: `system` being absent makes `system.os` the
+A default on the whole chain does not rescue it: `system` being absent makes `os` the
 error before anything downstream is reached.  A core resource must render on a node whose
 probes all said nothing.
 

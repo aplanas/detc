@@ -5,7 +5,7 @@
 # The name of the resource is the name of the package, spelled the way the
 # distribution spells it: `pkg/openssh-server` on Debian is `pkg/openssh` on
 # openSUSE, and a fleet that spans both either declares the two and lets a
-# prefix mask the one that does not apply, or reads `system.pkg.manager` and
+# prefix mask the one that does not apply, or reads `pkg.manager` and
 # declares the name that goes with it.
 #
 # `zypper`, `dnf` and `apt-get` are driven the same way, and all three are asked

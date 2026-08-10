@@ -35,7 +35,7 @@ fn test_list_shows_every_object() -> TestResult {
     let output = detc(root, &["list"]);
     assert!(output.status.success(), "{}", stderr(&output));
     let listed = stdout(&output);
-    assert!(listed.contains("probe\tsystem\t"), "{listed}");
+    assert!(listed.contains("probe\t.\t"), "{listed}");
     assert!(listed.contains("10-net"), "{listed}");
     assert!(
         listed.contains(&format!(
@@ -172,13 +172,13 @@ fn test_cat_shows_every_type_of_object() -> TestResult {
     // A probe and a provider are programs, and what is shown is the program.
     // Both are addressed the way `detc list` prints them: a probe by the mount
     // point it feeds or by its path, a provider by the type it implements
-    let probe = root.join("usr/libexec/detc/probes/system.d/10-net");
+    let probe = root.join("usr/libexec/detc/probes.d/10-net");
     let expected = fs::read_to_string(&probe)?;
 
     for name in [
-        "system",
+        ".",
         "10-net",
-        "system.d/10-net",
+        "probes.d/10-net",
         &probe.display().to_string(),
     ] {
         let output = detc(root, &["cat", "--type", "probe", name]);
@@ -322,18 +322,15 @@ fn test_cat_says_what_it_cannot_show() -> TestResult {
     // that addresses several is answered with the ones it addresses, and not
     // with one of them, nor as a name that nothing has
     program(
-        &root.join("usr/libexec/detc/probes/system.d/20-more"),
+        &root.join("usr/libexec/detc/probes.d/20-more"),
         "echo '{}'\n",
     )?;
 
-    for arguments in [
-        vec!["cat", "system"],
-        vec!["cat", "--type", "probe", "system"],
-    ] {
+    for arguments in [vec!["cat", "."], vec!["cat", "--type", "probe", "."]] {
         let output = detc(root, &arguments);
         assert!(!output.status.success(), "{arguments:?}");
         let reported = stderr(&output);
-        assert!(reported.contains("system addresses 2 probes"), "{reported}");
+        assert!(reported.contains(". addresses 2 probes"), "{reported}");
         assert!(reported.contains("10-net"), "{reported}");
         assert!(reported.contains("20-more"), "{reported}");
     }
@@ -404,7 +401,7 @@ fn test_check_reports_the_objects_that_fail() -> TestResult {
 
     // A probe that fails is invisible when the namespace is collected, so this
     // is where it shows up
-    let broken = root.join("usr/libexec/detc/probes/system.d/20-broken");
+    let broken = root.join("usr/libexec/detc/probes.d/20-broken");
     fs::write(&broken, "#!/bin/sh\nexit 1\n")?;
     fs::set_permissions(&broken, fs::Permissions::from_mode(0o755))?;
 
@@ -430,7 +427,7 @@ fn test_var_queries_and_persists() -> TestResult {
     assert!(namespace.contains("ip: 10.0.0.1"), "{namespace}");
 
     // A key without a value queries the namespace
-    let output = detc(root, &["var", "-k", "system.network.ip"]);
+    let output = detc(root, &["var", "-k", "network.ip"]);
     assert_eq!(stdout(&output), "10.0.0.1\n");
 
     let output = detc(root, &["var", "-k", "nope"]);
@@ -442,7 +439,7 @@ fn test_var_queries_and_persists() -> TestResult {
 
     // The probes can be listed and run one by one
     let output = detc(root, &["var", "--probes"]);
-    assert!(stdout(&output).contains("system\t"), "{output:?}");
+    assert!(stdout(&output).contains(".\t"), "{output:?}");
 
     let output = detc(root, &["var", "--probe", "10-net"]);
     assert!(output.status.success(), "{}", stderr(&output));
@@ -569,17 +566,17 @@ fn test_a_variable_that_was_set_is_taken_away_again() -> TestResult {
     // A value that a probe reports is named as one, since no document holds it
     // and taking a drop-in away cannot reach the machine describing itself
     assert!(
-        detc(root, &["var", "-k", "system.network.ip", "-v", "10.0.0.9"])
+        detc(root, &["var", "-k", "network.ip", "-v", "10.0.0.9"])
             .status
             .success()
     );
-    let output = detc(root, &["var", "--unset", "-k", "system.network.ip"]);
+    let output = detc(root, &["var", "--unset", "-k", "network.ip"]);
     assert!(
-        stdout(&output).contains("remains\tvariable system.network.ip\ta probe"),
+        stdout(&output).contains("remains\tvariable network.ip\ta probe"),
         "{output:?}"
     );
     assert_eq!(
-        stdout(&detc(root, &["var", "-k", "system.network.ip"])),
+        stdout(&detc(root, &["var", "-k", "network.ip"])),
         "10.0.0.1\n"
     );
 
@@ -952,9 +949,9 @@ fn test_every_type_of_mask_is_put_back_by_the_name_that_lists_it() -> TestResult
     for (kind, name, source, mask) in [
         (
             "probe",
-            "system",
-            "usr/libexec/detc/probes/system.d/10-net",
-            "var/lib/detc/probes/system.d/10-net",
+            ".",
+            "usr/libexec/detc/probes.d/10-net",
+            "var/lib/detc/probes.d/10-net",
         ),
         (
             "provider",
@@ -1155,7 +1152,7 @@ fn test_a_mask_that_cannot_be_put_back() -> TestResult {
     // One mount point can address two probes, and then it does not say which
     // mask was meant
     program(
-        &root.join("usr/libexec/detc/probes/system.d/20-more"),
+        &root.join("usr/libexec/detc/probes.d/20-more"),
         "echo '{}'\n",
     )?;
     for probe in ["10-net", "20-more"] {
@@ -1163,10 +1160,10 @@ fn test_a_mask_that_cannot_be_put_back() -> TestResult {
         assert!(output.status.success(), "{probe}: {}", stderr(&output));
     }
 
-    let output = detc(root, &["unmask", "system"]);
+    let output = detc(root, &["unmask", "."]);
     assert!(!output.status.success());
     assert!(
-        stderr(&output).contains("system addresses 2 masks, so it does not say which one"),
+        stderr(&output).contains(". addresses 2 masks, so it does not say which one"),
         "{}",
         stderr(&output)
     );
@@ -1176,7 +1173,7 @@ fn test_a_mask_that_cannot_be_put_back() -> TestResult {
     let output = detc(root, &["unmask", "20-more", "nothing/at-all"]);
     assert!(!output.status.success());
     assert!(
-        root.join("var/lib/detc/probes/system.d/20-more").is_file(),
+        root.join("var/lib/detc/probes.d/20-more").is_file(),
         "the good mask was unlinked before the bad name was refused"
     );
 
@@ -1288,9 +1285,9 @@ fn test_every_type_of_object_is_taken_away_by_the_name_that_lists_it() -> TestRe
     for (kind, name, source, mask) in [
         (
             "probe",
-            "system",
-            "usr/libexec/detc/probes/system.d/10-net",
-            "var/lib/detc/probes/system.d/10-net",
+            ".",
+            "usr/libexec/detc/probes.d/10-net",
+            "var/lib/detc/probes.d/10-net",
         ),
         (
             "provider",
@@ -1354,11 +1351,11 @@ fn test_a_name_that_addresses_more_than_one_probe_is_refused() -> TestResult {
 
     // A second probe on the mount that `fixture` already has one on
     program(
-        &root.join("usr/libexec/detc/probes/system.d/20-disk"),
+        &root.join("usr/libexec/detc/probes.d/20-disk"),
         "echo '{\"disk\": {\"root\": \"/dev/sda1\"}}'\n",
     )?;
 
-    let output = detc(root, &["remove", "system", "--type", "probe", "--mask"]);
+    let output = detc(root, &["remove", ".", "--type", "probe", "--mask"]);
     assert!(!output.status.success());
     assert!(
         stderr(&output).contains("addresses 2 probes"),
@@ -1368,7 +1365,7 @@ fn test_a_name_that_addresses_more_than_one_probe_is_refused() -> TestResult {
 
     // The file name tells them apart, and taking the injected one away
     // uncovers the one the distribution ships under the same name
-    let injected = root.join("run/lib/detc/probes/system.d/20-disk");
+    let injected = root.join("run/lib/detc/probes.d/20-disk");
     program(
         &injected,
         "echo '{\"disk\": {\"root\": \"/dev/nvme0n1p1\"}}'\n",
@@ -1381,8 +1378,7 @@ fn test_a_name_that_addresses_more_than_one_probe_is_refused() -> TestResult {
         format!(
             "remove\tprobe\t{}\nremains\tprobe 20-disk\t{}\n",
             injected.display(),
-            root.join("usr/libexec/detc/probes/system.d/20-disk")
-                .display()
+            root.join("usr/libexec/detc/probes.d/20-disk").display()
         )
     );
 
@@ -1403,8 +1399,7 @@ fn test_a_name_that_addresses_more_than_one_probe_is_refused() -> TestResult {
             "remove\tprobe\t{}\nremains\tprobe {}\t{}\n",
             injected.display(),
             injected.display(),
-            root.join("usr/libexec/detc/probes/system.d/20-disk")
-                .display()
+            root.join("usr/libexec/detc/probes.d/20-disk").display()
         )
     );
 
@@ -2256,7 +2251,7 @@ fn test_doc_is_what_an_object_says_about_itself() -> TestResult {
     let root = tmp_root.path();
     fixture(root)?;
 
-    ship(root, "probes/system.d/host/10-host")?;
+    ship(root, "probes/host/10-host")?;
     ship(root, "templates/etc/modules-load.d/60-detc.conf")?;
     ship(root, "variables/system.d/10-core.yaml")?;
     noop(root, "hello")?;
@@ -2431,7 +2426,7 @@ fn test_the_noop_provider_says_that_an_installation_works() -> TestResult {
     let tmp_root = tempfile::tempdir()?;
     let root = tmp_root.path();
     fixture(root)?;
-    noop(root, "detc answers on {{ system.network.ip }}")?;
+    noop(root, "detc answers on {{ network.ip }}")?;
 
     // The provider the repository ships is found the way any other one is
     let output = detc(root, &["list", "--type", "provider"]);
@@ -2484,7 +2479,7 @@ fn test_the_noop_provider_says_that_an_installation_works() -> TestResult {
     // The state comes back out of the request as it went in, whatever is in it,
     // which is what makes the resource in sync rather than the message being
     // one the provider knows how to write
-    let awkward = r#"a quote \" a brace } and a {{ system.network.ip }}"#;
+    let awkward = r#"a quote \" a brace } and a {{ network.ip }}"#;
     fs::write(
         root.join("usr/share/detc/resources.d/noop/ping"),
         format!("message: \"{awkward}\"\n"),
@@ -3218,7 +3213,7 @@ fn test_a_machine_that_describes_itself_differently_is_told_apart() -> TestResul
     // A probe reports what the machine is, which is the one input of a run that
     // nobody edited and that the journal therefore does not hold
     program(
-        &root.join("usr/libexec/detc/probes/system.d/20-host"),
+        &root.join("usr/libexec/detc/probes.d/20-host"),
         "if [ -f \"$DETC_ROOT/renamed\" ]\n\
          then echo '{\"host\": {\"name\": \"after\"}}'\n\
          else echo '{\"host\": {\"name\": \"before\"}}'\n\
@@ -3226,7 +3221,7 @@ fn test_a_machine_that_describes_itself_differently_is_told_apart() -> TestResul
     )?;
     fs::write(
         root.join("usr/share/detc/templates.d/etc/hostname"),
-        "{{ system.host.name }}\n",
+        "{{ host.name }}\n",
     )?;
 
     detc(root, &["apply"]);
@@ -3384,7 +3379,7 @@ fn test_a_dry_run_does_not_write_a_variable() -> TestResult {
     assert!(!runtime.exists());
 
     // Querying the namespace writes nothing, so a dry run answers as usual
-    let output = detc(root, &["--dry-run", "var", "-k", "system.network.ip"]);
+    let output = detc(root, &["--dry-run", "var", "-k", "network.ip"]);
     assert_eq!(stdout(&output), "10.0.0.1\n");
 
     // With something to persist, the run names the drop-in it would write and
@@ -3520,7 +3515,7 @@ fn test_a_bundle_carries_a_system_to_a_machine_that_has_none() -> TestResult {
 
     // The probe the bundle carries is one the namespace ran
     assert_eq!(
-        stdout(&detc(root, &["var", "-k", "system.network.ip"])),
+        stdout(&detc(root, &["var", "-k", "network.ip"])),
         "10.0.0.1\n"
     );
 

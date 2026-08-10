@@ -2,7 +2,7 @@
 
 # How the machine boots, out of `/sys/firmware`.
 #
-# This fills `system.firmware` with two booleans: whether the machine booted
+# This fills `firmware` with two booleans: whether the machine booted
 # through EFI rather than a legacy BIOS, and whether Secure Boot is on.  Both
 # decide what a bootloader configuration may say, and the second decides whether
 # an unsigned kernel module can be loaded at all.

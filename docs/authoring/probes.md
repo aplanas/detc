@@ -4,8 +4,8 @@ Read [`AGENTS.md`](../../AGENTS.md) first: the prefix ladder, `DETC_ROOT`, and t
 for an executable apply here and are not repeated.
 
 A probe reports a fact about the machine into the namespace, so that a template, a resource or
-another asset can branch on it.  `probes/system.d/disk/10-lsblk` is the smallest one, and
-`probes/system.d/os/10-os-release` the one that shows every rule below at once.
+another asset can branch on it.  `probes/disk/10-lsblk` is the smallest one, and
+`probes/os/10-os-release` the one that shows every rule below at once.
 
 ## Contract
 
@@ -26,23 +26,21 @@ as the working directory (`src/exec.rs`).
 ## Where it goes, and what it is called
 
 ```
-<prefix>/detc/probes/<category>.d/<dirs…>/<NN-name>
+<prefix>/detc/probes.d/<dirs…>/<NN-name>
 ```
 
-`PROBE_CATEGORIES` is `["system"]` (`src/var.rs`), so today every probe lives under
-`probes/system.d/`.
-
-**The mount point is the category plus the containing directories.  The filename only
-orders.**
+**The mount point is the directories that contain the probe.  The filename only orders.**
 
 | file | mounted at |
 |---|---|
-| `probes/system.d/10-disks` | `system` |
-| `probes/system.d/net/10-ip` | `system.net` |
-| `probes/system.d/net/20-more` | `system.net`, merged over the above |
+| `probes/10-disks` | the root of the namespace, which `detc` prints as `.` |
+| `probes/net/10-ip` | `net` |
+| `probes/net/20-more` | `net`, merged over the above |
 
 So the directory is the decision: choose it as the name of the subtree you are filling, and
-name the file `10-<tool>` for what it shells out to.  `detc --root "$stage" var --probes`
+name the file `10-<tool>` for what it shells out to.  A probe put directly in `probes.d/`
+reports into the root of the namespace, which is allowed and is how a fact that belongs to no
+subtree is reported, but a directory is nearly always the better answer.  `detc --root "$stage" var --probes`
 prints exactly this mapping, and is the fastest way to check you got the directory right.
 
 The path *inside* the tree is the identity, so a node overrides your probe by dropping a file
@@ -58,15 +56,15 @@ empty string — a template asking for a value that is not there reaches for its
 which is what it would have to do with your invented one anyway, and a wrong value is worse
 than a missing one because nothing downstream can tell it apart from a real one.
 
-`probes/system.d/os/10-os-release` exits 0 and writes nothing on a tree with no `os-release`.
-`probes/system.d/pkg/10-manager` writes nothing when the tree has none of the three managers,
+`probes/os/10-os-release` exits 0 and writes nothing on a tree with no `os-release`.
+`probes/pkg/10-manager` writes nothing when the tree has none of the three managers,
 rather than naming one.
 
 The judgement is between "I learned that there is nothing" and "I could not learn anything":
 
-- `probes/system.d/virt/10-detect-virt` reports `none`, because *not virtualised* is something
+- `probes/virt/10-detect-virt` reports `none`, because *not virtualised* is something
   it found out.
-- `examples/probes/system.d/boot/10-bootctl` refuses to report an empty list, because `[]` is
+- `examples/probes/boot/10-bootctl` refuses to report an empty list, because `[]` is
   also what `bootctl` writes when the EFI system partition is there and could not be read, and
   the two cannot be told apart from inside the probe.
 
@@ -112,8 +110,8 @@ root and works out `live` once, which is the shape to copy when a probe has both
 
 ### Do not stutter
 
-The mount point already says where you are.  Under `system.boot`, the key is `entries`, giving
-`system.boot.entries` — not `bootentries`, and not `boot`.
+The mount point already says where you are.  Under `boot`, the key is `entries`, giving
+`boot.entries` — not `bootentries`, and not `boot`.
 
 ### A list is not a subtree
 
@@ -126,7 +124,7 @@ printf '{"entries": %s}\n' "$entries"
 
 Pick the key rather than letting the tool pick it.  `examples/.../10-snapper` mounts snapper's
 configurations under `configs` and not at the root, because a configuration can be called
-anything and `system.snapshot.root` would read as "the snapshot of the root".
+anything and `snapshot.root` would read as "the snapshot of the root".
 
 ### Pass the tool's shape through
 
@@ -167,7 +165,7 @@ is skipped.
 
 Say what subtree it fills and with what shape; give a worked `{{ … }}` that reads it; say why
 the shape is the one it is; say why it is in the core set or in `examples/`.  Compare
-`probes/system.d/net/10-ip` and `examples/probes/system.d/boot/10-bootctl`.
+`probes/net/10-ip` and `examples/probes/boot/10-bootctl`.
 
 The `{{ … }}` is the part readers copy.  Render it before you write it — see below.
 
@@ -179,7 +177,7 @@ own, or the tail of an installed one's.  So the first check needs nothing instal
 ```bash
 detc=./target/release/detc
 
-$detc var --probe probes/system.d/os/10-os-release
+$detc var --probe probes/os/10-os-release
 ```
 
 A probe that reports nothing prints `null`, which is the answer to look for on a tree it cannot
@@ -209,7 +207,7 @@ EOF
 
 mkdir -p "$stage/usr/share/detc/templates.d/tmp"
 cat > "$stage/usr/share/detc/templates.d/tmp/example" <<'EOF'
-{{ system.net.interfaces | selectattr('ifname', 'eq', 'eth0') | first
+{{ net.interfaces | selectattr('ifname', 'eq', 'eth0') | first
    | attr('addr_info') | selectattr('family', 'eq', 'inet')
    | map(attribute='local') | first }}
 EOF
@@ -223,7 +221,7 @@ name is required*, and shipped in a core probe's comment until somebody ran it.
 Exercise the silent paths, and check each one leaves the run healthy:
 
 ```bash
-env -i PATH=/nonexistent DETC_ROOT=/ probes/system.d/net/10-ip; echo "exit $?"
+env -i PATH=/nonexistent DETC_ROOT=/ probes/net/10-ip; echo "exit $?"
 $detc --root "$stage" check -t probe          # still ok, value simply absent
 ```
 
@@ -234,7 +232,7 @@ stub=$(mktemp -d)
 printf '#!/bin/sh\nprintf %%s "$FIXTURE"\n' > "$stub/ip"
 chmod 755 "$stub/ip"
 FIXTURE='[{"ifname":"eth0","addr_info":[]}]' PATH="$stub:$PATH" \
-    DETC_ROOT=/ probes/system.d/net/10-ip
+    DETC_ROOT=/ probes/net/10-ip
 ```
 
 And finally `shellcheck -s sh <the probe>`.

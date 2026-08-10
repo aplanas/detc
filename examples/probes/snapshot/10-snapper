@@ -2,19 +2,19 @@
 
 # What the tree can be rolled back to, as `snapper` reports it.
 #
-# This fills `system.snapshot.configs` with what `snapper --jsonout list`
+# This fills `snapshot.configs` with what `snapper --jsonout list`
 # writes: one key per snapper configuration -- `root` on a stock install --
 # holding the list of that configuration's snapshots, each with its number, its
 # type, its description, and whether it is the default or the active one.  It is
 # passed through unchanged, for the same reason the interfaces and the block
 # devices of the core set are: the shape belongs to the tool.
 #
-#     {{ system.snapshot.configs.root | selectattr('active', 'eq', true)
+#     {{ snapshot.configs.root | selectattr('active', 'eq', true)
 #        | map(attribute='number') | first }}
 #
 # The only thing added is the top, which `snapper` does not write: the
 # configurations are at the root of its document.  Mounting them there would put
-# `system.snapshot.root` in the namespace, which reads as the snapshot of the
+# `snapshot.root` in the namespace, which reads as the snapshot of the
 # root and is not what it is -- and a configuration can be called anything, so
 # it would be names somebody else chose sitting where a key of this subtree
 # goes.

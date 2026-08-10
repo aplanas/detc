@@ -60,7 +60,7 @@ Requires:       util-linux
 # dependency because a node whose packages are baked into the image declares no
 # `pkg` resource and never calls it
 Recommends:     zypper
-# `probes/system.d/net/10-ip` and `probes/system.d/firmware/10-firmware`.
+# `probes/net/10-ip` and `probes/firmware/10-firmware`.
 # Weak for the same reason: without them the namespace is smaller, and a
 # template that reads nothing from them is unaffected
 Recommends:     iproute2
@@ -194,7 +194,7 @@ install -d %{buildroot}%{_localstatedir}/lib/%{name}
 %{_mandir}/man8/detcd.8%{?ext_man}
 %{_mandir}/man8/detctl.8%{?ext_man}
 %dir %{detc_libexecdir}
-%{detc_libexecdir}/probes
+%{detc_libexecdir}/probes.d
 %{detc_libexecdir}/providers.d
 %dir %{_datadir}/%{name}
 %{_datadir}/%{name}/templates.d

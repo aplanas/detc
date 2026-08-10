@@ -122,7 +122,7 @@ install:
 	install -Dm755 $(TARGET) $(BINDIR)/detc
 	ln -sf detc $(BINDIR)/detcd
 	ln -sf detc $(BINDIR)/detctl
-	$(call install-tree,probes,$(LIBEXECDIR)/probes,755)
+	$(call install-tree,probes,$(LIBEXECDIR)/probes.d,755)
 	$(call install-tree,providers,$(LIBEXECDIR)/providers.d,755)
 	$(call install-tree,templates,$(DATADIR)/templates.d,644)
 	$(call install-tree,resources,$(DATADIR)/resources.d,644)
@@ -147,7 +147,7 @@ install:
 # something in survives instead of being taken along.
 uninstall:
 	rm -f $(BINDIR)/detc $(BINDIR)/detcd $(BINDIR)/detctl
-	$(call uninstall-tree,probes,$(LIBEXECDIR)/probes)
+	$(call uninstall-tree,probes,$(LIBEXECDIR)/probes.d)
 	$(call uninstall-tree,providers,$(LIBEXECDIR)/providers.d)
 	$(call uninstall-tree,templates,$(DATADIR)/templates.d)
 	$(call uninstall-tree,resources,$(DATADIR)/resources.d)

@@ -333,7 +333,7 @@ mod tests {
             entry("bundle.yaml", 0o644, ""),
             entry("templates.d/etc/hosts", 0o644, &"x".repeat(BLOCK - 1)),
             entry("providers.d/unit", 0o755, &"y".repeat(BLOCK)),
-            entry("probes/system.d/10-net", 0o755, &"z".repeat(BLOCK + 1)),
+            entry("probes.d/10-net", 0o755, &"z".repeat(BLOCK + 1)),
         ];
 
         assert_eq!(read(&write(&entries)?)?, entries);

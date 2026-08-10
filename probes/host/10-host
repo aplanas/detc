@@ -2,7 +2,7 @@
 
 # What the tree calls itself, and what it runs on.
 #
-# This fills `system.host`.  Three of the four keys come out of files in the
+# This fills `host`.  Three of the four keys come out of files in the
 # tree, so they describe an image being built as well as a machine that is
 # running.  The fourth, the architecture, has nowhere in the tree to come from:
 # it is asked of the machine, and therefore only reported when the tree is the

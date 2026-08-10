@@ -1598,8 +1598,8 @@ mod tests {
                 error: None,
             },
             Record::Probe {
-                mount: "system".to_string(),
-                path: "/usr/lib/detc/probes.d/system".to_string(),
+                mount: "net".to_string(),
+                path: "/usr/lib/detc/probes.d/net/10-ip".to_string(),
             },
             Record::Run {
                 id: 1,

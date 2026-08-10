@@ -142,7 +142,7 @@ install() {
     for tree in /usr/share/detc/templates.d \
                 /usr/share/detc/resources.d \
                 /usr/share/detc/variables \
-                /usr/libexec/detc/probes \
+                /usr/libexec/detc/probes.d \
                 /usr/libexec/detc/providers.d; do
         detc_tree "$tree"
     done

@@ -20,14 +20,14 @@ use common::{TestResult, detc, detc_with_env, detc_with_path, program, ship, std
 
 /// The eight probes of the core set, and the subtree each of them fills.
 const PROBES: [(&str, &str); 8] = [
-    ("probes/system.d/os/10-os-release", "system.os"),
-    ("probes/system.d/host/10-host", "system.host"),
-    ("probes/system.d/net/10-ip", "system.net"),
-    ("probes/system.d/hardware/10-proc", "system.hardware"),
-    ("probes/system.d/disk/10-lsblk", "system.disk"),
-    ("probes/system.d/virt/10-detect-virt", "system.virt"),
-    ("probes/system.d/firmware/10-firmware", "system.firmware"),
-    ("probes/system.d/pkg/10-manager", "system.pkg"),
+    ("probes/os/10-os-release", "os"),
+    ("probes/host/10-host", "host"),
+    ("probes/net/10-ip", "net"),
+    ("probes/hardware/10-proc", "hardware"),
+    ("probes/disk/10-lsblk", "disk"),
+    ("probes/virt/10-detect-virt", "virt"),
+    ("probes/firmware/10-firmware", "firmware"),
+    ("probes/pkg/10-manager", "pkg"),
 ];
 
 /// The whole core set, in `root`: everything the `Makefile` installs.
@@ -125,7 +125,7 @@ fn test_a_probe_reads_the_tree_it_was_pointed_at() -> TestResult {
          VERSION_ID=\"20260731\"\nPRETTY_NAME=\"A \\\"quoted\\\" name\"\n",
     )?;
 
-    let output = detc(root, &["var", "-k", "system.os"]);
+    let output = detc(root, &["var", "-k", "os"]);
     assert!(output.status.success(), "{}", stderr(&output));
     let reported = stdout(&output);
     assert!(reported.contains("id: opensuse-tumbleweed"), "{reported}");
@@ -180,7 +180,7 @@ fn test_a_probe_that_shells_out_only_answers_for_the_running_system() -> TestRes
     let tmp_root = tempfile::tempdir()?;
     let root = tmp_root.path();
 
-    ship(root, "probes/system.d/virt/10-detect-virt")?;
+    ship(root, "probes/virt/10-detect-virt")?;
 
     // With a root of its own it says nothing, whatever the stub would answer
     let bin = stubs(root, &[("systemd-detect-virt", "echo kvm\n")])?;
@@ -199,7 +199,7 @@ fn test_a_probe_that_shells_out_only_answers_for_the_running_system() -> TestRes
     let plain = root.join("plain-bin");
     program(&plain.join("systemd-detect-virt"), "echo kvm\n")?;
 
-    let probe = root.join("usr/libexec/detc/probes/system.d/virt/10-detect-virt");
+    let probe = root.join("usr/libexec/detc/probes.d/virt/10-detect-virt");
     let output = std::process::Command::new(probe)
         .env("DETC_ROOT", "/")
         .env("PATH", &plain)
@@ -806,7 +806,7 @@ fn test_a_package_is_installed_and_a_lie_is_reported() -> TestResult {
     let tmp_root = tempfile::tempdir()?;
     let root = tmp_root.path();
     ship(root, "providers/pkg")?;
-    ship(root, "probes/system.d/pkg/10-manager")?;
+    ship(root, "probes/pkg/10-manager")?;
     os_release(root, "ID=opensuse-tumbleweed\n")?;
 
     // The provider picks its backend by looking for the program inside the
@@ -1029,7 +1029,7 @@ fn test_the_one_resource_a_fresh_node_can_apply_does_not_need_a_probe() -> TestR
     assert_eq!(stdout(&output), "ok\tnoop\tping\n");
 
     // And with one, it says what the node is
-    ship(root, "probes/system.d/os/10-os-release")?;
+    ship(root, "probes/os/10-os-release")?;
     os_release(
         root,
         "ID=opensuse-tumbleweed\nPRETTY_NAME=\"openSUSE Tumbleweed\"\n",

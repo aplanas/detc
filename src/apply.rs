@@ -1161,7 +1161,7 @@ esac
 
         // A probe has to be executable wherever it lands, and an install under
         // a umask of 077 would otherwise write it unreadable
-        let probe = root.join("run/lib/detc/probes/system.d/10-net");
+        let probe = root.join("run/lib/detc/probes.d/10-net");
         write_atomically(&probe, b"#!/bin/sh\n", Some(0o755))?;
         assert_eq!(fs::metadata(&probe)?.permissions().mode() & 0o7777, 0o755);
 

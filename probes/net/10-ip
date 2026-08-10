@@ -2,12 +2,12 @@
 
 # The addresses the machine answers on, as `ip` reports them.
 #
-# This fills `system.net.interfaces` with what `ip -j addr show` writes, which
+# This fills `net.interfaces` with what `ip -j addr show` writes, which
 # is a list of one object per interface, each with its name, its flags and its
 # `addr_info`.  It is passed through unchanged: the shape is `iproute2`'s and a
 # probe that flattened it would be inventing a second one.
 #
-#     {{ system.net.interfaces
+#     {{ net.interfaces
 #        | selectattr('ifname', 'eq', 'eth0') | first
 #        | attr('addr_info') | selectattr('family', 'eq', 'inet')
 #        | map(attribute='local') | first }}

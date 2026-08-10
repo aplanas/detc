@@ -2,7 +2,7 @@
 
 # Whether the machine is a machine.
 #
-# This fills `system.virt` with two strings, `container` and `vm`, each of them
+# This fills `virt` with two strings, `container` and `vm`, each of them
 # what `systemd-detect-virt` calls the technology or `none`.  They are separate
 # because they are not exclusive: a container inside a virtual machine is both,
 # and configuration cares about the difference -- a container has no kernel of

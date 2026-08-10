@@ -116,7 +116,7 @@ if [ "$seed" = yes ]; then
         rm -rf "$root/run/detc/$tree"
         cp -a "$share/$tree" "$root/run/detc/$tree"
     done
-    for tree in probes providers.d; do
+    for tree in probes.d providers.d; do
         [ -d "$libexec/$tree" ] || continue
         rm -rf "$root/run/lib/detc/$tree"
         cp -a "$libexec/$tree" "$root/run/lib/detc/$tree"

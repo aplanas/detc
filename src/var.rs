@@ -17,9 +17,20 @@ use crate::{Result, cfs, exec};
 /// probe that the admin installed, as a probe is code that runs as root.
 pub const PROBE_PREFIXES: &[&str] = &["usr/libexec", "run/lib", "var/lib"];
 
-/// Probe categories.  Each category is searched in `detc/probes/<category>.d`,
-/// and populates the subtree of the namespace named after it.
-pub const PROBE_CATEGORIES: &[&str] = &["system"];
+/// Name of the probes tree, searched in the prefixes of the executables.
+///
+/// The tree replicates the namespace, the way the templates tree replicates the
+/// root file system: the directories that hold a probe are the subtree that it
+/// reports at, so `probes.d/net/10-ip` populates `net`.  Nothing here says what
+/// those subtrees are called, so a probe reports wherever it is put.
+pub const PROBES_NAME: &str = "detc/probes";
+
+/// How the mount point of a probe that sits directly in the tree is written.
+///
+/// Such a probe reports at the root of the namespace, so its mount point has no
+/// components and no name of its own.  This stands in for it wherever one is
+/// printed, and it addresses the probe like any other mount point does.
+pub const ROOT_MOUNT: &str = ".";
 
 /// Name of the variable document that the admin owns, which is the one that
 /// `detc var` writes and the one tree of the namespace that a bundle cannot
@@ -40,10 +51,27 @@ pub const VARIABLE_NAMES: &[&str] = &["detc/variables/system", USER_VARIABLES_NA
 /// one of these because the file is written in one of these.
 pub const NAME_EXTENSIONS: &[&str] = &["yaml", "yml", "json", "toml"];
 
-/// Name of the probes tree of a category, searched in the prefixes of the
-/// executables.
-pub fn probes_name(category: &str) -> String {
-    format!("detc/probes/{category}")
+/// The mount point of a probe, as the components of the namespace path that it
+/// reports at.
+///
+/// It is the directories that hold the probe inside the tree, and nothing else:
+/// the file name is an ordering and identity marker, not part of the mount
+/// point, and a probe directly in the tree has no components at all and reports
+/// at the root.
+fn mount_of(key: &Path) -> Vec<String> {
+    key.parent()
+        .into_iter()
+        .flat_map(Path::components)
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// How a mount point is written for whoever is reading it.
+fn mount_name(mount: &[String]) -> String {
+    match mount.is_empty() {
+        true => ROOT_MOUNT.to_string(),
+        false => mount.join("."),
+    }
 }
 
 /// Drop-in directory where the variables set from the command line are kept
@@ -175,7 +203,7 @@ impl fmt::Display for Merge {
 /// It is a tree of values, collected from the probes and the documents that the
 /// system provides, and used as the context that instantiates the
 /// [templates](crate::template).  Its values are addressed with a dotted key,
-/// like `system.network.mtu`, which is also how a template names them.
+/// like `network.mtu`, which is also how a template names them.
 pub struct Variables {
     value: serde_json::Value,
 }
@@ -275,43 +303,29 @@ impl Variables {
     pub fn probes(root: impl AsRef<Path>) -> Result<Vec<(String, PathBuf)>> {
         Ok(Self::probe_entries(root.as_ref())?
             .into_iter()
-            .map(|(mount, path)| (mount.join("."), path))
+            .map(|(mount, path)| (mount_name(&mount), path))
             .collect())
     }
 
-    /// Resolve the probes of every category, as pairs of namespace mount point
+    /// Resolve the probes of the system, as pairs of namespace mount point
     /// components and probe path.
-    ///
-    /// The mount point of a probe is the category, followed by the directories
-    /// that contain it inside `<category>.d`.  The file name is only an
-    /// ordering and identity marker, and is not part of the mount point.
     fn probe_entries(root: &Path) -> Result<Vec<(Vec<String>, PathBuf)>> {
-        let mut probes = Vec::new();
+        let cfs = cfs::UAPICFS::with_root(PROBES_NAME, root)
+            .prefixes(PROBE_PREFIXES)
+            .recursive(true);
 
-        for category in PROBE_CATEGORIES {
-            let cfs = cfs::UAPICFS::with_root(&probes_name(category), root)
-                .prefixes(PROBE_PREFIXES)
-                .recursive(true);
-
-            for (key, path) in cfs.entries()? {
-                if !exec::is_executable(&path) {
+        Ok(cfs
+            .entries()?
+            .into_iter()
+            // A file without the exec bit is documentation, not a probe
+            .filter(|(_, path)| {
+                exec::is_executable(path) || {
                     debug!("Skipping non executable probe {}", path.display());
-                    continue;
+                    false
                 }
-
-                let mut mount = vec![(*category).to_string()];
-                mount.extend(
-                    key.parent()
-                        .into_iter()
-                        .flat_map(Path::components)
-                        .map(|c| c.as_os_str().to_string_lossy().into_owned()),
-                );
-
-                probes.push((mount, path));
-            }
-        }
-
-        Ok(probes)
+            })
+            .map(|(key, path)| (mount_of(&key), path))
+            .collect())
     }
 
     /// The probes that a zero byte file takes out of the ladder, as pairs of
@@ -326,28 +340,15 @@ impl Variables {
     /// the same one, exactly as it does not for [`Self::probes`], and the file
     /// that comes back beside it is what tells them apart.
     pub fn masked_probes(root: impl AsRef<Path>) -> Result<Vec<(String, PathBuf)>> {
-        let root = root.as_ref();
-        let mut masked = Vec::new();
+        let cfs = cfs::UAPICFS::with_root(PROBES_NAME, root.as_ref())
+            .prefixes(PROBE_PREFIXES)
+            .recursive(true);
 
-        for category in PROBE_CATEGORIES {
-            let cfs = cfs::UAPICFS::with_root(&probes_name(category), root)
-                .prefixes(PROBE_PREFIXES)
-                .recursive(true);
-
-            for (key, mask) in cfs.masked()? {
-                let mut mount = vec![(*category).to_string()];
-                mount.extend(
-                    key.parent()
-                        .into_iter()
-                        .flat_map(Path::components)
-                        .map(|c| c.as_os_str().to_string_lossy().into_owned()),
-                );
-
-                masked.push((mount.join("."), mask));
-            }
-        }
-
-        Ok(masked)
+        Ok(cfs
+            .masked()?
+            .into_iter()
+            .map(|(key, mask)| (mount_name(&mount_of(&key)), mask))
+            .collect())
     }
 
     /// Run every probe and merge its output in the subtree of the namespace
@@ -548,7 +549,7 @@ impl Variables {
         Self::replace_value(&mut self.value, var.value);
     }
 
-    /// Get the value addressed by a dotted key, like `system.network.mtu`.
+    /// Get the value addressed by a dotted key, like `network.mtu`.
     ///
     /// A component that is a number addresses an element of a list, so that
     /// `dns.nameservers.0` reads the first one.  It is only an index when what
@@ -645,7 +646,7 @@ impl Variables {
     }
 
     /// Set the variables described by a YAML mapping, where every key is a
-    /// dotted key of the namespace, like `system.network.mtu: 9000`.
+    /// dotted key of the namespace, like `network.mtu: 9000`.
     pub fn set_kv(&mut self, kv: &str) -> Result<()> {
         for (key, value) in Self::kv_entries(kv)? {
             self.set_value(&key, &value)?;
@@ -1205,21 +1206,21 @@ mod tests {
         let mut var = Variables::new();
 
         // The objects that are missing are created along the way
-        var.set_value("system.network.mtu", &Value::from(9000))?;
-        assert_eq!(var.get_yaml("system.network.mtu")?.trim(), "9000");
+        var.set_value("network.mtu", &Value::from(9000))?;
+        assert_eq!(var.get_yaml("network.mtu")?.trim(), "9000");
 
         // A key without dots is set in the namespace itself
         var.set_value("hostname", &Value::from("test"))?;
         assert_eq!(var.get_yaml("hostname")?.trim(), "test");
 
         // An intermediate key addresses the whole subtree
-        assert_eq!(var.get_yaml("system.network")?.trim(), "mtu: 9000");
+        assert_eq!(var.get_yaml("network")?.trim(), "mtu: 9000");
 
         // Setting a value that is there replaces it
-        var.set_value("system.network.mtu", &Value::from(1500))?;
-        assert_eq!(var.get_yaml("system.network.mtu")?.trim(), "1500");
+        var.set_value("network.mtu", &Value::from(1500))?;
+        assert_eq!(var.get_yaml("network.mtu")?.trim(), "1500");
 
-        assert!(var.get_value("system.network.gw").is_err());
+        assert!(var.get_value("network.gw").is_err());
         assert!(var.get_value("nope").is_err());
 
         // A scalar is not a subtree, so it cannot hold a value or be navigated
@@ -1265,7 +1266,7 @@ mod tests {
         // Wherever the number sits, and not only at the end
         assert!(
             Variables::new()
-                .set_value("system.net.interfaces.0.local", &Value::from("10.0.0.1"))
+                .set_value("net.interfaces.0.local", &Value::from("10.0.0.1"))
                 .is_err()
         );
 
@@ -1282,9 +1283,9 @@ mod tests {
         let mut var = Variables::new();
 
         // A value that is a document is deserialized
-        var.set_json("system.network.mtu", "9000")?;
+        var.set_json("network.mtu", "9000")?;
         var.set_json("dns.nameservers", r#"["1.1.1.1"]"#)?;
-        assert_eq!(var.get_value("system.network.mtu")?, &Value::from(9000));
+        assert_eq!(var.get_value("network.mtu")?, &Value::from(9000));
         assert_eq!(var.get_yaml("dns.nameservers")?.trim(), "- 1.1.1.1");
 
         // And one that is not is taken as a plain string, so that it does not
@@ -1293,9 +1294,9 @@ mod tests {
         assert_eq!(var.get_value("hostname")?, &Value::from("test"));
 
         // A mapping sets several keys at once
-        var.set_kv("dns.domain: lan\nsystem.network.mtu: 1500\n")?;
+        var.set_kv("dns.domain: lan\nnetwork.mtu: 1500\n")?;
         assert_eq!(var.get_value("dns.domain")?, &Value::from("lan"));
-        assert_eq!(var.get_value("system.network.mtu")?, &Value::from(1500));
+        assert_eq!(var.get_value("network.mtu")?, &Value::from(1500));
 
         // But a document that is not a mapping does not name any key
         assert!(var.set_kv("- lan\n").is_err());
@@ -1308,14 +1309,14 @@ mod tests {
         let tmp_root = tempfile::tempdir()?;
         let root = tmp_root.path();
 
-        let libexec = root.join("usr/libexec/detc/probes/system.d");
-        let var_lib = root.join("var/lib/detc/probes/system.d");
-        let run_lib = root.join("run/lib/detc/probes/system.d");
+        let libexec = root.join("usr/libexec/detc/probes.d");
+        let var_lib = root.join("var/lib/detc/probes.d");
+        let run_lib = root.join("run/lib/detc/probes.d");
 
-        // Top level probe, mounted on the category itself
+        // Top level probe, mounted on the root of the namespace
         probe(&libexec.join("10-disks"), r#"{"disks": ["sda"]}"#)?;
 
-        // Subdirectory probes, mounted on system.network
+        // Subdirectory probes, mounted on network
         probe(
             &libexec.join("network/10-ip"),
             r#"{"ip": "10.0.0.1", "mtu": 1500}"#,
@@ -1347,22 +1348,22 @@ mod tests {
         let listed = Variables::probes(root)?;
         assert_eq!(
             listed.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(),
-            ["system", "system", "system.network", "system.network"]
+            [ROOT_MOUNT, ROOT_MOUNT, "network", "network"]
         );
 
         let var = Variables::from_system(root)?;
 
         // The file name orders the probes, but is not part of the mount point
-        assert_eq!(var.get_yaml("system.disks")?.trim(), "- sda");
-        assert_eq!(var.get_yaml("system.network.ip")?.trim(), "10.0.0.2");
-        assert_eq!(var.get_yaml("system.network.gw")?.trim(), "10.0.0.254");
+        assert_eq!(var.get_yaml("disks")?.trim(), "- sda");
+        assert_eq!(var.get_yaml("network.ip")?.trim(), "10.0.0.2");
+        assert_eq!(var.get_yaml("network.gw")?.trim(), "10.0.0.254");
 
         // The override replaces the whole vendor probe, not only the keys that
         // it redefines
-        assert!(var.get_value("system.network.mtu").is_err());
+        assert!(var.get_value("network.mtu").is_err());
 
-        assert!(var.get_value("system.legacy").is_err());
-        assert!(var.get_value("system.readme").is_err());
+        assert!(var.get_value("legacy").is_err());
+        assert!(var.get_value("readme").is_err());
 
         Ok(())
     }
@@ -1373,22 +1374,19 @@ mod tests {
         let root = tmp_root.path();
 
         probe(
-            &root.join("usr/libexec/detc/probes/system.d/network/10-ip"),
+            &root.join("usr/libexec/detc/probes.d/network/10-ip"),
             r#"{"mtu": 1500, "ip": "10.0.0.1"}"#,
         )?;
 
         let dropin = root.join("etc/detc/variables/user.d");
         fs::create_dir_all(&dropin)?;
-        fs::write(
-            dropin.join("50-mtu.json"),
-            r#"{"system": {"network": {"mtu": 9000}}}"#,
-        )?;
+        fs::write(dropin.join("50-mtu.json"), r#"{"network": {"mtu": 9000}}"#)?;
 
         let var = Variables::from_system(root)?;
 
         // The admin pins one value, and the rest of the probe survives
-        assert_eq!(var.get_yaml("system.network.mtu")?.trim(), "9000");
-        assert_eq!(var.get_yaml("system.network.ip")?.trim(), "10.0.0.1");
+        assert_eq!(var.get_yaml("network.mtu")?.trim(), "9000");
+        assert_eq!(var.get_yaml("network.ip")?.trim(), "10.0.0.1");
 
         Ok(())
     }
@@ -1478,18 +1476,18 @@ mod tests {
         let tmp_root = tempfile::tempdir()?;
         let root = tmp_root.path();
 
-        let network = root.join("usr/libexec/detc/probes/system.d/network");
+        let network = root.join("usr/libexec/detc/probes.d/network");
         probe(&network.join("10-ip"), r#"{"addresses": ["10.0.0.1"]}"#)?;
         probe(
             &network.join("20-vpn"),
             r#"{"_merge": "full", "addresses": ["10.8.0.1"]}"#,
         )?;
 
-        // Both probes are mounted on system.network, and the second one asks
+        // Both probes are mounted on network, and the second one asks
         // to be added to the addresses that the first one reports
         let var = Variables::from_system(root)?;
         assert_eq!(
-            var.get_yaml("system.network.addresses")?.trim(),
+            var.get_yaml("network.addresses")?.trim(),
             "- 10.0.0.1\n- 10.8.0.1"
         );
 
@@ -1744,7 +1742,7 @@ mod tests {
         let root = tmp_root.path();
 
         // Written by hand, as this probe interpolates instead of echoing
-        let path = root.join("usr/libexec/detc/probes/system.d/10-root");
+        let path = root.join("usr/libexec/detc/probes.d/10-root");
         fs::create_dir_all(path.parent().expect("probe path has a parent"))?;
         fs::write(
             &path,
@@ -1754,11 +1752,8 @@ mod tests {
 
         let var = Variables::from_system(root)?;
 
-        assert_eq!(
-            var.get_yaml("system.root")?.trim(),
-            root.display().to_string()
-        );
-        assert_eq!(var.get_yaml("system.cwd")?.trim(), "system.d");
+        assert_eq!(var.get_yaml("root")?.trim(), root.display().to_string());
+        assert_eq!(var.get_yaml("cwd")?.trim(), "probes.d");
 
         Ok(())
     }

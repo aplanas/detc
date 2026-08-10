@@ -2,7 +2,7 @@
 
 # How much machine there is, out of `/proc`.
 #
-# This fills `system.hardware` with the two numbers that configuration is
+# This fills `hardware` with the two numbers that configuration is
 # actually written against: how many processors to size a worker pool to, and
 # how much memory to divide up.  Everything else `/proc` knows is a report and
 # not a knob.

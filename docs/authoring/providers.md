@@ -216,7 +216,7 @@ the run as a first install into an empty tree.
 **Look for the tool inside the tree, not on the machine asking.**  `providers/pkg` picks its
 backend with `[ -x "$root/usr/bin/zypper" ]`, so a tree that holds no distribution is reported
 as having no manager instead of being managed with the tools of the machine looking at it.
-This is the same rule `probes/system.d/pkg/10-manager` follows, which is why the two agree.
+This is the same rule `probes/pkg/10-manager` follows, which is why the two agree.
 
 **Refuse rather than answer wrongly** where the root makes a question meaningless.  Nothing is
 running inside a tree, so `providers/unit` refuses a declaration that asks about `active` in a

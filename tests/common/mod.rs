@@ -25,7 +25,7 @@ pub fn program(path: &Path, body: &str) -> TestResult {
 /// of which cannot be instantiated.
 pub fn fixture(root: &Path) -> TestResult {
     program(
-        &root.join("usr/libexec/detc/probes/system.d/10-net"),
+        &root.join("usr/libexec/detc/probes.d/10-net"),
         "echo '{\"network\": {\"ip\": \"10.0.0.1\"}}'\n",
     )?;
 
@@ -163,7 +163,7 @@ pub fn noop(root: &Path, message: &str) -> TestResult {
 /// read and goes under `share` at 0644.
 pub fn ship(root: &Path, source: &str) -> TestResult {
     const TREES: [(&str, &str, u32); 5] = [
-        ("probes", "usr/libexec/detc/probes", 0o755),
+        ("probes", "usr/libexec/detc/probes.d", 0o755),
         ("providers", "usr/libexec/detc/providers.d", 0o755),
         ("templates", "usr/share/detc/templates.d", 0o644),
         ("resources", "usr/share/detc/resources.d", 0o644),

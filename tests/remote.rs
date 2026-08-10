@@ -93,7 +93,7 @@ fn test_a_remote_run_says_what_a_local_one_says() -> TestResult {
         &["doc", "--type", "provider", "noop"],
         &["schema", "noop"],
         &["var"],
-        &["var", "-k", "system.network.ip"],
+        &["var", "-k", "network.ip"],
         &[
             "var",
             "-k",
@@ -307,7 +307,7 @@ fn test_the_noop_resource_answers_across_the_connection() -> TestResult {
     let tmp_root = tempfile::tempdir()?;
     let root = tmp_root.path();
     fixture(root)?;
-    noop(root, "detc answers on {{ system.network.ip }}")?;
+    noop(root, "detc answers on {{ network.ip }}")?;
 
     // The provider runs where the system is, so what an `ok` says here is that
     // everything between the two sides works as well: the call crossed, the
@@ -659,7 +659,7 @@ fn test_a_service_answers_on_the_socket_it_was_handed() -> TestResult {
         .arg("call")
         .arg(format!("exec:{}", service.display()))
         .arg("org.detc.Manager.GetVariables")
-        .arg(r#"{"key":["system.network.ip"]}"#)
+        .arg(r#"{"key":["network.ip"]}"#)
         .output()?;
 
     assert!(output.status.success(), "{}", stderr(&output));

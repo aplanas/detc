@@ -17,11 +17,11 @@
 # what keep it that way: a node with no `os` probe still gets its `ok`, and
 # finds out that a probe is missing from `detc check --type probe`, which is
 # the question that asks it.  Undefined is an error while a template is being
-# rendered, so `system.os.pretty_name` on a node without the probe would fail
+# rendered, so `os.pretty_name` on a node without the probe would fail
 # here and the failure would read as though detc itself were broken.
 #
 # The defaults have to be taken one level at a time.  A default on the whole
-# chain does not rescue it: `system` being absent makes `system.os` the error,
+# chain does not rescue it: `system` being absent makes `os` the error,
 # before anything downstream is reached.
 {% set os = (system | default({})).os | default({}) -%}
 message: "detc answers on {{ os.pretty_name | default('an unknown system') }}"

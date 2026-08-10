@@ -2,11 +2,11 @@
 
 # The block devices of the machine, as `lsblk` reports them.
 #
-# This fills `system.disk.devices` with what `lsblk -J` writes: a tree of
+# This fills `disk.devices` with what `lsblk -J` writes: a tree of
 # devices, each with its partitions under `children`.  It is passed through
 # unchanged for the same reason the interfaces are -- the shape belongs to the
 # tool.  Only the name of the top key is changed, from `blockdevices` to
-# `devices`, so that the namespace does not say `system.disk.blockdevices`.
+# `devices`, so that the namespace does not say `disk.blockdevices`.
 #
 # Devices belong to the running machine, so a root that is not `/` is reported
 # on not at all.

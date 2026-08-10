@@ -33,7 +33,7 @@ applied  a3f21b0  1 updated
 | Object | What it is | Where it lives |
 | --- | --- | --- |
 | Variable | A document (JSON, YAML or TOML) merged into the namespace | `<prefix>/detc/variables/{system,user}.d/` |
-| Probe | An executable that writes a document to its standard output | `<prefix>/detc/probes/<category>.d/` |
+| Probe | An executable that writes a document to its standard output | `<prefix>/detc/probes.d/` |
 | Template | A [MiniJinja](https://docs.rs/minijinja/) file that instantiates a configuration file | `<prefix>/detc/templates.d/` |
 | Resource | A document that declares a state which is not a file | `<prefix>/detc/resources.d/<type>/<name>` |
 | Provider | An executable that implements one type of resource | `<prefix>/detc/providers.d/<type>` |
@@ -134,18 +134,19 @@ standard output:
 bootctl list --json=short
 ```
 
-It is mounted in the subtree of the namespace named after its category and the
-directories that contain it, so
-[`examples/probes/system.d/boot/10-bootctl`](examples/probes/system.d/boot/10-bootctl),
-installed as `/usr/libexec/detc/probes/system.d/boot/10-bootctl`, populates
-`system.boot`.  The file name only orders the probe, it is not part of the mount
+It is mounted in the subtree of the namespace named after the directories that
+contain it, so
+[`examples/probes/boot/10-bootctl`](examples/probes/boot/10-bootctl),
+installed as `/usr/libexec/detc/probes.d/boot/10-bootctl`, populates
+`boot`.  A probe that sits directly in `probes.d/` reports into the root of the
+namespace, which `detc` prints as `.`.  The file name only orders the probe, it is not part of the mount
 point.  [The core set](#the-core-set) ships eight of them, and what they promise
 is written down there.
 
 Two more are in [`examples/probes/`](examples/probes) rather than in the core
 set, because each shells out to a tool that is not on every distribution:
-`boot/10-bootctl` fills `system.boot.entries` with the boot entries `bootctl`
-lists, and `snapshot/10-snapper` fills `system.snapshot.configs` with the
+`boot/10-bootctl` fills `boot.entries` with the boot entries `bootctl`
+lists, and `snapshot/10-snapper` fills `snapshot.configs` with the
 snapshots `snapper` does.  Both are [not installed](#build) — copy them into a
 prefix to use them.
 
@@ -503,7 +504,7 @@ it executable, and declare one resource of it:
 
 ```yaml
 # /etc/detc/resources.d/noop/ping
-message: "detc answers on {{ system.os.pretty_name }}"
+message: "detc answers on {{ os.pretty_name }}"
 ```
 
 ```console
@@ -552,15 +553,15 @@ that built it.
 
 | Subtree | Keys | From |
 | --- | --- | --- |
-| `system.os` | `id`, `id_like`, `version_id`, `pretty_name` | `etc/os-release`, then `usr/lib/os-release` |
-| `system.host` | `hostname`, `machine_id` | `etc/hostname`, `etc/machine-id` |
-| `system.host` | `kernel`, `architecture` | `proc`, `uname` — the machine's |
-| `system.hardware` | `cpus`, `memory_kb` | `proc/cpuinfo`, `proc/meminfo` — the machine's |
-| `system.firmware` | `efi`, `secure_boot` | `sys/firmware/efi` — the machine's |
-| `system.pkg` | `manager` | which of `zypper`, `dnf`, `apt-get` is in the tree |
-| `system.net` | `interfaces` | `ip -j addr show` — the machine's |
-| `system.disk` | `devices` | `lsblk -J` — the machine's |
-| `system.virt` | `container`, `vm` | `systemd-detect-virt` — the machine's |
+| `os` | `id`, `id_like`, `version_id`, `pretty_name` | `etc/os-release`, then `usr/lib/os-release` |
+| `host` | `hostname`, `machine_id` | `etc/hostname`, `etc/machine-id` |
+| `host` | `kernel`, `architecture` | `proc`, `uname` — the machine's |
+| `hardware` | `cpus`, `memory_kb` | `proc/cpuinfo`, `proc/meminfo` — the machine's |
+| `firmware` | `efi`, `secure_boot` | `sys/firmware/efi` — the machine's |
+| `pkg` | `manager` | which of `zypper`, `dnf`, `apt-get` is in the tree |
+| `net` | `interfaces` | `ip -j addr show` — the machine's |
+| `disk` | `devices` | `lsblk -J` — the machine's |
+| `virt` | `container`, `vm` | `systemd-detect-virt` — the machine's |
 
 *The machine's* means root `/`, or `DETC_LIVE=1`.  That flag is a caller saying
 that the root is not `/` but the machine looking at it is the machine that will
@@ -569,11 +570,11 @@ where `/sysroot` is this machine's own future `/`.  Nothing else sets it, and it
 says nothing about whether anything in that root is *running* — the `unit`
 provider still refuses `active` for a tree.
 
-`system.net.interfaces` and `system.disk.devices` are what the tool wrote,
+`net.interfaces` and `disk.devices` are what the tool wrote,
 passed through unchanged: the shape belongs to `ip` and to `lsblk`, and a probe
 that reshaped it would be one more thing to keep in step with them.
 
-`system.pkg.manager` is what makes "openSUSE first, the rest pluggable" real —
+`pkg.manager` is what makes "openSUSE first, the rest pluggable" real —
 the `pkg` and `repo` providers branch on which manager the tree has, and so can
 a fleet's templates.
 
@@ -669,7 +670,7 @@ addresses it, and where it comes from.
 
 ```console
 $ detc list
-probe     system.os                            /usr/libexec/detc/probes/system.d/os/10-os-release
+probe     os                                   /usr/libexec/detc/probes.d/os/10-os-release
 template  /etc/ssh/sshd_config.d/60-detc.conf  /usr/share/detc/templates.d/etc/ssh/sshd_config.d/60-detc.conf
 resource  unit/nginx                           /usr/share/detc/resources.d/unit/nginx
 provider  unit                                 /usr/libexec/detc/providers.d/unit
@@ -717,7 +718,7 @@ would be wrong.
 ```console
 $ detc cat /etc/ssh/sshd_config.d/60-detc.conf   # what would be written
 $ detc cat --raw unit/nginx                      # the declaration, unexpanded
-$ detc cat system.disk                           # the probe behind a variable
+$ detc cat disk                           # the probe behind a variable
 $ detc cat --type provider unit                  # the program that applies it
 $ detc cat --type variable system/10-core        # what one document declares
 ```
@@ -734,7 +735,7 @@ schema of its provider.
 
 ```console
 $ detc check
-ok     /usr/libexec/detc/probes/system.d/os/10-os-release
+ok     /usr/libexec/detc/probes.d/os/10-os-release
 ok     /etc/ssh/sshd_config.d/60-detc.conf
 error  /etc/chrony/chrony.conf  Cannot render …: undefined value `ntp.server` (in …/chrony.conf:2)
 ok     unit/nginx
@@ -1140,7 +1141,7 @@ Packages, through whichever package manager the system has.
 The name of the resource is the name of the package, spelled the way the
 distribution spells it: `pkg/openssh-server` on Debian is `pkg/openssh` on
 openSUSE, and a fleet that spans both either declares the two and lets a
-prefix mask the one that does not apply, or reads `system.pkg.manager` and
+prefix mask the one that does not apply, or reads `pkg.manager` and
 …
 
 ## Schema
@@ -1752,13 +1753,13 @@ fleet/
 ├── variables/system.d/…
 ├── templates.d/…
 ├── resources.d/…
-├── probes/system.d/…
+├── probes.d/…
 └── providers.d/…
 ```
 
 Nothing else is taken: a `.git`, a README or a Makefile are simply not on the
 list, and `create` says what it left behind (`-dd`, and `-dddd` for a whole
-directory it skipped).  What sits under `probes`
+directory it skipped).  What sits under `probes.d`
 or `providers` is an executable and the rest is data, so where a member lands is
 derived from its name and never declared.  A 0 byte file masks, as everywhere
 else, so a bundle can suppress a default without shipping a replacement.  Two
@@ -2350,7 +2351,7 @@ distribution and not to `detc`.
 
 | From | To | |
 | --- | --- | --- |
-| `probes/` | `$(PREFIX)/libexec/detc/probes/` | 0755 |
+| `probes/` | `$(PREFIX)/libexec/detc/probes.d/` | 0755 |
 | `providers/` | `$(PREFIX)/libexec/detc/providers.d/` | 0755 |
 | `templates/` | `$(PREFIX)/share/detc/templates.d/` | 0644 |
 | `resources/` | `$(PREFIX)/share/detc/resources.d/` | 0644 |
