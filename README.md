@@ -2095,7 +2095,7 @@ answered.
 
 Which is also the whole of what a node can do before it is given anything.  The
 core set gives it eight probes, so `check` and `list` above have something to
-report and `detctl --host web1 var` describes the machine; it gives it eight
+report and `detctl --host web1 var` describes the machine; it gives it nine
 providers, so the bundle below can declare a package or an account without
 shipping the executable that reaches it; and it gives it the drop-ins, which
 write nothing until a variable says otherwise.  That is what the bundle is for:
