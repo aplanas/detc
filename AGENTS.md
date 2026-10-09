@@ -250,13 +250,20 @@ shellcheck -s sh probes/*/* providers/* tools/detc-* tools/inject/* \
                  examples/probes/*/*
 shellcheck -s bash dracut/50detc/module-setup.sh   # bash, because dracut sources it
 make check                                         # cargo fmt --check, clippy, test
-make check-alpine                                  # the tests again, on busybox and musl
+make check-container IMAGE=alpine                  # the tests again, on busybox and musl
+make check-container IMAGE=debian                  # ... on dash and mawk
+make check-backends IMAGE=fedora                   # `pkg` against the real package manager
 ```
 
-`check-alpine` needs `podman` (or `CONTAINER=docker`) and the network, which is why it is not
-part of `check`.  It is where a GNU-only flag in an asset shows up — `flock -w`, `tar
---format` — and where a provider that assumes systemd or shadow-utils is caught, before the
-first node that is not openSUSE does it.
+`check-container` runs `cargo test` inside the image of another distribution — `alpine`,
+`debian`, `fedora` or `tumbleweed`, each chosen for what it differs in (see the `Makefile`), and
+`check-alpine` is short for the first.  It needs `podman` (or `CONTAINER=docker`) and the
+network, which is why it is not part of `check`.  It is where a GNU-only flag in an asset shows
+up — `flock -w`, `tar --format` — or a bashism that only dash refuses, and where a provider that
+assumes systemd or shadow-utils is caught, before the first node that lacks them does it.
+`check-backends` is the other half: the suite stubs every package manager, so only
+[`tests/backends.sh`](tests/backends.sh) asks the real one to install, pin and remove a package.
+It builds nothing and takes as long as the package manager does.
 
 That first line reports nothing on the shipped set, so anything it says is yours.  Where a
 finding is a false positive, silence it the way the shipped set does — by writing the code so

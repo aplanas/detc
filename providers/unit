@@ -61,6 +61,12 @@ fail() {
     exit 1
 }
 
+# The request is read with `awk`, inside a substitution where a missing program
+# is not an error but an empty answer -- and an empty desired state is every
+# default at once, so `installed: false` would read as `installed: true`.  So it
+# is asked for here, where failing still stops the provider.
+command -v awk > /dev/null 2>&1 || fail "awk is not installed, so the request cannot be read"
+
 # The state that the declaration asks for, as `key<tab>value` lines.
 #
 # This is the same reader as in the other core providers, copied rather than

@@ -100,31 +100,55 @@ define uninstall-tree
 	done
 endef
 
-# The test suite again, on Alpine, where every shell tool is busybox and the
-# binary links against musl.  `tests/core.rs` runs the shipped probes and
-# providers end to end, so this is where a GNU-ism in an asset or a glibc
-# assumption in the binary shows up, rather than on the first node that is not
-# openSUSE.
+# The test suite again, inside the container of a distribution.  `tests/core.rs`
+# runs the shipped probes and providers end to end, so this is where an asset
+# that leans on one system's tools shows up, rather than on the first node that
+# lacks them.  The images are chosen by what they differ in, not by how many
+# there are:
 #
-# It builds inside the container, with Alpine's own toolchain, instead of
-# cross-compiling to musl from here: `ring` has C in it, and a native build is
-# the one that needs nothing installed on the machine running it but a
-# container engine.  The tree is mounted read only and the build goes to the
-# container's own `/tmp`, so a run leaves no root-owned files behind.  Not part
-# of `check`, because it needs the engine and the network.
+#   alpine      busybox `sh` and `awk`, and musl
+#   debian      dash as `/bin/sh` and mawk as `awk`, and `apt`
+#   fedora      `dnf`
+#   tumbleweed  `zypper`
+#
+# It builds inside the container, with the distribution's own toolchain,
+# instead of cross-compiling from here: `ring` has C in it, and a native build
+# is the one that needs nothing on the machine running it but a container
+# engine.  The tree is mounted read only, so a run leaves no root-owned files
+# behind, and with the shared SELinux label (`z`, not `Z`), so that two runs
+# against it at once -- a suite and `check-backends` -- do not relabel it out
+# from under each other.  The registry and the build go to a volume per image,
+# so the second run of one does not compile everything again, and `podman
+# volume rm` of `detc-<image>-*` starts it from nothing.  Not part of `check`,
+# because it needs the engine and the network.
 CONTAINER ?= podman
-ALPINE    ?= docker.io/library/alpine:latest
+IMAGE     ?= alpine
 
-# `build-base` is the C compiler `ring` needs, and `git` is what the journal
-# tests read their history back with
-ALPINE_PACKAGES = cargo rust build-base git
+# What each image is, and what it has to install before `cargo test`: a
+# toolchain, the C compiler `ring` needs, and `git`, which the journal tests read
+# their history back with
+IMAGE_alpine     = docker.io/library/alpine:latest
+SETUP_alpine     = apk add --quiet cargo rust build-base git
+IMAGE_debian     = docker.io/library/debian:stable
+SETUP_debian     = apt-get update -qq && apt-get install -qq -y cargo gcc git > /dev/null
+IMAGE_fedora     = registry.fedoraproject.org/fedora:latest
+SETUP_fedora     = dnf -q -y install cargo rust gcc git
+IMAGE_tumbleweed = registry.opensuse.org/opensuse/tumbleweed:latest
+SETUP_tumbleweed = zypper -n -q install cargo rust gcc git /usr/bin/awk
+
+# What `check-backends` needs before the package manager can install anything:
+# `apt` starts a container with no lists of packages to install from, and the
+# Tumbleweed image has no `awk`, which an installed detc always has because its
+# package requires one
+PREPARE_debian     = apt-get update -qq &&
+PREPARE_tumbleweed = zypper -n -q install /usr/bin/awk > /dev/null &&
 
 # musl gives a new thread a much smaller stack than glibc does, and `rustc`
 # overflows it optimising the elliptic curve crates (`p521`) unless it is told
-# to ask for more.  The tests inherit it, which costs nothing.
-ALPINE_STACK = 16777216
+# to ask for more.  Harmless everywhere else, and the tests inherit it.
+RUST_STACK = 16777216
 
-.PHONY: all build check check-alpine clean install uninstall
+.PHONY: all build check check-container check-alpine check-backends clean install uninstall
 
 all: build
 
@@ -136,10 +160,23 @@ check:
 	$(CARGO) clippy --all-targets
 	$(CARGO) test
 
+check-container:
+	@test -n "$(IMAGE_$(IMAGE))" || { echo "unknown IMAGE $(IMAGE)"; exit 1; }
+	$(CONTAINER) run --rm -v "$(CURDIR):/src:ro,z" -w /src \
+		-v detc-$(IMAGE)-registry:/root/.cargo/registry \
+		-v detc-$(IMAGE)-target:/tmp/target \
+		-e CARGO_TARGET_DIR=/tmp/target -e RUST_MIN_STACK=$(RUST_STACK) \
+		$(IMAGE_$(IMAGE)) sh -c '$(SETUP_$(IMAGE)) && cargo test --no-fail-fast'
+
 check-alpine:
-	$(CONTAINER) run --rm -v "$(CURDIR):/src:ro,Z" -w /src \
-		-e CARGO_TARGET_DIR=/tmp/target -e RUST_MIN_STACK=$(ALPINE_STACK) $(ALPINE) \
-		sh -c 'apk add --quiet $(ALPINE_PACKAGES) && cargo test --no-fail-fast'
+	$(MAKE) check-container IMAGE=alpine
+
+# The `pkg` provider against the real package manager of the image, which the
+# test suite stubs: see `tests/backends.sh`.  Nothing is built, so it is quick
+check-backends:
+	@test -n "$(IMAGE_$(IMAGE))" || { echo "unknown IMAGE $(IMAGE)"; exit 1; }
+	$(CONTAINER) run --rm -v "$(CURDIR):/src:ro,z" $(IMAGE_$(IMAGE)) \
+		sh -c '$(PREPARE_$(IMAGE)) /src/tests/backends.sh'
 
 clean:
 	$(CARGO) clean
