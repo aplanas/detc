@@ -67,10 +67,30 @@ fn asked(root: &Path) -> String {
     fs::read_to_string(root.join("asked")).unwrap_or_default()
 }
 
+/// Start the record of what was asked again.  A run that asked nothing left
+/// none to take away, which on a node that set nothing is the point.
+fn forget_asked(root: &Path) -> TestResult {
+    match fs::remove_file(root.join("asked")) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
+    }
+}
+
 /// A distribution, so that the `os` probe has something to read.
 fn os_release(root: &Path, content: &str) -> TestResult {
     fs::create_dir_all(root.join("etc"))?;
     fs::write(root.join("etc/os-release"), content)?;
+    Ok(())
+}
+
+/// Give the tree an init system, which is what `probes/init/10-manager` looks
+/// for and what the core `unit` resources declare anything under.  Only the
+/// program has to be there; nothing runs it, and `systemctl` is stubbed apart.
+fn systemd(root: &Path) -> TestResult {
+    let path = root.join("usr/lib/systemd/systemd");
+    fs::create_dir_all(path.parent().expect("the program has a directory"))?;
+    fs::write(&path, "#!/bin/sh\n")?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
     Ok(())
 }
 
@@ -487,6 +507,7 @@ fn test_a_unit_is_restarted_for_the_run_that_changed_its_configuration() -> Test
     let root = tmp_root.path();
     core(root)?;
     passwd(root)?;
+    systemd(root)?;
 
     // A unit that is enabled and running, so that there is something to
     // restart.  `try-restart` is recorded and does nothing else
@@ -508,7 +529,7 @@ fn test_a_unit_is_restarted_for_the_run_that_changed_its_configuration() -> Test
     assert_eq!(restarts("systemd-modules-load"), 0);
 
     // The second changes nothing, and nothing is restarted for it
-    fs::remove_file(root.join("asked"))?;
+    forget_asked(root)?;
     let output = detc_with_path(root, &bin, &["apply"]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(
@@ -539,7 +560,7 @@ fn test_a_unit_is_restarted_for_the_run_that_changed_its_configuration() -> Test
 
     // And it converges: the value is in the file, so the run after it restarts
     // nothing
-    fs::remove_file(root.join("asked"))?;
+    forget_asked(root)?;
     let output = detc_with_path(root, &bin, &["apply"]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(restarts("systemd-sysctl"), 0);
@@ -553,6 +574,7 @@ fn test_a_unit_is_not_restarted_for_a_drop_in_that_was_never_written() -> TestRe
     let root = tmp_root.path();
     core(root)?;
     passwd(root)?;
+    systemd(root)?;
 
     let bin = stubs(
         root,
@@ -612,6 +634,7 @@ fn test_a_run_of_resources_alone_does_not_restart_anything_later() -> TestResult
     let root = tmp_root.path();
     core(root)?;
     passwd(root)?;
+    systemd(root)?;
 
     let bin = stubs(
         root,
@@ -636,7 +659,7 @@ fn test_a_run_of_resources_alone_does_not_restart_anything_later() -> TestResult
     let output = detc_with_path(root, &bin, &["apply", "--type", "resource"]);
     assert!(output.status.success(), "{}", stderr(&output));
 
-    fs::remove_file(root.join("asked"))?;
+    forget_asked(root)?;
     let output = detc_with_path(root, &bin, &["apply"]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(!asked(root).contains("try-restart"), "{}", asked(root));
@@ -660,6 +683,7 @@ fn test_a_reboot_is_recorded_for_a_tree_and_never_ordered() -> TestResult {
     let root = tmp_root.path();
     core(root)?;
     passwd(root)?;
+    systemd(root)?;
 
     // Everything a reboot could possibly be ordered with.  None of them may be
     // reached, and that is the assertion
@@ -700,7 +724,7 @@ fn test_a_reboot_is_recorded_for_a_tree_and_never_ordered() -> TestResult {
     assert!(!ordered(), "{}", asked(root));
 
     // The second changes nothing
-    fs::remove_file(root.join("asked"))?;
+    forget_asked(root)?;
     let output = detc_with_path(root, &bin, &["apply"]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(
@@ -746,7 +770,7 @@ fn test_a_reboot_is_recorded_for_a_tree_and_never_ordered() -> TestResult {
     assert!(output.status.success(), "{}", stderr(&output));
     assert_ne!(fs::read_to_string(&record)?, "");
 
-    fs::remove_file(root.join("asked"))?;
+    forget_asked(root)?;
     let output = detc_with_path(root, &bin, &["apply"]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(!ordered(), "{}", asked(root));
@@ -888,7 +912,7 @@ fn test_a_package_is_installed_and_a_lie_is_reported() -> TestResult {
     assert!(asked(root).contains("zypper"), "{}", asked(root));
 
     // And once it is there, nothing is asked of the backend at all
-    fs::remove_file(root.join("asked"))?;
+    forget_asked(root)?;
     let output = detc_with_path(root, &bin, &["apply", "--type", "resource"]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(
@@ -991,7 +1015,7 @@ fn test_an_account_and_the_group_of_it_are_made() -> TestResult {
     assert!(output.status.success(), "{}", stderr(&output));
 
     // And it converges, without asking anything of `shadow` a second time
-    fs::remove_file(root.join("asked"))?;
+    forget_asked(root)?;
     let output = detc_with_path(root, &bin, &["apply", "--type", "resource"]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(
@@ -1028,7 +1052,7 @@ fn test_everything_the_core_ships_can_be_instantiated() -> TestResult {
         listed.lines().filter(|l| l.starts_with("provider")).count(),
         9
     );
-    assert_eq!(listed.lines().filter(|l| l.starts_with("probe")).count(), 8);
+    assert_eq!(listed.lines().filter(|l| l.starts_with("probe")).count(), 9);
     assert_eq!(
         listed.lines().filter(|l| l.starts_with("template")).count(),
         8

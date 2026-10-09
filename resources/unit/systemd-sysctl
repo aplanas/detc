@@ -16,27 +16,28 @@
 # somebody turned it off meant it.  Only the restart is declared, and only
 # because the file this ships is the reason there is anything to restart.
 #
-# Nothing happens on a node that set no sysctl either: the file renders to its
-# comment, that comment does not change between runs, and so neither does the
-# digest.
+# The whole declaration is inside one condition, and renders to nothing unless
+# both halves hold.  A declaration that renders nothing asks for nothing, and
+# the `unit` provider is not even asked about it.
 #
-# `config` is left out entirely rather than given an empty string when the
-# digest is not there, which is the case on `detc apply --type resource`: that
-# run renders no template, so it knows nothing about the file.  A property the
-# declaration does not mention is not compared, so the resource is skipped
-# rather than recorded as having been restarted for nothing -- which would make
-# the next full run restart the service for a change that never happened.
+# There has to be a digest.  A node that set no sysctl has no file -- the
+# template writes none -- so nothing is published and there is nothing to
+# react to.  Neither is there on `detc apply --type resource`, which renders no
+# template and so knows nothing about the file.  Declaring `config: ""` there
+# instead would be a claim the provider records, and the next full run would
+# restart the service for a change that never happened.
+#
+# And it has to be systemd, which `init.manager` reports.  A system without it
+# has no `systemd-sysctl` to restart, and a `unit` provider with no `systemctl`
+# to ask refuses rather than inventing a state -- so the core set, installed on
+# Alpine, would otherwise fail its first run on a sysctl it cannot apply.
+# `init` is read one level at a time because a probe fills it, and a tree with
+# no init system reports nothing.
 #
 # `_order: 70` is the order this provider already declares, written out because
 # this file is where the question gets asked: the template it watches is
 # rendered at 50, so the restart has to come after it, and a reader should not
 # have to go and read the provider's schema to see that this is not an accident.
-#
-# It is not there to keep the document from being empty, which would not matter
-# anyway.  `_order` is taken out before the state reaches the provider, so on a
-# run that renders no template the desired state is empty either way -- and an
-# empty declaration is an empty desired state rather than an error, which is
-# exactly what lets the conditional below turn this into a no-op.
 #
 # `_requires` names the same file as `config`, and the two say different things
 # about it.  `config` says *restart me when it moves*; `_requires` says *do not
@@ -49,9 +50,11 @@
 # Nothing about `apply --type resource` changes: a requirement naming something
 # the run was not asked to look at is left alone, exactly as a digest that was
 # never published is.
+{% set digest = detc.files['etc/sysctl.d/60-detc.conf'] | default('') -%}
+{% set init = (init | default({})).manager | default('') -%}
+{% if digest and init == 'systemd' -%}
 _order: 70
 _requires:
   - template/etc/sysctl.d/60-detc.conf
-{% set digest = detc.files['etc/sysctl.d/60-detc.conf'] | default('') -%}
-{% if digest %}config: "{{ digest }}"
+config: "{{ digest }}"
 {% endif -%}

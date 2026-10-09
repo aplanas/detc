@@ -1,0 +1,41 @@
+#!/bin/sh
+
+# Which init system the tree has.
+#
+# This fills `init.manager` with `systemd` or `openrc`, and it is to the
+# services what `pkg.manager` is to the packages: the key that lets one core set
+# work on more than one kind of system.  A declaration that only means anything
+# under one of them says so, and renders to nothing under the other -- which a
+# run does not even ask the provider about:
+#
+#     {% if (init | default({})).manager | default('') == 'systemd' %}enabled: true
+#     {% endif -%}
+#
+# What is looked for is the program inside the tree, not the one on the machine
+# asking, which is the rule the `pkg` probe follows too and the reason an image
+# being built reports its own init system rather than the builder's.  It is not
+# whether systemd is *running* -- `/run/systemd/system` answers that, and only
+# for `/` -- because a resource is declared for the system the tree will boot
+# into, and an image has nothing running at all.
+#
+# A tree with neither, a container image most often, reports nothing rather than
+# a name it would have to invent; a declaration that reads this defaults one
+# level at a time, as above, for that reason.
+
+set -eu
+
+root=${DETC_ROOT:-/}
+
+for dir in usr/lib/systemd lib/systemd; do
+    if [ -x "$root/$dir/systemd" ]; then
+        echo 'manager: "systemd"'
+        exit 0
+    fi
+done
+
+for dir in usr/sbin sbin; do
+    if [ -x "$root/$dir/openrc" ]; then
+        echo 'manager: "openrc"'
+        exit 0
+    fi
+done

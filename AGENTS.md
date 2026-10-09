@@ -250,7 +250,13 @@ shellcheck -s sh probes/*/* providers/* tools/detc-* tools/inject/* \
                  examples/probes/*/*
 shellcheck -s bash dracut/50detc/module-setup.sh   # bash, because dracut sources it
 make check                                         # cargo fmt --check, clippy, test
+make check-alpine                                  # the tests again, on busybox and musl
 ```
+
+`check-alpine` needs `podman` (or `CONTAINER=docker`) and the network, which is why it is not
+part of `check`.  It is where a GNU-only flag in an asset shows up — `flock -w`, `tar
+--format` — and where a provider that assumes systemd or shadow-utils is caught, before the
+first node that is not openSUSE does it.
 
 That first line reports nothing on the shipped set, so anything it says is yours.  Where a
 finding is a false positive, silence it the way the shipped set does — by writing the code so

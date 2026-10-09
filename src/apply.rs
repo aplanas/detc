@@ -407,6 +407,11 @@ enum Target {
     Broken {
         error: String,
     },
+    /// A resource whose declaration rendered nothing.  It asks for nothing, so
+    /// its provider is not asked anything either: not to inspect, which is
+    /// what a system without the tool behind the provider cannot answer, and
+    /// not to apply.
+    Nothing,
 }
 
 impl Change {
@@ -506,7 +511,7 @@ impl Change {
                 template: template.source(),
                 content: content.as_deref(),
             }),
-            Target::Resource { .. } | Target::Broken { .. } => None,
+            Target::Resource { .. } | Target::Broken { .. } | Target::Nothing => None,
         }
     }
 
@@ -526,7 +531,7 @@ impl Change {
                 source: resource.source(),
                 desired,
             }),
-            Target::Template { .. } | Target::Broken { .. } => None,
+            Target::Template { .. } | Target::Broken { .. } | Target::Nothing => None,
         }
     }
 
@@ -542,7 +547,7 @@ impl Change {
     /// for in that order.  A template keeps both, and can be asked in any.
     pub fn snapshot(&self, phase: Phase) -> Result<Option<Snapshot>> {
         match &self.target {
-            Target::Broken { .. } => Ok(None),
+            Target::Broken { .. } | Target::Nothing => Ok(None),
 
             Target::Template {
                 template,
@@ -589,7 +594,7 @@ impl Change {
         let diff = match &self.target {
             Target::Resource { diff, .. } => diff,
             Target::Broken { error } => return error.clone(),
-            Target::Template { .. } => return String::new(),
+            Target::Template { .. } | Target::Nothing => return String::new(),
         };
 
         diff.iter()
@@ -628,6 +633,9 @@ impl Change {
     fn apply_target(&mut self) -> Result<()> {
         match &mut self.target {
             Target::Broken { error } => err!("{error}"),
+
+            // Always in sync, so never reached; and nothing to do if it were
+            Target::Nothing => Ok(()),
 
             Target::Template {
                 path,
@@ -890,6 +898,24 @@ impl Plan {
         schemas: &mut HashMap<String, provider::Schema>,
         context: &Value,
     ) -> Result<Change> {
+        // Rendered before anything else, because a declaration that rendered
+        // nothing needs nothing else: not its provider, which may not even be
+        // in the ladder, and not the tool behind it
+        let declaration = resource.declaration(context)?;
+        if declaration.empty {
+            return Ok(Change {
+                kind: resource.kind().to_string(),
+                name: resource.name().to_string(),
+                id: resource.id(),
+                order: declaration.order.unwrap_or(provider::DEFAULT_ORDER),
+                action: Action::InSync,
+                requires: declaration.requires,
+                error: None,
+                skipped: None,
+                target: Target::Nothing,
+            });
+        }
+
         let provider = providers.find(resource.kind())?;
 
         if !schemas.contains_key(resource.kind()) {
@@ -897,7 +923,6 @@ impl Plan {
         }
         let schema = &schemas[resource.kind()];
 
-        let declaration = resource.declaration(context)?;
         let desired = schema
             .validate(&declaration.state)
             .map_err(|e| format!("Resource {} is invalid: {e}", resource.id()))?;
@@ -1509,6 +1534,36 @@ esac
             panic!("a template has a file to record");
         };
         assert_eq!(content.as_deref(), Some("old\n"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_a_resource_that_declares_nothing_is_not_asked_about() -> TestResult {
+        let tmp_root = tempfile::tempdir()?;
+        let root = tmp_root.path();
+
+        // A provider that cannot answer anything, the way `unit` cannot on a
+        // system without systemd, and that says so if it is ever run at all
+        program(
+            &root.join("usr/libexec/detc/providers.d/svc"),
+            "echo \"$1\" >> \"$DETC_ROOT/asked\"\nexit 1\n",
+        )?;
+
+        // Its header comment is outside the conditional, and is not content:
+        // a declaration is YAML, so a document of comments declares nothing
+        declare(
+            root,
+            "svc/sshd",
+            "# Restart sshd when its drop-in moves.\n\
+             {% if false %}config: \"x\"\n{% endif -%}\n",
+        )?;
+
+        let mut plan = build_plan(root)?;
+        assert!(plan.is_in_sync());
+        assert!(plan.changes()[0].applied().is_none());
+        apply(&mut plan)?;
+        assert!(!root.join("asked").exists());
 
         Ok(())
     }

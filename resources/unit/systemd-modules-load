@@ -10,21 +10,24 @@
 # at the next boot, which is the honest answer, and a node that needs it gone
 # now needs somebody to look at what is holding it.
 #
-# `config` is left out when the digest is not there -- see
-# `resources.d/unit/systemd-sysctl`, which says why at length.
+# The whole declaration renders to nothing unless there is a digest to react to
+# and systemd to react with -- see `resources.d/unit/systemd-sysctl`, which says
+# why at length.
 #
 # `_order: 70` is the order this provider already declares, written out because
 # this is where a reader asks when the restart happens relative to the template
 # it watches, which is rendered at 50 -- see `resources.d/unit/systemd-sysctl`
-# again, which says what it is and is not there for.
+# again.
 #
 # `_requires` names the same file that `config` watches, and means the other
 # half of it: the digest says restart when the file moves, and the requirement
 # says do not restart at all if the file was not written.  Again see
 # `resources.d/unit/systemd-sysctl`.
+{% set digest = detc.files['etc/modules-load.d/60-detc.conf'] | default('') -%}
+{% set init = (init | default({})).manager | default('') -%}
+{% if digest and init == 'systemd' -%}
 _order: 70
 _requires:
   - template/etc/modules-load.d/60-detc.conf
-{% set digest = detc.files['etc/modules-load.d/60-detc.conf'] | default('') -%}
-{% if digest %}config: "{{ digest }}"
+config: "{{ digest }}"
 {% endif -%}

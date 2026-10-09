@@ -326,11 +326,15 @@ Two details are the difference between this working and looking like it works.
 `| default('')` is not decoration: a template that does not render is left out
 of `detc.files` rather than given a null, the same way a probe that fails is,
 and `detc apply --type resource` renders no template at all, so the map is
-empty.  Better still is to leave the property out entirely when there is no
-digest, the way [`resources/unit/systemd-sysctl`](resources/unit/systemd-sysctl)
-does — a property a declaration does not mention is not compared, so a run that
-knew nothing about the file records nothing about it, instead of recording an
-empty digest that the next full run would restart the service to correct.
+empty.  Better still is to declare nothing when there is no digest, the way
+[`resources/unit/systemd-sysctl`](resources/unit/systemd-sysctl) does — a
+declaration that renders to nothing (comments aside, since a declaration is
+YAML) is reported `ok` and its provider is not even asked about it, so a run
+that knew nothing about the file records nothing about it, instead of recording
+an empty digest that the next full run would restart the service to correct.
+The same conditional is how a declaration says which kind of system it means:
+the core ones also require `init.manager == 'systemd'`, so on a system without
+systemd they ask `systemctl` nothing.
 
 And what is published is only the files.  Not what the other resources are
 planned to do — they are inspected in the same pass that expands them, so one
@@ -547,7 +551,7 @@ changes the system.
 ## The core set
 
 Everything above describes a mechanism with nothing in it.  The **core set** is
-what the package installs alongside the binary — eight probes, nine providers,
+what the package installs alongside the binary — nine probes, nine providers,
 eight templates, one variables document and four resources — under `usr/share`
 and `usr/libexec`, which are the *lowest* priority prefixes, so a document in
 `etc` or a bundle in `run` overrides any of it.  That is the point: it is meant
@@ -576,6 +580,7 @@ that built it.
 | `hardware` | `cpus`, `memory_kb` | `proc/cpuinfo`, `proc/meminfo` — the machine's |
 | `firmware` | `efi`, `secure_boot` | `sys/firmware/efi` — the machine's |
 | `pkg` | `manager` | which of `zypper`, `dnf`, `apt-get`, `apk` is in the tree |
+| `init` | `manager` | which of `systemd`, `openrc` is in the tree |
 | `net` | `interfaces` | `ip -j addr show` — the machine's |
 | `disk` | `devices` | `lsblk -J` — the machine's |
 | `virt` | `container`, `vm` | `systemd-detect-virt` — the machine's |
@@ -2116,7 +2121,7 @@ connection, the service on the far side, and a provider that ran there and
 answered.
 
 Which is also the whole of what a node can do before it is given anything.  The
-core set gives it eight probes, so `check` and `list` above have something to
+core set gives it nine probes, so `check` and `list` above have something to
 report and `detctl --host web1 var` describes the machine; it gives it nine
 providers, so the bundle below can declare a package or an account without
 shipping the executable that reaches it; and it gives it the drop-ins, which

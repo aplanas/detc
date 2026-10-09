@@ -77,6 +77,9 @@ pub struct Declaration {
     pub order: Option<i64>,
     /// What has to have worked first, as [`Resource::id`] spells it.
     pub requires: Vec<String>,
+    /// Whether the declaration rendered nothing but whitespace, and so asks
+    /// for nothing at all: see [`Resource::declaration`].
+    pub empty: bool,
 }
 
 /// The declaration of one piece of state, and where it was declared.
@@ -127,13 +130,27 @@ impl Resource {
     pub fn declaration(&self, context: &Value) -> Result<Declaration> {
         let document = self.render(context)?;
 
-        // A declaration that expands to nothing is an empty desired state, and
-        // not a parse error, so that a resource can be turned into a no-op
-        // with a conditional
+        // A declaration that expands to nothing asks for nothing, and not a
+        // parse error, so that a resource can be turned off with a conditional.
+        // A run does not even ask the provider about it (see `apply`), which is
+        // what lets the core set declare a unit of systemd on a system that has
+        // no systemd to ask.
+        //
+        // Nothing is a YAML document with nothing in it, and not only one with
+        // no bytes: a declaration is always YAML, so its header comment is not
+        // content, and has no reason to sit inside the conditional.  That is the
+        // difference from a template, whose comments are content and whose
+        // format detc does not know
         let value = if document.trim().is_empty() {
-            Value::Object(Map::new())
+            Value::Null
         } else {
             var::Variables::from_str(&document)?.value().clone()
+        };
+        let empty = value.is_null();
+        let value = if empty {
+            Value::Object(Map::new())
+        } else {
+            value
         };
 
         let Value::Object(mut state) = value else {
@@ -179,6 +196,7 @@ impl Resource {
             state,
             order,
             requires,
+            empty,
         })
     }
 

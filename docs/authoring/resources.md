@@ -62,8 +62,24 @@ leaving the rest to the node.  `resources/unit/systemd-sysctl` declares only `co
 `enabled` — because whether `systemd-sysctl.service` is enabled is `sysinit.target`'s business
 and a node that turned it off meant it.
 
-A declaration that renders to nothing is an empty desired state, not an error, so a resource
-can be made a no-op with a conditional.
+A declaration that renders to nothing declares nothing, and is not an error, so a resource can
+be turned off with a conditional.  Nothing is a YAML document with no content: the header
+comment is not content, so it stays outside the conditional.  Such a resource is reported `ok`
+and its provider is **not asked anything** — not `inspect`, not `apply` (`src/apply.rs`) —
+which is what lets the core set declare a systemd unit on a system that has no `systemctl` to
+ask.  Put everything inside the condition, `_order` and `_requires` included:
+
+```jinja
+# resources.d/unit/systemd-sysctl
+{% set init = (init | default({})).manager | default('') -%}
+{% if init == 'systemd' -%}
+_order: 70
+config: "..."
+{% endif -%}
+```
+
+`init.manager` (`systemd` or `openrc`) and `pkg.manager` are the two facts a declaration
+usually branches on to say which kind of system it means.
 
 ## Absence is a state, not an operation
 
@@ -246,8 +262,8 @@ writes `detc.files` reaches no rendering through it.
 
 But `config: ""` in a run that knows nothing about the file is a claim, and the `unit` provider
 would record it — making the next full run restart the service for a change that never
-happened.  So the core resources leave the property out entirely instead, and a property that
-is not mentioned is not compared:
+happened.  So leave the property out entirely instead: a property that is not mentioned is not
+compared.
 
 ```jinja
 _order: 70
@@ -255,6 +271,10 @@ _order: 70
 {% if digest %}config: "{{ digest }}"
 {% endif -%}
 ```
+
+The core resources go one step further and put the whole declaration inside the condition, so
+that with no digest they [declare nothing](#what-is-in-it) and the provider is not even asked —
+and they add `init.manager == 'systemd'` to it.
 
 Use the plain `| default('')` form for a resource that only ever runs in a full `apply`, and
 this form for anything shipped in the core set.  `resources/unit/systemd-sysctl` is the worked
