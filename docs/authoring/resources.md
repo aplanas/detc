@@ -111,7 +111,8 @@ provider's schema declares; without that, `DEFAULT_ORDER` is 50.
 `resources/path/etc/sudoers.d/60-detc` is the case where getting this wrong is a security
 bug, and its header says so: `path` declares order 60, so at the default the mode would be
 corrected *after* the template had already created the file at 0644.  `_order: 10` creates it
-empty at 0440 first, and the template preserves the mode of a file that already exists.
+empty at 0440 first, and the template preserves the mode of a file that already exists.  With
+no group to write it declares the file absent instead, because the template then writes none.
 
 ## `_requires`
 

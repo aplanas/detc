@@ -268,24 +268,33 @@ fn test_a_template_of_the_core_writes_nothing_until_a_variable_is_set() -> TestR
     let output = detc(root, &["apply", "--type", "template"]);
     assert!(output.status.success(), "{}", stderr(&output));
 
-    // Every one of them is a drop-in, and every line of an untouched one is a
-    // comment or a section header that says nothing.  This is the property the
-    // whole core set rests on: installing it changes not one byte of what a
-    // node effectively runs
-    for entry in walkdir::WalkDir::new(root.join("etc")) {
-        let entry = entry?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
+    // Not one file.  This is the property the whole core set rests on:
+    // installing it on a node that configured nothing changes nothing at all,
+    // the same way a second run changes nothing
+    assert!(
+        stdout(&output).lines().all(|line| line.starts_with("ok")),
+        "{}",
+        stdout(&output)
+    );
+    assert!(!root.join("etc").exists());
 
-        for line in fs::read_to_string(entry.path())?.lines() {
-            assert!(
-                line.is_empty() || line.starts_with('#') || line.starts_with('['),
-                "{} says {line}",
-                entry.path().display()
-            );
-        }
-    }
+    // A value that is set writes its drop-in, and taking the last one away
+    // again takes away the file that detc wrote
+    declare(root, "50-test.yaml", "sysctl:\n  vm.swappiness: 10\n")?;
+    let output = detc(root, &["apply", "--type", "template"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let dropin = root.join("etc/sysctl.d/60-detc.conf");
+    assert!(fs::read_to_string(&dropin)?.contains("vm.swappiness = 10\n"));
+
+    fs::remove_file(root.join("etc/detc/variables/system.d/50-test.yaml"))?;
+    let output = detc(root, &["apply", "--type", "template"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("removed\ttemplate\t"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(!dropin.exists());
 
     Ok(())
 }
@@ -379,11 +388,18 @@ fn test_the_sudo_drop_in_is_never_once_writable_by_anybody_else() -> TestResult 
     // template keeps the mode of a file that already exists.  At the default
     // order of 60 the file would exist at 0644 in between, and sudo would have
     // read a drop-in that any local account could have written to
+    // With no group to write there is no drop-in at all: the template renders
+    // nothing and the resource declares the file absent
     let output = detc(root, &["apply"]);
     assert!(output.status.success(), "{}", stderr(&output));
-
     let file = root.join("etc/sudoers.d/60-detc");
+    assert!(!file.exists());
+
+    declare(root, "50-test.yaml", "sudo:\n  groups: [wheel]\n")?;
+    let output = detc(root, &["apply"]);
+    assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(mode(&file)?, 0o440);
+    assert!(fs::read_to_string(&file)?.contains("%wheel ALL=(ALL:ALL) ALL\n"));
 
     // Which the plan says before it happens, in that order
     let output = detc(root, &["--dry-run", "apply"]);
@@ -484,12 +500,12 @@ fn test_a_unit_is_restarted_for_the_run_that_changed_its_configuration() -> Test
 
     let restarts = |unit: &str| asked(root).matches(&format!("try-restart {unit}")).count();
 
-    // The first run writes the drop-ins, so their digest moves from nothing to
-    // something and both units are restarted once
+    // A node that set nothing has no drop-in, so no digest is published and
+    // neither unit is restarted
     let output = detc_with_path(root, &bin, &["apply"]);
     assert!(output.status.success(), "{}", stderr(&output));
-    assert_eq!(restarts("systemd-sysctl"), 1);
-    assert_eq!(restarts("systemd-modules-load"), 1);
+    assert_eq!(restarts("systemd-sysctl"), 0);
+    assert_eq!(restarts("systemd-modules-load"), 0);
 
     // The second changes nothing, and nothing is restarted for it
     fs::remove_file(root.join("asked"))?;
@@ -546,11 +562,17 @@ fn test_a_unit_is_not_restarted_for_a_drop_in_that_was_never_written() -> TestRe
         )],
     )?;
 
+    // Both drop-ins have something to say
+    declare(
+        root,
+        "50-test.yaml",
+        "sysctl:\n  vm.swappiness: 10\nmodules: [br_netfilter]\n",
+    )?;
+
     // `etc/sysctl.d` is where the drop-in goes, so a file of that name is a
     // directory that cannot be made and a template that cannot be written.  It
     // renders, though, so its digest is published all the same -- which is
     // exactly the case `_requires` is for and `detc.files` cannot see
-    fs::create_dir_all(root.join("etc"))?;
     fs::write(root.join("etc/sysctl.d"), "")?;
 
     let output = detc_with_path(root, &bin, &["apply"]);
@@ -670,6 +692,7 @@ fn test_a_reboot_is_recorded_for_a_tree_and_never_ordered() -> TestResult {
     // The first run writes the drop-in, so the digest moves from nothing to
     // something -- and this is also the first sight of the reason, which is
     // recorded and not acted on
+    declare(root, "50-test.yaml", "sysctl:\n  vm.swappiness: 10\n")?;
     let output = detc_with_path(root, &bin, &["apply"]);
     assert!(output.status.success(), "{}", stderr(&output));
     let first = fs::read_to_string(&record)?;
@@ -686,10 +709,10 @@ fn test_a_reboot_is_recorded_for_a_tree_and_never_ordered() -> TestResult {
         stdout(&output)
     );
 
-    // A sysctl appears, so the file moves.  `--dry-run` says the machine would
+    // A sysctl changes, so the file moves.  `--dry-run` says the machine would
     // reboot before anything is recorded, which is the whole reason the value
     // is a digest and not a flag
-    declare(root, "50-test.yaml", "sysctl:\n  vm.swappiness: 10\n")?;
+    declare(root, "50-test.yaml", "sysctl:\n  vm.swappiness: 20\n")?;
 
     let output = detc_with_path(root, &bin, &["--dry-run", "apply"]);
     assert!(output.status.success(), "{}", stderr(&output));

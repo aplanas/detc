@@ -272,13 +272,28 @@ impl Written {
             }
 
             if let Some(instantiated) = change.instantiated() {
-                self.files.insert(
-                    files_key(root, instantiated.path),
-                    File {
-                        digest: digest(instantiated.content.as_bytes()),
-                        template: files_key(root, instantiated.template),
-                    },
-                );
+                let key = files_key(root, instantiated.path);
+
+                match instantiated.content {
+                    Some(content) => {
+                        self.files.insert(
+                            key,
+                            File {
+                                digest: digest(content.as_bytes()),
+                                template: files_key(root, instantiated.template),
+                            },
+                        );
+                    }
+                    // A template with nothing to say.  Once the file is gone
+                    // there is nothing left to answer for; while it is still
+                    // there it is somebody's edit of what detc wrote, and the
+                    // record of it is what lets an orphan report say so
+                    None => {
+                        if !instantiated.path.exists() {
+                            self.files.remove(&key);
+                        }
+                    }
+                }
             }
 
             if let Some(applied) = change.applied() {
@@ -394,6 +409,14 @@ impl Written {
     /// name on the command line a resource rather than a path.
     pub fn holds_resource(&self, key: &str) -> bool {
         self.resources.contains_key(key)
+    }
+
+    /// Whether the file the record names `key` holds exactly what detc put in
+    /// it, which is the one case where taking it away undoes nobody's work.
+    pub fn wrote(&self, key: &str, content: &[u8]) -> bool {
+        self.files
+            .get(key)
+            .is_some_and(|entry| entry.digest == digest(content))
     }
 
     /// The template that wrote the file the record names `key`.

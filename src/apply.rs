@@ -23,6 +23,19 @@
 //! renamed over it, so that a program reading it never sees a half written
 //! configuration file.
 //!
+//! A template that renders nothing but whitespace has nothing to say, and a
+//! template with nothing to say declares that its file is not there.  So no
+//! file is created for it, and one that detc wrote in an earlier run is taken
+//! away -- but only while it is still exactly what detc wrote, which is the
+//! same rule a purge follows (see [`written`]).  A file that somebody edited,
+//! or that was there before detc was, is left alone.
+//!
+//! That is what lets an installed set of templates that nobody configured
+//! write nothing at all.  Deciding what counts as empty by the bytes and not by
+//! the syntax is deliberate: a comment is a different thing in every format,
+//! and detc reads none of them.  A template that wants to stay silent wraps its
+//! header in the same condition as its content.
+//!
 //! # What the run says about itself
 //!
 //! Every template is rendered before any resource is inspected, so by the time
@@ -67,7 +80,7 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
-use crate::{Result, provider, resource, template, var};
+use crate::{Result, provider, resource, template, var, written};
 
 /// Permissions of a configuration file that does not exist yet.  The mode of a
 /// file that is already in the system is kept, and one that needs a mode of its
@@ -233,6 +246,9 @@ pub enum Action {
     Create,
     /// In the system, but not the way it is declared.
     Update,
+    /// In the system, and declared not to be: a configuration file that detc
+    /// wrote and whose template has nothing to say any more.
+    Remove,
     /// What the object should be could not even be worked out, so nothing can
     /// be done about it.  It is part of the plan rather than the end of it, so
     /// that one template that does not render does not hide the rest.
@@ -246,6 +262,7 @@ impl Action {
             Action::InSync => "ok",
             Action::Create => "create",
             Action::Update => "update",
+            Action::Remove => "remove",
             Action::Broken => "error",
         }
     }
@@ -256,6 +273,7 @@ impl Action {
             Action::InSync => "ok",
             Action::Create => "created",
             Action::Update => "updated",
+            Action::Remove => "removed",
             Action::Broken => "error",
         }
     }
@@ -320,8 +338,9 @@ pub struct Instantiated<'a> {
     /// The template that writes it, as the ladder resolved it.
     pub template: &'a Path,
     /// What the template rendered to, which is what the file holds once the
-    /// change has been applied.
-    pub content: &'a str,
+    /// change has been applied.  `None` for a template with nothing to say,
+    /// whose file is not meant to be in the system at all.
+    pub content: Option<&'a str>,
 }
 
 /// The resource that a change asserts, for the same record.
@@ -374,7 +393,9 @@ enum Target {
         /// the content is compared against and what the history records as the
         /// state before the run.
         found: Option<String>,
-        content: String,
+        /// What the file is to hold, or `None` when the template rendered
+        /// nothing but whitespace and the file is not to be there at all.
+        content: Option<String>,
     },
     Resource {
         resource: resource::Resource,
@@ -483,7 +504,7 @@ impl Change {
             } => Some(Instantiated {
                 path,
                 template: template.source(),
-                content,
+                content: content.as_deref(),
             }),
             Target::Resource { .. } | Target::Broken { .. } => None,
         }
@@ -539,7 +560,7 @@ impl Change {
                     target: template.target().to_path_buf(),
                     template: template.content()?,
                     content: if written {
-                        Some(content.clone())
+                        content.clone()
                     } else {
                         found.clone()
                     },
@@ -608,9 +629,27 @@ impl Change {
         match &mut self.target {
             Target::Broken { error } => err!("{error}"),
 
-            Target::Template { path, content, .. } => {
-                write_atomically(path, content.as_bytes(), None)
-            }
+            Target::Template {
+                path,
+                content: Some(content),
+                ..
+            } => write_atomically(path, content.as_bytes(), None),
+
+            // Only ever planned for a file that is still what detc wrote, so
+            // this takes away nobody's work.  One that is gone already is
+            // where this was going: a resource ordered before the templates
+            // may declare the same path absent, as `path/etc/sudoers.d/60-detc`
+            // does
+            Target::Template {
+                path,
+                content: None,
+                ..
+            } => match fs::remove_file(&*path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    err!("Cannot remove {}: {e}", path.display())
+                }
+                _ => Ok(()),
+            },
 
             Target::Resource {
                 resource,
@@ -694,11 +733,19 @@ impl Plan {
             // leave something of its own under a name the run owns
             let var = unplanned(var)?;
 
+            // What detc wrote, which is the only thing a template with nothing
+            // to say may take away.  A record that cannot be read claims
+            // nothing, so the worst it can do is leave a file in place
+            let written = written::Written::read(root).unwrap_or_else(|e| {
+                debug!("{e}");
+                written::Written::default()
+            });
+
             for template in templates {
                 let name = template.target().to_string_lossy().into_owned();
                 let id = template_id(root, template.target());
                 changes.push(
-                    Self::template_change(root, template, var.value())
+                    Self::template_change(root, template, var.value(), &written)
                         .unwrap_or_else(|e| Change::broken("template", name, id, e)),
                 );
             }
@@ -765,8 +812,14 @@ impl Plan {
 
         for change in changes {
             // A template that did not render is left out rather than given a
-            // null, the way a probe that failed already is
-            if let Target::Template { path, content, .. } = &change.target {
+            // null, the way a probe that failed already is, and so is one that
+            // rendered nothing, because no file is what it is about to hold
+            if let Target::Template {
+                path,
+                content: Some(content),
+                ..
+            } = &change.target
+            {
                 files.insert(
                     files_key(root, path),
                     Value::String(digest(content.as_bytes())),
@@ -781,17 +834,19 @@ impl Plan {
         root: &Path,
         template: &template::Template,
         context: &Value,
+        written: &written::Written,
     ) -> Result<Change> {
-        let content = template.render(context)?;
+        let rendered = template.render(context)?;
+        let content = (!rendered.trim().is_empty()).then_some(rendered);
         let path = template.target().to_path_buf();
 
         let found = fs::read_to_string(&path);
-        let action = match &found {
-            Ok(current) if *current == content => Action::InSync,
-            Ok(_) => Action::Update,
+        let action = match (&content, &found) {
+            (Some(content), Ok(current)) if current == content => Action::InSync,
+            (Some(_), Ok(_)) => Action::Update,
             // A file that cannot be read is written again, whether it is
             // missing or holds something that is not text
-            Err(e) => {
+            (Some(_), Err(e)) => {
                 debug!("Cannot read {}: {e}", path.display());
                 if path.exists() {
                     Action::Update
@@ -799,6 +854,12 @@ impl Plan {
                     Action::Create
                 }
             }
+            (None, Ok(current)) if written.wrote(&files_key(root, &path), current.as_bytes()) => {
+                Action::Remove
+            }
+            // Missing already, or somebody else's: an edit, a file that was
+            // there before detc was, or one that cannot be read to tell
+            (None, _) => Action::InSync,
         };
 
         Ok(Change {
@@ -1107,6 +1168,114 @@ esac
         assert_eq!(plan.changes()[0].action(), Action::Update);
         apply(&mut plan)?;
         assert_eq!(fs::read_to_string(&target)?, "host\n");
+
+        Ok(())
+    }
+
+    /// Apply a plan and keep the record of what was written, the way a run
+    /// does, so that the next plan knows which files are detc's.
+    fn apply_and_record(root: &Path, plan: &mut Plan) -> TestResult {
+        apply(plan)?;
+        let mut written = written::Written::read(root)?;
+        written.record(root, plan);
+        written.write(root)
+    }
+
+    /// A template that writes a line only when `name` is set, and its header
+    /// with it, so that a node that set nothing gets nothing at all.
+    const SILENT: &str = "{% if name is defined %}# Written by detc\n{{ name }}\n{% endif %}\n";
+
+    #[test]
+    fn test_a_template_with_nothing_to_say_writes_nothing() -> TestResult {
+        let tmp_root = tempfile::tempdir()?;
+        let root = tmp_root.path();
+
+        template(root, "/etc/hostname", SILENT)?;
+        let target = root.join("etc/hostname");
+
+        let mut plan = build_plan(root)?;
+        assert!(plan.is_in_sync());
+        assert!(plan.changes()[0].instantiated().unwrap().content.is_none());
+
+        apply_and_record(root, &mut plan)?;
+        assert!(!target.exists());
+        assert!(!target.parent().unwrap().exists());
+
+        // And no digest is published, so a resource that reacts to the file
+        // leaves its property out rather than acting on a file that is not there
+        let var = var::Variables::from_system(root)?;
+        let published = Plan::publish(root, plan.changes(), &var)?;
+        assert_eq!(
+            published.value()[NAMESPACE][FILES],
+            Value::Object(Map::new())
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_a_template_that_falls_silent_takes_away_what_detc_wrote() -> TestResult {
+        let tmp_root = tempfile::tempdir()?;
+        let root = tmp_root.path();
+
+        template(root, "/etc/hostname", SILENT)?;
+        variable(root, "name: host\n")?;
+        let target = root.join("etc/hostname");
+
+        let mut plan = build_plan(root)?;
+        assert_eq!(plan.changes()[0].action(), Action::Create);
+        apply_and_record(root, &mut plan)?;
+        assert_eq!(fs::read_to_string(&target)?, "# Written by detc\nhost\n\n");
+
+        // The variable goes away, so the file detc wrote goes with it
+        variable(root, "{}\n")?;
+        let mut plan = build_plan(root)?;
+        assert_eq!(plan.changes()[0].action(), Action::Remove);
+        apply_and_record(root, &mut plan)?;
+        assert!(!target.exists());
+        assert_eq!(
+            written::Written::read(root)?.template_of("etc/hostname"),
+            None
+        );
+
+        // And the run after that has nothing to do
+        assert!(build_plan(root)?.is_in_sync());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_a_template_that_falls_silent_leaves_what_is_not_detcs() -> TestResult {
+        let tmp_root = tempfile::tempdir()?;
+        let root = tmp_root.path();
+
+        template(root, "/etc/hostname", SILENT)?;
+        let target = root.join("etc/hostname");
+
+        // A file that was there before detc was
+        fs::create_dir_all(target.parent().unwrap())?;
+        fs::write(&target, "distribution\n")?;
+        let mut plan = build_plan(root)?;
+        assert!(plan.is_in_sync());
+        apply_and_record(root, &mut plan)?;
+        assert_eq!(fs::read_to_string(&target)?, "distribution\n");
+
+        // And one that detc wrote and somebody edited afterwards, which stays
+        // in the record so that it can still be reported as an orphan
+        variable(root, "name: host\n")?;
+        apply_and_record(root, &mut build_plan(root)?)?;
+        fs::write(&target, "edited\n")?;
+
+        variable(root, "{}\n")?;
+        let mut plan = build_plan(root)?;
+        assert!(plan.is_in_sync());
+        apply_and_record(root, &mut plan)?;
+        assert_eq!(fs::read_to_string(&target)?, "edited\n");
+        assert!(
+            written::Written::read(root)?
+                .template_of("etc/hostname")
+                .is_some()
+        );
 
         Ok(())
     }

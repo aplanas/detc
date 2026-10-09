@@ -36,9 +36,9 @@ temporary file and renamed over the target, so a reader never sees half a file
 ### Write a drop-in, never the whole file
 
 Every template in the core set is a `60-detc` drop-in, and this is the single most important
-rule here.  A whole-file template *is* the file, so a rendering that came out empty empties the
-file — which on a node that set no variable means taking away what the distribution shipped, or
-taking a machine's hostname away from it.
+rule here.  A whole-file template *is* the file, so the first variable that is set replaces what
+the distribution shipped, and taking the variable away again takes the file with it — a
+machine's hostname or its locale gone, rather than given back.
 
 `examples/templates/etc/hostname` is a whole-file template, and that is exactly why it is in
 `examples/` and not installed.  Its header says so.
@@ -79,6 +79,48 @@ A list or a map does it with the loop instead, and needs no guard at all:
 An empty `sysctl` writes nothing.  This works because `variables/system.d/10-core.yaml`
 declares `sysctl: {}` — see [the empty parent](variables.md#the-empty-parent).
 
+### Write no file for a node that set nothing
+
+A rendering that is empty, or nothing but whitespace, is not written: a template with nothing
+to say declares that its file is not there (`src/apply.rs`).  No file is created for it, and a
+file that detc wrote in an earlier run is taken away — but only while it is still exactly what
+detc wrote, which `var/lib/detc/written.yaml` can tell.  A file somebody edited, or one that was
+there before detc was, is left alone.  No digest is published for it either, so a resource that
+reacts to it [leaves its property out](resources.md#leaving-the-property-out-when-there-is-no-digest)
+and restarts nothing.
+
+Guarding every directive is not enough on its own, because the header is not guarded: a
+template that renders its header and no directive writes a file that says nothing, on every
+node that configured nothing, and restarts whatever reads it.  So the whole template sits
+inside one condition on the variables it reads:
+
+```jinja
+{% if ssh -%}
+# Written by detc.  Do not edit: it is rewritten from
+# usr/share/detc/templates.d/etc/ssh/sshd_config.d/60-detc.conf on every run.
+{% if ssh.permit_root_login is defined %}PermitRootLogin {{ ssh.permit_root_login }}
+{% endif -%}
+{%- endif -%}
+```
+
+`ssh` is the empty parent of [the catalogue](variables.md#the-empty-parent), so it is an empty
+map, and false, until a leaf under it is set.  A list or a map that the template loops over
+is its own condition — `{% if sysctl -%}`, `{% if time.servers -%}` — and two of them are
+joined with `or`, as `templates/etc/sudoers.d/60-detc` does.  The `-%}` on the first line and
+both dashes on the last keep the output byte for byte what it was without them, and the line
+with the condition is skipped by `detc doc`, so the header under it is still what the template
+says about itself.
+
+Anything else that is in the file for the directives' sake goes inside the same condition: the
+`[Journal]` section header of `templates/etc/systemd/journald.conf.d/60-detc.conf` is the worked
+case.  A resource that exists for the file follows it too —
+`resources/path/etc/sudoers.d/60-detc` declares the file only while there is a group to write,
+and `ensure: absent` otherwise.
+
+Deciding by the bytes rather than by what they mean is deliberate.  A comment is spelled
+differently in every format and detc reads none of them; the template is the only thing that
+knows when it has nothing to say, so the template is where it is said.
+
 ### Strict undefined, and defaults one level at a time
 
 `a.b.c | default('')` still fails when `a.b` is missing: the chain is evaluated before the
@@ -98,7 +140,8 @@ For a variable the core set declares in `10-core.yaml`, the parent is guaranteed
 
 ### Say in the file that it is generated
 
-Every core template opens with the same two lines, in the comment syntax of the file it writes:
+Every file a core template writes opens with the same two lines, in the comment syntax of the
+file:
 
 ```
 # Written by detc.  Do not edit: it is rewritten from
@@ -136,7 +179,8 @@ group: root
 
 Read that file's header.  Fixing the mode *after* rendering leaves a window in which any local
 account could write itself a sudo rule; at order 10 the file is created empty with the right
-mode and the template then preserves it.
+mode and the template then preserves it.  With no group to write, the same resource declares
+the file absent, so a node that set nothing gets no sudoers drop-in at all.
 
 ### Keep the file stable
 

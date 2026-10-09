@@ -20,10 +20,11 @@
 # templates test `is defined` and never `is not none`.
 #
 # Some of the core templates are only in `examples/` and are not installed --
-# the ones for files that have no drop-in directory, where an empty rendering
-# would be a file emptied rather than a file that says nothing.  The variables
-# they read are documented here all the same, because this is the one page that
-# says what a node can be told.  Each of them says which template it needs.
+# the ones for files that have no drop-in directory, where setting a variable
+# replaces what the distribution shipped and unsetting it takes the file away
+# rather than giving that back.  The variables they read are documented here
+# all the same, because this is the one page that says what a node can be told.
+# Each of them says which template it needs.
 
 # OpenSSH, through `etc/ssh/sshd_config.d/60-detc.conf`.  The values are the
 # strings sshd itself uses, so the ones that read as booleans are `yes` and `no`

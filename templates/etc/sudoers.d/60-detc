@@ -1,3 +1,4 @@
+{% if sudo.groups or sudo.nopasswd_groups -%}
 # Written by detc.  Do not edit: it is rewritten from
 # usr/share/detc/templates.d/etc/sudoers.d/60-detc on every run.
 #
@@ -11,9 +12,10 @@
 # mode is never once wrong rather than being corrected afterwards.
 #
 # One line per group, written verbatim, so a group whose name needs quoting in
-# sudoers has to be given quoted.  Both lists empty writes only this comment
-# and grants nothing.
+# sudoers has to be given quoted.  Both lists empty writes no file at all, and
+# the resource then declares it absent, so nothing is granted.
 {% for group in sudo.groups %}%{{ group }} ALL=(ALL:ALL) ALL
 {% endfor -%}
 {% for group in sudo.nopasswd_groups %}%{{ group }} ALL=(ALL:ALL) NOPASSWD: ALL
 {% endfor -%}
+{%- endif -%}

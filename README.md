@@ -183,9 +183,17 @@ file with an empty value can be worse than not writing it at all.  Use
 above is: a knob nobody set writes no line, and `sshd` keeps whatever the
 distribution's own configuration says.
 
-An empty rendering is written as an empty file, so a template that has nothing
-to say still owns the file it names.  That is why every template of [the core
-set](#the-core-set) is a drop-in and never a whole file.
+A rendering that is empty, or nothing but whitespace, writes no file: a template
+with nothing to say declares that its file is not there.  No file is created for
+it, and one that detc wrote in an earlier run is taken away while it is still
+exactly what detc wrote — a file somebody edited, or one that was there before
+detc, is left alone.  That is what lets [the core set](#the-core-set), installed
+on a node that set nothing, write nothing at all, and it is why every core
+template puts its header inside the same condition as its directives.
+
+Every template of the core set is still a drop-in and never a whole file.  A
+whole-file template replaces what the distribution shipped as soon as one of
+its variables is set, and takes the file away when they are unset again.
 
 ## Resources and providers
 
@@ -634,8 +642,9 @@ of it:
 
 The document also carries `net`, `locale`, `console`, `time.timezone` and
 `motd`, which no core template reads: those name whole files rather than
-drop-ins, and a whole-file template on a node that set no variable would empty
-the file it names.  What writes them is in
+drop-ins, and a whole-file template replaces what the distribution shipped as
+soon as a variable is set, and takes the file away once it is unset.  What
+writes them is in
 [`examples/templates/`](examples/templates), to copy and adapt, and is not
 installed.
 
@@ -2401,10 +2410,10 @@ varlink resolves an interface over the wire, never on disk — so nothing at
 runtime opens it and nothing breaks when it is absent.
 
 `examples/` is not installed.  What is in it either shells out to a tool that is
-not on every distribution, is a whole-file template that would empty the file it
-names on a node that set no variable for it, or watches a file the core set
-ships no template for — all things to copy and adapt, and none a decision a
-package should make for a node.
+not on every distribution, is a whole-file template that would replace the file
+it names and take it away again once its variables are unset, or watches a file
+the core set ships no template for — all things to copy and adapt, and none a
+decision a package should make for a node.
 
 An openSUSE package is drafted in [`packaging/detc.spec`](packaging/detc.spec),
 and its `%install` is the `make install` above rather than a second copy of that

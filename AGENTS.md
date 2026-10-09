@@ -265,8 +265,9 @@ by leaving it for the next reader to re-diagnose.
 
 - shells out to a tool that is not on every distribution
   (`examples/probes/boot/10-bootctl`, `.../snapshot/10-snapper`), or
-- is a whole-file template, which would *empty* the file it names on a node that set no
-  variable for it (`examples/templates/etc/hostname`, `.../etc/motd`).
+- is a whole-file template, which *replaces* the file it names as soon as a variable is set,
+  and takes it away again once the variable is unset, rather than giving back what the
+  distribution shipped (`examples/templates/etc/hostname`, `.../etc/motd`).
 
 Both are things to copy and adapt, which is not something a package should decide for a node.
 The README states counts — "eight probes" — so growing the core set means changing the README

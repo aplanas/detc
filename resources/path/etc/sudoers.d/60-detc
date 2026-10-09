@@ -13,11 +13,17 @@
 # the file is made empty with the right mode first, and the template write
 # preserves the mode of a file that already exists, so it is never once wrong.
 #
-# That is also why `ensure: file` and not `absent`: it has to exist for the
-# mode to be on it.  An empty sudoers file grants nothing, and the template
-# fills it in the same run.
+# `ensure: file` only while there is a group to write, because the file has to
+# exist for the mode to be on it.  With both lists empty the template writes no
+# file at all, so this declares it absent: on a node that never set a group
+# that is what is already there, and nothing is written, and on one that took
+# its last group away the drop-in goes with it.  Declaring the file with no
+# group in it, as this used to, created an empty drop-in on every node that
+# had configured nothing.
 _order: 10
-ensure: file
+{% if sudo.groups or sudo.nopasswd_groups %}ensure: file
 mode: "0440"
 owner: root
 group: root
+{% else %}ensure: absent
+{% endif -%}

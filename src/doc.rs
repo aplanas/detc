@@ -12,7 +12,10 @@
 //! that is neither a comment nor blank — which is the line where the file stops
 //! describing itself and starts being a probe, a template or a declaration.  A
 //! shebang is not part of it: it says how a program is run and not what it
-//! does.
+//! does.  Neither is a line above the block that holds nothing but a template
+//! tag, which is where a template that writes nothing for a node that set
+//! nothing says so -- `{% if ssh -%}` decides whether there is a file at all,
+//! and the header under it is what the file says about itself when there is.
 //!
 //! The comment sign is `#`, and only `#`.  Every format the system uses has it
 //! — shell, YAML, TOML, and the configuration files that the templates write —
@@ -28,6 +31,10 @@ const COMMENT: char = '#';
 
 /// The interpreter line of a program, which is not documentation.
 const SHEBANG: &str = "#!";
+
+/// How a template statement opens and closes, for the line that decides
+/// whether a template writes anything at all.
+const TAG: (&str, &str) = ("{%", "%}");
 
 /// The documentation at the head of a file, or the reason there is none.
 pub fn header(path: impl AsRef<Path>) -> Result<String> {
@@ -62,6 +69,13 @@ pub fn extract(body: &str) -> Option<String> {
     let mut lines = body.lines().peekable();
 
     if lines.peek().is_some_and(|line| line.starts_with(SHEBANG)) {
+        lines.next();
+    }
+
+    while lines.peek().is_some_and(|line| {
+        let line = line.trim();
+        line.starts_with(TAG.0) && line.ends_with(TAG.1)
+    }) {
         lines.next();
     }
 
@@ -129,6 +143,22 @@ echo hello
 
         // And a program that says nothing but how it is run says nothing
         assert_eq!(extract("#!/bin/sh\nset -eu\n"), None);
+    }
+
+    /// The condition that decides whether a template writes a file is not what
+    /// the file says about itself, and neither is anything below the header.
+    #[test]
+    fn test_a_template_tag_above_the_header_is_not_part_of_it() {
+        let body =
+            "{% if ssh -%}\n# What this file is for.\n{% if ssh.x is defined %}X {{ ssh.x }}\n";
+
+        assert_eq!(
+            extract(body).expect("the template opens with a comment under its tag"),
+            "What this file is for.\n"
+        );
+
+        // And a tag with no comment under it is a template that says nothing
+        assert_eq!(extract("{% if ssh -%}\nX\n"), None);
     }
 
     /// A header is prose that somebody laid out, and it comes back the way they
