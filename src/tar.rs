@@ -315,11 +315,17 @@ mod tests {
     }
 
     /// Whether GNU tar is here to be read by and written for.
+    ///
+    /// Asked by name, because a `tar` is not necessarily that one: busybox
+    /// answers `--version` too, and has none of the GNU options these use.
     fn has_tar() -> bool {
-        let present = Command::new("tar").arg("--version").output().is_ok();
+        let present = Command::new("tar")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains("GNU tar"));
 
         if !present {
-            warn!("tar is not installed, so the interoperability is not checked here");
+            warn!("GNU tar is not installed, so the interoperability is not checked here");
         }
 
         present

@@ -789,7 +789,7 @@ fn test_a_provider_can_wait_for_the_run_it_is_part_of() -> TestResult {
              cat > /dev/null\n\
              lock=${DETC_RUN_LOCK:-}\n\
              if [ -z \"$lock\" ]; then saw=unset\n\
-             elif flock -w 0 \"$lock\" true 2>/dev/null; then saw=named-but-free\n\
+             elif flock -n \"$lock\" true 2>/dev/null; then saw=named-but-free\n\
              else saw=held\n\
              fi\n\
              printf '%s' \"$saw\" > \"$DETC_ROOT/saw\"\n\
@@ -812,10 +812,12 @@ fn test_a_provider_can_wait_for_the_run_it_is_part_of() -> TestResult {
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(fs::read_to_string(root.join("saw"))?.trim(), "held");
 
-    // And it is released when the run is over, or the reboot would never happen
+    // And it is released when the run is over, or the reboot would never happen.
+    // `-n` and not `-w 0`, which is GNU's alone: on busybox `-w` is an error,
+    // and an error here would read as a lock that is held
     assert!(
         std::process::Command::new("flock")
-            .args(["-w", "0"])
+            .arg("-n")
             .arg(root.join("var/lib/detc/run.lock"))
             .arg("true")
             .status()?

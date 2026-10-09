@@ -100,7 +100,31 @@ define uninstall-tree
 	done
 endef
 
-.PHONY: all build check clean install uninstall
+# The test suite again, on Alpine, where every shell tool is busybox and the
+# binary links against musl.  `tests/core.rs` runs the shipped probes and
+# providers end to end, so this is where a GNU-ism in an asset or a glibc
+# assumption in the binary shows up, rather than on the first node that is not
+# openSUSE.
+#
+# It builds inside the container, with Alpine's own toolchain, instead of
+# cross-compiling to musl from here: `ring` has C in it, and a native build is
+# the one that needs nothing installed on the machine running it but a
+# container engine.  The tree is mounted read only and the build goes to the
+# container's own `/tmp`, so a run leaves no root-owned files behind.  Not part
+# of `check`, because it needs the engine and the network.
+CONTAINER ?= podman
+ALPINE    ?= docker.io/library/alpine:latest
+
+# `build-base` is the C compiler `ring` needs, and `git` is what the journal
+# tests read their history back with
+ALPINE_PACKAGES = cargo rust build-base git
+
+# musl gives a new thread a much smaller stack than glibc does, and `rustc`
+# overflows it optimising the elliptic curve crates (`p521`) unless it is told
+# to ask for more.  The tests inherit it, which costs nothing.
+ALPINE_STACK = 16777216
+
+.PHONY: all build check check-alpine clean install uninstall
 
 all: build
 
@@ -111,6 +135,11 @@ check:
 	$(CARGO) fmt --check
 	$(CARGO) clippy --all-targets
 	$(CARGO) test
+
+check-alpine:
+	$(CONTAINER) run --rm -v "$(CURDIR):/src:ro,Z" -w /src \
+		-e CARGO_TARGET_DIR=/tmp/target -e RUST_MIN_STACK=$(ALPINE_STACK) $(ALPINE) \
+		sh -c 'apk add --quiet $(ALPINE_PACKAGES) && cargo test --no-fail-fast'
 
 clean:
 	$(CARGO) clean

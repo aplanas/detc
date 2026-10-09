@@ -162,9 +162,10 @@ pub(crate) fn alone() -> std::sync::MutexGuard<'static, ()> {
 /// [`std::fs::File::lock`] is `flock(2)`.
 #[cfg(test)]
 fn flock_can_take(path: &Path) -> std::io::Result<bool> {
+    // `-n` and not `-w 0`, which means the same and is GNU's alone: busybox
+    // has no `-w`, and this is the `flock` an Alpine provider would call
     Ok(std::process::Command::new("flock")
-        .arg("-w")
-        .arg("0")
+        .arg("-n")
         .arg(path)
         .arg("true")
         .status()?

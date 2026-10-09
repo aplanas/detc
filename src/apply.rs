@@ -1493,10 +1493,12 @@ esac
         // can say whether the file or what generates it changed
         assert_eq!(template, "new\n");
 
-        // Nothing can be written under a file, so this one fails
-        fs::set_permissions(root.join("etc"), fs::Permissions::from_mode(0o555))?;
+        // Nothing can be written under a file, so this one fails.  A file and
+        // not a directory without write permission, because root writes into
+        // one of those anyway, and the suite also runs as root in a container
+        fs::remove_dir_all(root.join("etc"))?;
+        fs::write(root.join("etc"), "")?;
         let failed = plan.changes_mut()[0].apply();
-        fs::set_permissions(root.join("etc"), fs::Permissions::from_mode(0o755))?;
         failed.expect_err("a file that cannot be written is reported");
 
         // The rendering never reached the system, so the history has to keep
