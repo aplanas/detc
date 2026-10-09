@@ -104,9 +104,15 @@ root=${DETC_ROOT:-/}
 
 # `shadow-utils` takes the tree to work on, and is told about it only when it is
 # not the running system.
+#
+# It is not on every system: busybox has `addgroup` instead, with other flags
+# and no way of changing a group afterwards.  So a missing program is said by
+# name rather than reached for, which on Alpine means installing `shadow`.
 shadow() {
     program=$1
     shift
+    command -v "$program" > /dev/null 2>&1 \
+        || fail "$program is not installed, and it comes with the shadow utilities"
     if [ "$root" = / ]; then
         "$program" "$@"
     else

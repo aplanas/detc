@@ -575,7 +575,7 @@ that built it.
 | `host` | `kernel`, `architecture` | `proc`, `uname` — the machine's |
 | `hardware` | `cpus`, `memory_kb` | `proc/cpuinfo`, `proc/meminfo` — the machine's |
 | `firmware` | `efi`, `secure_boot` | `sys/firmware/efi` — the machine's |
-| `pkg` | `manager` | which of `zypper`, `dnf`, `apt-get` is in the tree |
+| `pkg` | `manager` | which of `zypper`, `dnf`, `apt-get`, `apk` is in the tree |
 | `net` | `interfaces` | `ip -j addr show` — the machine's |
 | `disk` | `devices` | `lsblk -J` — the machine's |
 | `virt` | `container`, `vm` | `systemd-detect-virt` — the machine's |
@@ -591,7 +591,7 @@ provider still refuses `active` for a tree.
 passed through unchanged: the shape belongs to `ip` and to `lsblk`, and a probe
 that reshaped it would be one more thing to keep in step with them.
 
-`pkg.manager` is what makes "openSUSE first, the rest pluggable" real —
+`pkg.manager` is what makes one core set work on more than one distribution —
 the `pkg` and `repo` providers branch on which manager the tree has, and so can
 a fleet's templates.
 
@@ -611,6 +611,19 @@ single file that a fleet replaces by dropping its own into a prefix above.
 | [`path`](providers/path) | 60 | `ensure`, `mode`, `owner`, `group`, `target` |
 | [`unit`](providers/unit) | 70 | `enabled`, `active`, `masked`, `config` |
 | [`reboot`](providers/reboot) | 90 | `when` |
+
+Every one of them runs on a busybox `sh` and `awk`.  What they need beyond that
+is the tool that does the work, and a provider whose tool is missing says so by
+name and refuses, rather than reporting a state it could not ask about:
+
+| Type | Needs |
+| --- | --- |
+| `noop`, `path`, `authorized_key` | nothing more |
+| `pkg` | `zypper` and `rpm`, `dnf` and `rpm`, `apt-get` and `dpkg-query`, or `apk` |
+| `repo` | `zypper` or `dnf` |
+| `group`, `user` | the shadow utilities (`groupadd`, `useradd`, `usermod` …) — the `shadow` package on Alpine, where busybox has only `adduser` |
+| `unit` | `systemctl` |
+| `reboot` | `flock`, and `systemd-run` or `setsid` with `reboot` |
 
 A package that is not installed is reported as `installed: false`, and an
 account that does not exist as `present: false`, rather than as an absent

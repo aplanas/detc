@@ -8,12 +8,13 @@
 # prefix mask the one that does not apply, or reads `pkg.manager` and
 # declares the name that goes with it.
 #
-# `zypper`, `dnf` and `apt-get` are driven the same way, and all three are asked
-# for their non interactive mode: there is nobody at the terminal, and a
-# provider that stopped to ask a question would hang the run instead of failing
-# it.  A root that is not `/` is handed to the manager as the tree to install
-# into, which is what builds an image; `apt-get` has no usable equivalent and
-# says so rather than installing into the machine doing the building.
+# `zypper`, `dnf`, `apt-get` and `apk` are driven the same way, and the first
+# three are asked for their non interactive mode: there is nobody at the
+# terminal, and a provider that stopped to ask a question would hang the run
+# instead of failing it.  `apk` never asks.  A root that is not `/` is handed to
+# the manager as the tree to install into, which is what builds an image;
+# `apt-get` has no usable equivalent and says so rather than installing into
+# the machine doing the building.
 #
 # A package that is not in the system is reported as `installed: false` and not
 # as an absent resource, because `installed: false` is a state a declaration can
@@ -146,14 +147,29 @@ dnf_() {
     fi
 }
 
+apk_() {
+    if [ "$root" = / ]; then apk "$@"; else apk --root "$root" "$@"; fi
+}
+
+# Whether the tree has the program, wherever its distribution puts it: `apk` is
+# in `/sbin` on Alpine, and the others are in `/usr/bin`.
+has() {
+    for dir in usr/bin usr/sbin bin sbin; do
+        [ ! -x "$root/$dir/$1" ] || return 0
+    done
+    return 1
+}
+
 # A tree is only recognised as having a manager when the program is in it, so a
 # root that holds no distribution is reported as such instead of being managed
-# with the tools of the machine that is looking at it.
+# with the tools of the machine that is looking at it.  The order is the probe's.
 manager=
-if [ -x "$root/usr/bin/zypper" ]; then manager=zypper
-elif [ -x "$root/usr/bin/dnf" ]; then manager=dnf
-elif [ -x "$root/usr/bin/apt-get" ]; then manager=apt-get
-fi
+for candidate in zypper dnf apt-get apk; do
+    if has "$candidate"; then
+        manager=$candidate
+        break
+    fi
+done
 
 case "${1-}" in
   schema)
@@ -189,6 +205,16 @@ EOF
         # shellcheck disable=SC2016
         version=$(dpkg_query_ -W -f '${Version}' "$name" 2>/dev/null) || version=
         ;;
+      apk)
+        # `apk list` prints `name-version arch {origin} ...`, and a version
+        # always starts with a digit, which is what tells `foo-1.0-r0` from a
+        # package called `foo-doc`
+        version=$(apk_ list --installed "$name" 2>/dev/null | awk -v n="$name-" '
+            index($1, n) == 1 && substr($1, length(n) + 1, 1) ~ /[0-9]/ {
+                print substr($1, length(n) + 1)
+                exit
+            }') || version=
+        ;;
     esac
 
     if [ -n "$version" ]; then
@@ -217,10 +243,9 @@ $(printf '%s' "$request" | desired)
 EOF
 
     # A version pins the package, so what the manager is given is the argument
-    # that names it exactly.  Only the separator differs between the two
-    # families
+    # that names it exactly.  Only the separator differs between the families
     case "$manager" in
-      apt-get) target=${version:+$name=$version} ;;
+      apt-get|apk) target=${version:+$name=$version} ;;
       *) target=${version:+$name-$version} ;;
     esac
     target=${target:-$name}
@@ -245,6 +270,12 @@ EOF
         case "$installed" in
           true) apt-get --yes --no-install-recommends install "$target" ;;
           *) apt-get --yes remove "$name" ;;
+        esac
+        ;;
+      apk)
+        case "$installed" in
+          true) apk_ add "$target" ;;
+          *) apk_ del "$name" ;;
         esac
         ;;
     esac

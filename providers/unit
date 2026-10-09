@@ -150,6 +150,15 @@ root=${DETC_ROOT:-/}
 live=false
 [ "$root" != / ] || live=true
 
+# A system without systemd has no unit to report on, and `systemctl` missing is
+# not the same as a unit that is disabled and stopped -- answering that would be
+# inventing a state.  So it is asked for before anything is, in the verbs that
+# need it, and never from inside a substitution, where a failure is swallowed.
+need_systemctl() {
+    command -v systemctl > /dev/null 2>&1 \
+        || fail "systemctl is not installed, so there is no unit to manage in $root"
+}
+
 systemctl_() {
     if [ "$live" = true ]; then
         systemctl "$@"
@@ -203,6 +212,7 @@ EOF
     request=$(cat)
     name=$(printf '%s' "$request" | name_of)
     [ -n "$name" ] || fail "the request does not name a unit"
+    need_systemctl
 
     state=$(systemctl_ is-enabled "$name" 2>/dev/null) || true
 
@@ -248,6 +258,7 @@ EOF
     request=$(cat)
     name=$(printf '%s' "$request" | name_of)
     [ -n "$name" ] || fail "the request does not name a unit"
+    need_systemctl
 
     enabled=
     active=

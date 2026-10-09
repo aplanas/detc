@@ -72,7 +72,7 @@ resources, templates and variables, and examples of them.
 Summary:        Core probes, providers, templates and resources for detc
 Requires:       %{name}-core = %{version}
 Requires:       coreutils
-Requires:       gawk
+Requires:       /usr/bin/awk
 Requires:       sed
 Requires:       util-linux
 Recommends:     dmidecode

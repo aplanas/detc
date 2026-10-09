@@ -132,9 +132,15 @@ yaml_list() {
 
 root=${DETC_ROOT:-/}
 
+# `shadow-utils` takes the tree to work on, and is told about it only when it is
+# not the running system.  Busybox has `adduser` instead, with other flags and
+# no `usermod` at all, so a missing program is said by name rather than reached
+# for, which on Alpine means installing `shadow`.
 shadow() {
     program=$1
     shift
+    command -v "$program" > /dev/null 2>&1 \
+        || fail "$program is not installed, and it comes with the shadow utilities"
     if [ "$root" = / ]; then
         "$program" "$@"
     else
